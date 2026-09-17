@@ -1,123 +1,95 @@
 <div align="center">
 
-# 🧠 MemCore
+  <h1>🧠 MemCore</h1>
+  <p><strong>Governed, local-first memory for multi-agent Hermes workflows</strong></p>
+  <p><em>Capture broadly. Recall narrowly. Never trust raw history.</em></p>
 
-### Governed, local-first memory for multi-agent Hermes workflows
+  <p>
+    <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_Start-CLI-0284c7?style=for-the-badge" alt="Quick Start" /></a>
+    <a href="https://github.com/ChokechaiXD/MemCore/releases"><img src="https://img.shields.io/badge/Release-v0.6.0-10b981?style=for-the-badge" alt="Version 0.6.0" /></a>
+    <a href="https://github.com/NousResearch/hermes-agent"><img src="https://img.shields.io/badge/Hermes-Native_Provider-7B61FF?style=for-the-badge" alt="Hermes Provider" /></a>
+  </p>
 
-**Persistent memory without turning raw conversation history into trusted truth.**
-
-[![Status](https://img.shields.io/badge/status-active-success?style=for-the-badge)](https://github.com/ChokechaiXD/MemCore)
-[![Tests](https://img.shields.io/badge/tests-208%20%7C%20gate%20OK-brightgreen?style=for-the-badge)](https://github.com/ChokechaiXD/MemCore)
-[![SQLite](https://img.shields.io/badge/storage-SQLite%20%7C%20WAL%20%7C%20FTS5-07405E?style=for-the-badge&logo=sqlite&logoColor=white)](https://sqlite.org/)
-[![Hermes](https://img.shields.io/badge/Hermes-native%20provider-7B61FF?style=for-the-badge)](https://github.com/NousResearch/hermes-agent)
-
-[Why MemCore](#-why-memcore) · [Architecture](#-architecture) · [Quick Start](#-quick-start) · [Safety Model](#-safety--governance) · [CLI](#-operational-cli)
+  <p>
+    <img src="https://img.shields.io/badge/Storage-SQLite_·_WAL_·_FTS5-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
+    <img src="https://img.shields.io/badge/Dependencies-Stdlib_Only-success?style=flat-square" alt="Stdlib only" />
+    <img src="https://img.shields.io/badge/Daemon-None-blue?style=flat-square" alt="Daemonless" />
+    <img src="https://img.shields.io/badge/Tests-243_·_Gate_OK-brightgreen?style=flat-square" alt="Tests" />
+  </p>
 
 </div>
 
 ---
 
-## ✨ What is MemCore?
+## 🌟 Why MemCore?
 
-MemCore is a **daemonless, local-first memory engine** designed for Hermes profiles and multi-agent projects.
+Most agent memory stores record everything and trust everything. Raw chat history, tool output, and delegated results become "memory" that resurfaces later with the same authority as a user's explicit decision — and a wrong memory is worse than no memory.
 
-Instead of treating every conversation, tool write, or delegated result as trusted memory, MemCore separates **what happened** from **what should be remembered**.
+**MemCore is built completely different:**
 
-Raw Hermes activity first enters an append-only journal. Only governed, canonical memories are eligible for recall.
+- 🗄️ **Two lanes, different trust** — raw activity enters an append-only journal; only governed canonical memory is eligible for recall. Raw rows are never injected into prompts.
+- 🛡️ **Governance lives in the engine** — scope, lifecycle, verification, and tombstones are enforced in SQL, not delegated to a model's good intentions.
+- 🧬 **Corrections never rewrite history** — supersede creates an immutable new version; rejected claims leave tombstones that block silent resurrection.
+- ⚡ **Daemonless & local-first** — one SQLite file with WAL + FTS5. No background service, no vector database, no hidden reconciliation worker.
+- 🧪 **Fail closed** — ambiguous mutations stay pending; unmatched replace/remove targets are never guessed.
 
-```text
-Hermes activity
-      │
-      ▼
-┌──────────────────────┐
-│  Raw ingest journal  │  ← append-only, never recalled directly
-└──────────┬───────────┘
-           │ deterministic gate / semantic review
-           ▼
-┌──────────────────────┐
-│ Governed MemCore     │  ← private/project scope + lifecycle + provenance
-│ canonical memory     │
-└──────────┬───────────┘
-           │
-           ▼
-      Safe recall
-```
+## 📊 Feature Comparison
 
-> **Core principle:** capture broadly, recall narrowly.
+| Capability | Typical agent memory | "Just dump it in the DB" stores | 🧠 **MemCore** |
+| :--- | :---: | :---: | :---: |
+| **Raw chat as truth** | ❌ Everything is recallable | ⚠️ Mixed with real facts | ✅ **Journal never recalled directly** |
+| **Cross-agent leakage** | ❌ Shared soup | ⚠️ Weak scoping | ✅ **Membership enforced in SQL** |
+| **Deleted facts returning** | ❌ Common | ❌ No resurrection guard | ✅ **Scope-aware tombstones** |
+| **Corrections destroying history** | ❌ Overwrite in place | ⚠️ Versioned, untrusted | ✅ **Immutable versions + supersede** |
+| **LLM self-promotion** | ❌ Analyzer picks scope/lifecycle | ❌ N/A | ✅ **remember → private candidate only** |
+| **Trust labels on recall** | ❌ None | ⚠️ Partial | ✅ **scope · lifecycle · verification · freshness per item** |
+| **Recall relevance** | ⚠️ Recency-first | ❌ Pin stuffing | ✅ **Critical pins only + ranked hits** |
+| **External services** | ❌ Vector DB + daemon | ⚠️ Varies | ✅ **Zero — SQLite + stdlib** |
 
----
-
-## 🎯 Why MemCore?
-
-Agent memory becomes risky when storage and trust are treated as the same thing.
-
-MemCore is built around a different model:
-
-| Problem | MemCore approach |
-|---|---|
-| Raw chat gets mistaken for durable truth | Raw events live in a separate ingest journal |
-| One agent can leak memory into another | Project membership and private ownership are enforced in SQL |
-| Deleted facts silently come back | Scope-aware tombstones block resurrection |
-| Corrections destroy history | Immutable versions + supersede preserve history |
-| LLM analysis can overreach | Semantic analyzers may only `remember`, `ignore`, or `defer` |
-| Candidate memory looks authoritative | Recall exposes lifecycle, verification, freshness, and scope |
-| Memory requires another service | SQLite + WAL + FTS5; no background daemon required |
-
----
-
-## 🧩 Architecture
+## 🚀 Key Modules & Architecture
 
 ```mermaid
-flowchart TD
-    H[Hermes Agent] -->|turn / memory write / delegation| J[(Ingest Journal)]
-
+graph TD
+    H[Hermes Agent] -->|turn · memory write · delegation| J[(Raw Ingest Journal)]
     J --> D{Deterministic Gate}
-    D -->|explicit durable signal| C[Private Candidate]
+    D -->|explicit durable signal| PC[Private Candidate]
     D -->|trivial / failed upstream| I[Ignored]
     D -->|ambiguous| Q[Semantic Review Queue]
-
     Q --> A{External Analyzer}
     A -->|remember| G[Governed Admission]
     A -->|ignore| I
     A -->|defer| Q
-
     G --> T{Tombstone / Duplicate Checks}
     T -->|allowed| M[(Canonical Memory)]
-    T -->|duplicate| L[Link Existing Memory]
     T -->|blocked| B[Admission Blocked]
-
-    M --> R[Hermes Recall]
+    M --> R[Safe Recall · critical pins + ranked hits]
 ```
 
-### Two lanes, different trust
+### 1. 🗄️ Governed canonical memory
+* **Project / private scope** with membership checks at every read and write boundary.
+* **Immutable version chain** — supersede appends history instead of rewriting truth.
+* **Tombstone guards** — rejected or corrected claims cannot resurface, even by replay.
+* **Trust labels on every recalled line**: `[project | accepted | source_backed | current]`.
 
-**Raw lane**
-- turns
-- built-in Hermes memory writes
-- delegation results
-- session/manual events
-- semantic review history
+### 2. 📥 Raw ingest journal
+* Every turn, built-in memory write, and delegation is journaled **before** any analysis.
+* Deterministic gate admits explicit durable signals, ignores greetings/acks/probe text, and queues the ambiguous rest.
+* Raw rows are never recalled directly — the journal is a source of record, not a prompt.
 
-Raw journal rows are **never injected directly into recall**.
+### 3. 🔬 Governed semantic review
+* Optional host-LLM side call (`ctx.llm.complete_structured`) with a strict verdict schema: `remember / ignore / defer` only.
+* Analyzers **cannot** choose scope, lifecycle, or verification — attempts are rejected and the event stays pending.
+* Bounded batches with a failure circuit breaker; provider outages never become memory-provider failures.
+* Trivial turns (greetings, standalone `test`, acknowledgements) never reach the LLM at all.
 
-**Canonical lane**
-- project/private scope
-- immutable versions
-- lifecycle state
-- verification state
-- freshness state
-- audit events
-- tombstone protection
-
-Only this lane participates in normal memory recall.
+### 4. 🛡️ Recall that respects the budget
+* Only **critical** pins bypass query relevance; ordinary pins compete in ranked hits.
+* Oversized facts are skipped whole — never clipped mid-negation.
+* The rendered block is hard-capped at the configured character budget, header included.
 
 ---
 
 ## 🛡️ Safety & governance
-
-MemCore keeps policy enforcement inside the engine rather than trusting an analyzer or provider adapter to behave correctly.
-
-### Memory lifecycle
 
 ```text
 candidate ──► accepted
@@ -138,88 +110,29 @@ accepted/conflict/candidate ──► superseded ──► new immutable version
 - **Cross-project mutation is blocked**, even when a memory ID is known.
 - **Rejected and corrected claims create tombstones** to prevent silent resurrection.
 - **Supersede preserves history** instead of rewriting old truth in place.
-- **Deactivate/restore is reversible** and restores the prior lifecycle correctly.
 - **Search returns only current versions** while historical versions remain queryable.
 - **Semantic analyzers do not control trust**: `remember` can create only a private `candidate`.
-- **Ambiguous Hermes replace/remove operations do not use fuzzy matching** in MemCore; unresolved mutations stay pending instead of risking the wrong target.
+- **Ambiguous Hermes replace/remove operations never use fuzzy matching** — unresolved mutations stay pending instead of risking the wrong target.
 
 ---
 
-## 🔬 Semantic review
-
-Schema revision `0009_semantic_analysis` adds an auditable review boundary for ambiguous journal events. Migration `0010_performance_fast_paths` adds indexed current-claim fingerprints, a partial semantic-review queue index, and runtime connection fast paths without changing governance semantics.
-
-An external analyzer receives only an event awaiting semantic review and can return one of three verdicts:
-
-```text
-remember → create/link a private candidate under MemCore governance
-ignore   → close the event without creating memory
-defer    → leave the event pending for later review
-```
-
-`memcore.semantic.analyze_pending_events(...)` is the provider-agnostic automatic
-adapter. It accepts any callable or object exposing `analyze(event)`, labels raw
-journal text as untrusted historical data, validates a strict result schema, and
-routes every successful verdict through `ingest.apply_semantic_analysis()`.
-
-Analyzer output may contain only `verdict`, `candidate_content`, `confidence`,
-`rationale`, and analyzer metadata. Attempts to control `scope`, `lifecycle`,
-`project_id`, `memory_type`, verification, freshness, or other governance fields
-are rejected and leave the event pending. Provider failures can be isolated per
-event so a bounded batch continues without losing raw journal data.
-
-Each semantic decision can retain:
-
-- analyzer identity
-- candidate content
-- confidence
-- rationale
-- metadata
-- linked memory ID
-- timestamp
-
-The raw event remains the source record; semantic analysis produces a **derived decision**, not a rewrite of history.
-
----
-
-## 🔌 Hermes integration
-
-MemCore runs as a native `MemCoreMemoryProvider` using:
+## 🧩 Hermes integration
 
 ```yaml
 memory:
   provider: memcore
 ```
 
-The provider supports:
-
 | Capability | Behavior |
 |---|---|
-| Prefetch | Recalls only canonical governed memory |
+| Prefetch | Recalls only canonical governed memory, critical pins + ranked hits |
 | Turn sync | Journals the raw turn before analysis |
-| Built-in memory add | Mirrors into a private candidate |
-| Built-in memory replace | Exact-origin target only; supersedes safely |
-| Built-in memory remove | Rejects + tombstones the exact mirrored claim |
-| Delegation | Captures raw delegation context without automatic recall |
-| Semantic queue | Exposes only owner-scoped pending review events |
-| Automatic semantic review | Optional bounded Hermes host-LLM side call; never enters the agent/tool loop |
+| Built-in add / replace / remove | Mirrors, exact-origin supersede, reject + tombstone |
+| Delegation | Captures raw context without automatic recall |
+| Semantic queue | Owner-scoped pending review events only |
+| Automatic semantic review | Opt-in bounded host-LLM side call; never enters the tool loop |
 
-Recall output retains per-item trust labels such as:
-
-```text
-[project | accepted | source_backed | current] ...
-[private | candidate | unverified | current] ...
-```
-
-This prevents an outer prompt wrapper from accidentally making tentative memory appear authoritative.
-
-When `semantic.auto_review.enabled: true`, the Hermes integration uses the host-owned
-`ctx.llm.complete_structured()` side-call surface to review a bounded number of new
-`semantic_review_required` events on the existing background memory-sync worker. The
-call does not enter the agent conversation or tool loop, so it cannot recursively
-create another MemCore turn. Low-confidence `remember` proposals are downgraded to
-`defer`, deferred events are left for explicit review, and provider failures leave the
-raw journal event pending.
+When `semantic.auto_review.enabled: true`, a bounded number of new `semantic_review_required` events are reviewed per turn on Hermes' background memory-sync worker. Low-confidence `remember` proposals downgrade to `defer`; failures leave the raw event pending.
 
 ---
 
@@ -239,22 +152,21 @@ python -m memcore doctor
 python -m memcore stats
 ```
 
-MemCore uses Python's standard library for the core engine and stores data locally in SQLite.
-
 ### 3. Run the full test suite
 
 ```powershell
-python -m unittest discover -v
+python -m harness
+python -m unittest discover -s integrations/hermes/memcore/tests -v
 ```
 
 Current gate:
 
 ```text
-202 tests
-OK (expected failures=2)
+243 tests  →  OK (expected failures=2)
+102 integration tests  →  OK
 ```
 
-The two expected failures are the E12 core token-budget evaluation pair. Prompt-size enforcement belongs to the Hermes provider recall builder and is covered by the plugin's own regression tests.
+The two expected failures are the legacy E12 token-budget evaluations, which join unbounded rows manually instead of calling the recall builder; the production builder is covered by its own regression tests.
 
 ---
 
@@ -265,50 +177,22 @@ The two expected failures are the E12 core token-budget evaluation pair. Prompt-
 python -m memcore doctor
 python -m memcore stats
 
-# Content-free journal health (optionally scoped)
+# Content-free journal health
 python -m memcore journal-stats
-python -m memcore journal-stats --project shared-platform --agent mika
-
-# Semantic review queue — raw content is redacted by default
 python -m memcore journal-review-list --project shared-platform --agent mika
-python -m memcore journal-review-list --project shared-platform --agent mika --show-content
-
-# Apply a governed semantic verdict
 python -m memcore journal-review-decide <event_id> --agent mika --verdict defer --rationale "need more context"
-python -m memcore journal-review-decide <event_id> --agent mika --verdict remember --content "durable claim" --confidence 0.9
-
-# Inspect semantic decision history
-python -m memcore journal-analysis-history <event_id> --agent mika
 
 # Garbage collection — dry-run by default
 python -m memcore gc
 python -m memcore gc --apply
 
-# Restore a reversibly disabled memory
-python -m memcore restore <memory_id> --agent mika
-
-# Explicitly override a tombstone (owner-audited)
-python -m memcore tombstone override <tombstone_id> --agent pchoke
-
 # Preview an import with zero domain writes
 python -m memcore import --file batch.json --agent mika --project shared-platform --dry-run
-
-# Apply the import
-python -m memcore import --file batch.json --agent mika --project shared-platform
 ```
 
-### Journal operations
-
-`journal-stats` is safe for routine observability because it returns aggregate metadata only: status counts, pending decisions, event types, semantic-review backlog, unresolved built-in mutations, oldest pending age, and semantic verdict distribution. It does **not** query raw prompt or candidate content.
-
-`journal-review-list` keeps raw journal text redacted unless `--show-content` is explicitly supplied. Revealed journal text must be treated as untrusted historical data, never as instructions to execute.
-
-`journal-review-decide` preserves the governance boundary: a `remember` verdict can create only a private candidate owned by the event agent. The analyzer cannot choose project scope or accepted lifecycle.
+`journal-stats` aggregates metadata only — no raw prompt or candidate content. `journal-review-list` keeps raw text redacted unless `--show-content` is explicit, and revealed text is untrusted historical data.
 
 ### Hermes plugin deployment
-
-The native Hermes integration is tracked in Git under `integrations/hermes/memcore/`.
-The installed copy in the Hermes plugin directory is treated as a deploy artifact.
 
 ```powershell
 python scripts/deploy_hermes_plugin.py --dry-run
@@ -316,32 +200,7 @@ python scripts/deploy_hermes_plugin.py
 python scripts/deploy_hermes_plugin.py --check
 ```
 
-Deployment uses an explicit runtime allowlist and SHA-256 verification, so tests,
-`__pycache__`, and unrelated files are never copied into the live plugin.
-
-### GC behavior
-
-`gc` is conservative by design.
-
-- Dry-run is the default.
-- Old, unevidenced candidates may be **disabled reversibly**.
-- Age-based GC never rejects memories and never creates tombstones.
-- Active tombstones persist until explicit override.
-- Only old, already-overridden tombstones are eligible for purge.
-
-### Import behavior
-
-`import --dry-run` validates the entire batch while performing **zero domain writes**.
-
-It reports:
-
-- within-batch duplicates
-- previously imported claims
-- existing equivalent claims
-- tombstone blocks
-- validation errors
-
-Real imports are idempotent and each memory plus its evidence links commits atomically as one item.
+Deployment uses an explicit runtime allowlist with SHA-256 verification, so tests, `__pycache__`, and unrelated files never reach the live plugin.
 
 ---
 
@@ -352,80 +211,41 @@ MemCore/
 ├── memcore/
 │   ├── core.py              # memory lifecycle, search, GC, import, governance
 │   ├── ingest.py            # raw journal, mutation bridge, semantic review
-│   ├── semantic.py          # provider-agnostic automatic analyzer adapter
+│   ├── semantic.py          # provider-agnostic analyzer adapter
 │   ├── store.py             # SQLite/WAL configuration and migrations
 │   └── __main__.py          # operational CLI + doctor
-│
-├── schema/
-│   └── schema.sql           # frozen initial schema contract
-│
-├── fixtures/
-│   └── fixtures.py          # deterministic evaluation data
-│
-├── harness/
-│   ├── test_core.py
-│   ├── test_ingest.py
-│   ├── test_semantic_analysis.py
-│   ├── test_semantic_adapter.py
-│   ├── test_journal_cli.py
-│   ├── test_hermes_plugin_source.py
-│   ├── test_evaluations.py
-│   └── test_cli.py
-│
-├── integrations/
-│   └── hermes/memcore/      # Git source of truth for native provider + UI + tests
-│
-└── scripts/
-    ├── deploy_hermes_plugin.py
-    ├── bench_search.py
-    └── setup_*_scratch.py
+├── schema/schema.sql        # frozen initial schema contract
+├── fixtures/fixtures.py     # deterministic evaluation data
+├── harness/                 # engine + CLI + evaluation suites
+├── integrations/hermes/     # Git source of truth for the native provider
+└── scripts/                 # deployer, benchmarks, scratch builders
 ```
 
 ---
 
 ## 🗃️ Storage model
 
-MemCore uses one SQLite database with:
+One SQLite database with **WAL** for concurrent readers/writers, **FTS5** for full-text recall, immutable version history, scoped tombstones, audit events, idempotency keys, ingest events, and semantic analysis records.
 
-- **WAL mode** for concurrent readers/writers
-- **FTS5** for local full-text recall
-- immutable `memory_version` history
-- scoped tombstones
-- audit events
-- idempotency keys
-- ingest events and derivations
-- semantic analysis records
+No mandatory vector database. No memory daemon. No hidden background reconciliation service.
 
-There is no mandatory vector database, no memory daemon, and no hidden background reconciliation service.
-
-Current migration head:
-
-```text
-0010_performance_fast_paths
-```
+Current migration head: `0013_current_version_ownership`
 
 ---
 
-## 🧪 Current project status
+## 🧪 Project status
 
 | Area | Status |
 |---|---|
-| Core memory engine | ✅ Implemented |
-| SQLite migrations | ✅ Implemented |
-| FTS recall | ✅ Implemented |
-| Private/project isolation | ✅ Implemented |
+| Core memory engine · migrations · FTS recall | ✅ Implemented |
+| Private/project isolation + tombstone guards | ✅ Implemented |
 | Immutable correction history | ✅ Implemented |
-| Tombstone resurrection guard | ✅ Implemented |
 | GC / import / doctor CLI | ✅ Implemented |
-| Native Hermes provider | ✅ Implemented |
-| Git-tracked Hermes plugin + verified deployer | ✅ Implemented |
-| Hermes add/replace/remove bridge | ✅ Implemented |
-| Raw ingest journal | ✅ Implemented |
-| Governed semantic review boundary | ✅ Implemented |
-| Journal operations / health CLI | ✅ Implemented |
-| Provider-agnostic automatic semantic analyzer adapter | ✅ Implemented |
-| Hermes host-LLM automatic semantic review | ✅ Implemented (opt-in) |
-| Indexed runtime performance fast paths + reviewer circuit breaker | ✅ Implemented |
+| Native Hermes provider + verified deployer | ✅ Implemented |
+| Raw ingest journal + governed semantic review | ✅ Implemented |
+| Automatic host-LLM semantic review (opt-in) | ✅ Implemented |
+| Indexed runtime fast paths + circuit breaker | ✅ Implemented |
+| Critical-pin recall budget | ✅ Implemented |
 
 ---
 

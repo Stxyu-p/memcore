@@ -93,12 +93,13 @@ class HermesSemanticAnalyzer:
     def analyze(self, event):
         payload = self._bounded_payload(event)
         result = self._llm.complete_structured(
-            instructions=_ANALYSIS_INSTRUCTIONS,
+            instructions=_ANALYSIS_INSTRUCTIONS + '\nJSON schema:\n' + json.dumps(SEMANTIC_VERDICT_SCHEMA),
             input=[{
                 'type': 'text',
                 'text': json.dumps(payload, ensure_ascii=False, sort_keys=True),
             }],
-            json_schema=SEMANTIC_VERDICT_SCHEMA,
+            # JSON mode works on schema-blind providers; validate locally below.
+            json_mode=True,
             schema_name='memcore.semantic_verdict',
             temperature=0.0,
             max_tokens=self._max_tokens,
@@ -112,6 +113,10 @@ class HermesSemanticAnalyzer:
                 'Hermes semantic analyzer returned no validated object'
                 + (f': {raw[:240]}' if raw else '')
             )
+
+        # Fail closed if validation is unavailable or the model adds governance fields.
+        from jsonschema import validate
+        validate(parsed, SEMANTIC_VERDICT_SCHEMA)
 
         verdict = str(parsed.get('verdict') or '').strip().lower()
         candidate = parsed.get('candidate_content')

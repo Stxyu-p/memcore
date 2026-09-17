@@ -100,6 +100,31 @@ class NativeProviderTest(unittest.TestCase):
         agent_plugin.reset_conn()
         self.tmp.cleanup()
 
+    def test_semantic_json_mode_validates_locally(self):
+        from semantic_analyzer import HermesSemanticAnalyzer
+        from jsonschema import ValidationError
+        llm = FakePluginLlm()
+        analyzer = HermesSemanticAnalyzer(llm)
+        self.assertEqual(analyzer.analyze({})['verdict'], 'ignore')
+        self.assertTrue(llm.calls[-1].get('json_mode'))
+        self.assertNotIn('json_schema', llm.calls[-1])
+        llm.parsed['scope'] = 'project'
+        with self.assertRaises(ValidationError):
+            analyzer.analyze({})
+
+    def test_review_tools_route_when_registered_before_initialize(self):
+        from agent.memory_manager import MemoryManager
+        p = MemCoreMemoryProvider()
+        p._load_config = lambda: config_for(self.db)
+        manager = MemoryManager()
+        manager.add_provider(p)
+        manager.initialize_all('session-routing', hermes_home=self.tmp.name,
+                               platform='cli', agent_identity='alice')
+        self.assertTrue(manager.has_tool('memory_review_queue'))
+        result = json.loads(manager.handle_tool_call('memory_review_queue', {'limit': 1}))
+        self.assertTrue(result['success'])
+        self.assertEqual(result['events'], [])
+
     def test_provider_contract_and_tools(self):
         p = self.provider()
         self.assertEqual(p.name, 'memcore')

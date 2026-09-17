@@ -174,7 +174,8 @@ class TestRegistrationBridge(unittest.TestCase):
             self.assertIs(ctx.provider._plugin_llm, ctx.llm)
             self.assertEqual(ctx.hooks, [])
             self.assertEqual(ctx.tools, [])
-            self.assertEqual(len(ctx.provider.get_tool_schemas()), 6)
+            self.assertIn('memory_review_queue',
+                          {s['name'] for s in ctx.provider.get_tool_schemas()})
         finally:
             sys.modules.pop(spec.name, None)
 

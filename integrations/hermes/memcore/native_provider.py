@@ -389,10 +389,8 @@ class MemCoreMemoryProvider(MemoryProvider):
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         items = list(agent_plugin.TOOL_SCHEMAS)
-        # Semantic review tools require an initialized, bound provider. Hermes initializes
-        # providers before injecting their tools; pre-init plugin introspection stays safe.
-        if self._project_id and self._agent_id and self._store_path:
-            items += self._semantic_tool_schemas()
+        # Hermes snapshots tool routing before initialize_all; schemas must be stable.
+        items += self._semantic_tool_schemas()
         return [
             {'name': item['name'], 'description': item['description'],
              'parameters': item['parameters']}

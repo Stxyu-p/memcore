@@ -181,6 +181,24 @@ def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8)
     return header + '\n' + '\n'.join(lines)
 
 
+def _is_trivial_query(query):
+    """True when a query carries no durable intent (greeting/ack).
+
+    Reuses the ingest classifier's trivial definition so recall and the
+    journal agree on what has no signal. Fail-open: any classifier
+    problem means inject as before, never skip.
+    """
+    try:
+        from memcore import ingest as _ingest
+    except Exception:
+        return False
+    try:
+        _status, decision, _candidate = _ingest.classify_user_text(query)
+    except Exception:
+        return False
+    return decision == 'trivial'
+
+
 # -- Store access ------------------------------------------------------------
 
 _connections = {}
@@ -580,6 +598,11 @@ def pre_llm_call(ctx=None, user_message='', **_):
         budget, max_items = 1200, 8
     if budget == 0 or max_items == 0:
         return None
+    if _is_trivial_query(query):
+        # Greeting/ack turns carry no durable intent (same definition the
+        # ingest journal uses to ignore them). Skip pinned injection too:
+        # ~500 chars saved per trivial turn, zero recall value lost.
+        return None
     try:
         conn = _open_tool_store(config)
     except Exception:
@@ -591,7 +614,7 @@ def pre_llm_call(ctx=None, user_message='', **_):
         pinned = conn.execute(
             'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, v.content '
             'FROM memory m JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
-            'WHERE m.project_id = ? AND m.pinned = 1 '
+            'WHERE m.project_id = ? AND m.pinned = 1 AND m.critical = 1 '
             "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
             "  AND m.lifecycle IN ('candidate','accepted','conflict') "
             '  AND ' + core._recall_tombstone_guard('m') + ' '
@@ -601,7 +624,8 @@ def pre_llm_call(ctx=None, user_message='', **_):
         pinned_ids = {r[0] for r in pinned}
         hits = []
         if query.strip():
-            hits = [h for h in core.search(conn, pid, aid, query, limit=max_items)
+            hits = [h for h in core.search(conn, pid, aid, query,
+                                         limit=min(500, max_items + len(pinned)))
                     if h[0] not in pinned_ids]
         block = build_recall_block(pinned, hits, budget, max_items)
         if not block:

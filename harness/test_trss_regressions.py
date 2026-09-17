@@ -11,6 +11,10 @@ class AdmissionRegressionTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(ingest.classify_user_text(text)[0], 'candidate')
 
+    def test_standalone_english_test_is_trivial(self):
+        self.assertEqual(ingest.classify_user_text('test'), ('ignore', 'trivial', ''))
+        self.assertEqual(ingest.classify_user_text('test the deployment')[0], 'review')
+
     def test_standalone_greetings_do_not_queue_semantic_calls(self):
         for text in ('สวัสดีค่ะ', 'ขอบคุณนะคะ', 'ทดสอบ', 'เทส'):
             with self.subTest(text=text):

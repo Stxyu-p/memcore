@@ -113,6 +113,26 @@ class NativeProviderTest(unittest.TestCase):
         self.assertIn('journal', p.system_prompt_block().lower())
         self.assertIn('untrusted historical data', p.system_prompt_block().lower())
 
+    def test_unrelated_pins_do_not_hide_query_hits(self):
+        conn = store.open_store(self.db)
+        for i in range(8):
+            mid, _ = core.create_memory(conn, 'proj-demo', 'agent-alice',
+                                       'unrelated ' + str(i) + 'x' * 240, scope='project')
+            conn.execute('UPDATE memory SET pinned=1 WHERE id=?', (mid,))
+        core.create_memory(conn, 'proj-demo', 'agent-alice',
+                           'nebula endpoint uses port 4890', scope='project')
+        conn.close()
+        p = self.provider()
+        self.assertIn('nebula endpoint uses port 4890', p.prefetch('nebula'))
+        self.assertNotIn('unrelated', p.prefetch('nebula'))
+        self.assertEqual(p.prefetch('unknownquery'), '')
+        conn = store.open_store(self.db)
+        mid, _ = core.create_memory(conn, 'proj-demo', 'agent-alice',
+                                   'important global constraint', scope='project')
+        conn.execute('UPDATE memory SET pinned=1, critical=1 WHERE id=?', (mid,))
+        conn.close()
+        self.assertIn('important global constraint', p.prefetch('unknownquery'))
+
     def test_prefetch_preserves_governed_trust_labels(self):
         conn = store.open_store(self.db)
         candidate, _ = core.create_memory(
@@ -170,6 +190,17 @@ class NativeProviderTest(unittest.TestCase):
         p = self.provider()
         self.assertEqual(p.prefetch('pinned duplicate claim'), '')
         self.assertIsNone(p.recall_status())
+
+    def test_prefetch_skips_trivial_greeting(self):
+        conn = store.open_store(self.db)
+        core.create_memory(conn, 'proj-demo', 'agent-alice',
+                           'nebula trivial skip marker', scope='project')
+        conn.close()
+        p = self.provider()
+        self.assertEqual(p.prefetch('สวัสดีค่ะ'), '')
+        self.assertIsNone(p.recall_status())
+        self.assertIn('nebula trivial skip marker',
+                      p.prefetch('nebula trivial skip marker'))
 
     def test_sync_turn_journals_before_admission(self):
         p = self.provider()

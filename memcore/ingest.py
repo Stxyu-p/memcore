@@ -17,7 +17,7 @@ SEMANTIC_VERDICTS = {'remember', 'ignore', 'defer'}
 SEMANTIC_QUEUE_DECISIONS = {'semantic_review_required', 'semantic_deferred'}
 
 _TRIVIAL_RE = re.compile(
-    r'^(?:ok|okay|yes|no|thanks|thank you|hi|hey|hello|continue|next|done|'
+    r'^(?:ok|okay|yes|no|thanks|thank you|hi|hey|hello|continue|next|done|test|'
     r'(?:โอเค|ขอบคุณ|สวัสดี|ทดสอบ|เทส|ต่อ|ต่อเลย|ได้|ดี)\s*(?:นะคะ|นะครับ|ค่ะ|ครับ|คะ)?|'
     r'ครับ|ค่ะ)[\s!?.…]*$', re.IGNORECASE
 )

@@ -240,7 +240,7 @@ class MemCoreMemoryProvider(MemoryProvider):
         pinned = conn.execute(
             'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, v.content '
             'FROM memory m JOIN memory_version v ON v.id=m.current_version_id AND v.memory_id=m.id '
-            "WHERE m.project_id=? AND m.lifecycle IN ('candidate','accepted','conflict') AND m.pinned=1 "
+            "WHERE m.project_id=? AND m.lifecycle IN ('candidate','accepted','conflict') AND m.pinned=1 AND m.critical=1 "
             "AND (m.scope='project' OR m.owner_agent_id=?) "
             'AND ' + core._recall_tombstone_guard('m') + ' '
             'ORDER BY m.critical DESC, datetime(m.updated_at) DESC, m.rowid DESC LIMIT ?',
@@ -263,6 +263,15 @@ class MemCoreMemoryProvider(MemoryProvider):
         self._last_recall_count = 0
         if not query or self._budget <= 0 or self._max_items <= 0:
             return ''
+        _trivial = getattr(agent_plugin, '_is_trivial_query', None)
+        if callable(_trivial):
+            try:
+                if _trivial(query):
+                    # Same trivial definition the ingest journal uses:
+                    # greeting/ack turns inject nothing, not even pinned.
+                    return ''
+            except Exception:
+                pass
         conn = store.open_runtime_store_readonly(self._store_path)
         try:
             pinned, hits = self._recall_rows(conn, query)

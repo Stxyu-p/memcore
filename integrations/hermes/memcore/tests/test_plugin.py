@@ -637,7 +637,7 @@ class TestHooks(ToolTestBase):
             ids.append(out['memory_id'])
         conn = plugin._get_conn(self.store)
         conn.execute("UPDATE memory SET pinned=1, updated_at='2026-01-01T00:00:00Z' WHERE id=?", (ids[0],))
-        conn.execute("UPDATE memory SET pinned=1, updated_at='2026-01-04T00:00:00Z' WHERE id=?", (ids[1],))
+        conn.execute("UPDATE memory SET pinned=1, critical=1, updated_at='2026-01-01T12:00:00Z' WHERE id=?", (ids[1],))
         conn.execute("UPDATE memory SET pinned=1, critical=1, updated_at='2026-01-02T00:00:00Z' WHERE id=?", (ids[2],))
         conn.execute("UPDATE memory SET pinned=1, updated_at='2026-01-03T00:00:00Z' WHERE id=?", (ids[3],))
         block = plugin.pre_llm_call({
@@ -657,6 +657,46 @@ class TestHooks(ToolTestBase):
             'profile_name': 'mika', 'user_message': 'anything'
         })
         self.assertIsNone(block)
+
+    def test_is_trivial_query_matches_journal_definition(self):
+        for q in ('สวัสดีค่ะ', 'ดี', 'ok', 'ขอบคุณครับ'):
+            self.assertTrue(plugin._is_trivial_query(q), q)
+        for q in ('มาดู memcore หน่อย', 'what port does novelclaw use?',
+                  '', 'ok, deploy this now'):
+            self.assertFalse(plugin._is_trivial_query(q), q)
+
+    def test_hook_excludes_unrelated_noncritical_pins(self):
+        plugin.tool_memory_remember({'content': 'unrelated pinned fact'}, self.ctx('sora'))
+        conn = plugin._get_conn(self.store)
+        conn.execute('UPDATE memory SET pinned=1')
+        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
+                                     'profile_name': 'mika',
+                                     'user_message': 'absentquery'})
+        self.assertIsNone(block)
+        conn.execute('UPDATE memory SET critical=1')
+        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
+                                     'profile_name': 'mika',
+                                     'user_message': 'absentquery'})
+        self.assertIn('unrelated pinned fact', block['context'])
+
+    def test_pre_llm_call_skips_trivial_greeting(self):
+        plugin.tool_memory_remember(
+            {'content': 'novelclaw runs on port 4890'},
+            self.ctx('sora'))
+        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
+                                     'profile_name': 'mika',
+                                     'user_message': 'สวัสดีค่ะ'})
+        self.assertIsNone(block)
+
+    def test_pre_llm_call_keeps_substantive_thai_query(self):
+        plugin.tool_memory_remember(
+            {'content': 'memcore test marker runs on port 4890'},
+            self.ctx('sora'))
+        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
+                                     'profile_name': 'mika',
+                                     'user_message': 'มาดู memcore หน่อย'})
+        self.assertIsNotNone(block)
+        self.assertIn('4890', block['context'])
 
     def test_post_llm_call_records_candidate_private(self):
         long_note = ('Observed that the deploy pipeline retried twice before '

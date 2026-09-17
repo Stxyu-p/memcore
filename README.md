@@ -6,7 +6,7 @@
 
   <p>
     <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_Start-CLI-0284c7?style=for-the-badge" alt="Quick Start" /></a>
-    <a href="https://github.com/ChokechaiXD/MemCore/releases"><img src="https://img.shields.io/badge/Release-v0.6.0-10b981?style=for-the-badge" alt="Version 0.6.0" /></a>
+    <a href="https://github.com/Stxyu-p/memcore/releases"><img src="https://img.shields.io/badge/Release-v0.6.0-10b981?style=for-the-badge" alt="Version 0.6.0" /></a>
     <a href="https://github.com/NousResearch/hermes-agent"><img src="https://img.shields.io/badge/Hermes-Native_Provider-7B61FF?style=for-the-badge" alt="Hermes Provider" /></a>
   </p>
 
@@ -141,7 +141,7 @@ When `semantic.auto_review.enabled: true`, a bounded number of new `semantic_rev
 ### 1. Clone
 
 ```powershell
-git clone https://github.com/ChokechaiXD/MemCore.git
+git clone https://github.com/Stxyu-p/memcore.git
 cd MemCore
 ```
 

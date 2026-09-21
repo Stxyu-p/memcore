@@ -231,6 +231,31 @@ No mandatory vector database. No memory daemon. No hidden background reconciliat
 
 Current migration head: `0013_current_version_ownership`
 
+### 🧭 Dataflow Architecture
+
+```mermaid
+flowchart TD
+    A[Agent Action / Raw Journal] -->|Append-Only| B(Journal Ingest Event)
+    B --> C{Admission Gate}
+    C -->|Semantic Review| D[Deterministic Rule Evaluator]
+    D -->|Governed Mutation| E[(SQLite WAL Store)]
+    E --> F[FTS5 Full-Text Recall Index]
+    E --> G[Immutable Version History & Tombstones]
+    F & G --> H[Critical Pin Recall Budget]
+    H -->|Context Injection| I[Multi-Agent Execution Layer]
+```
+
+### ⚖️ Architectural Comparison: MemCore vs Probabilistic Vector Memory
+
+| Dimension | Generic Agent Vector Memory | 🧠 MemCore (Governed Local-First) |
+| :--- | :--- | :--- |
+| **Storage Engine** | External vector database or background daemon | **Embedded single-file SQLite with WAL** |
+| **Recall Mechanism** | Probabilistic cosine similarity (hallucination-prone) | **Deterministic SQL + FTS5 full-text recall** |
+| **Correction & Deletion** | Ghost recall from fuzzy embedding overlap | **Immutable version history with strict tombstone guards** |
+| **Governance Gate** | Unaudited auto-insert into vector index | **Journal-first admission with semantic review verdict** |
+| **Runtime Overhead** | Heavy embedding services and memory daemons | **Zero-daemon, native Python stdlib + SQLite** |
+| **Multi-Agent Isolation**| Flat shared namespace or complex collection filters | **Strict project/agent scoped authorization boundaries** |
+
 ---
 
 ## 🧪 Project status

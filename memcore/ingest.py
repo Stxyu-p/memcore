@@ -610,7 +610,11 @@ def process_event(conn, event_id):
                 return _process_builtin_mutation(conn, event_id)
         core._require_membership(conn, project_id, agent_id)
 
-        if event_type == 'memory_write' and metadata.get('success') is False:
+        if event_type == 'delegation':
+            # Delegation task/result payloads are operational history, not trusted
+            # user instructions. Keep the raw journal row but never admit it.
+            decision, reason, candidate = 'ignore', 'delegation_operational_event', ''
+        elif event_type == 'memory_write' and metadata.get('success') is False:
             decision, reason, candidate = (
                 'ignore', 'builtin_memory_write_failed_upstream', ''
             )

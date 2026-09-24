@@ -340,12 +340,13 @@ class MemCoreMemoryProvider(MemoryProvider):
             return
         conn = store.open_runtime_store(self._store_path)
         try:
-            ingest.append_event(
+            event_id, _created = ingest.append_event(
                 conn, self._project_id, self._agent_id, 'delegation',
                 session_id=self._session_id,
                 user_content=task or '', assistant_content=result or '',
                 metadata=self._event_metadata(child_session_id=child_session_id)
             )
+            ingest.process_event(conn, event_id)
         finally:
             conn.close()
 

@@ -344,15 +344,65 @@ def _current_version(conn):
     return row[0] if row else None
 
 
+#: Maximum fraction of fully-zero 4K pages tolerated when opening an
+#: existing store. The 2026-10-03 incident left 683/710 pages zeroed (96.6%)
+#: with a valid header — SQLite opened it without complaint and every query
+#: then failed with "database disk image is malformed". A healthy store of
+#: this size has no fully-zero pages outside the freelist; anything above 50%
+#: is not SQLite behaviour but an external writer (snapshot/restore tooling,
+#: AV quarantine, truncated copy) having damaged the file.
+ZERO_PAGE_RATIO_LIMIT = 0.5
+
+
+def _zero_page_ratio(path: pathlib.Path, sample_pages: int = 64) -> float:
+    """Fraction of sampled 4K pages that are entirely zero.
+
+    Reads the first ``sample_pages`` pages only, so the check costs one
+    256KB read regardless of store size. Returns 0.0 for missing/empty files
+    (creation path) and 1.0 when nothing could be read.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0.0
+    if size == 0:
+        return 0.0
+    pages = min(sample_pages, size // 4096)
+    if pages == 0:
+        return 0.0
+    zeroed = 0
+    with open(path, 'rb') as fh:
+        for _ in range(pages):
+            chunk = fh.read(4096)
+            if len(chunk) < 4096:
+                break
+            if not any(chunk):
+                zeroed += 1
+    return zeroed / pages
+
+
 def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connection:
     """
     Open (creating if needed) a MemCore store.
 
     Returns a sqlite3.Connection with pragmas set and all migrations applied,
     under a migration lock so two processes booting concurrently are safe.
+
+    An existing file whose sampled pages are mostly zero is refused outright:
+    that is the signature of the 2026-10-03 external-writer incident, and
+    opening it would only surface as confusing per-query malformed errors.
     """
     p = pathlib.Path(db_path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
+    if p.is_file():
+        ratio = _zero_page_ratio(p)
+        if ratio > ZERO_PAGE_RATIO_LIMIT:
+            raise StoreError(
+                f'store at {p} looks externally damaged '
+                f'({ratio:.0%} of sampled pages are zero; '
+                f'incident pattern 2026-10-03). Refusing to open. '
+                f'Restore with: memcore restore-from-snapshot --snapshot <file> --confirm'
+            )
     conn = sqlite3.connect(
         str(p), timeout=10, isolation_level=None,
         check_same_thread=check_same_thread

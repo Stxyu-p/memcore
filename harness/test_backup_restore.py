@@ -284,6 +284,72 @@ class TestRestore(BackupBase):
             self._run(pathlib.Path(self.tmpdir) / 'ghost.db', confirm=True)
 
 
+class TestZeroFillGuard(unittest.TestCase):
+    """open_store must refuse an externally-damaged file with a clear error.
+
+    Regression for the 2026-10-03 incident: memory.db was found 96.6% zeroed
+    with a valid header. SQLite opened it happily and every query then failed
+    with "database disk image is malformed". The guard below fails fast at
+    open time and points at the restore path instead.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix='memcore_zerofill_')
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_pages(self, name, pages):
+        path = os.path.join(self.tmpdir, name)
+        with open(path, 'wb') as fh:
+            for page in pages:
+                fh.write(page)
+        return path
+
+    def test_healthy_store_opens(self):
+        db = os.path.join(self.tmpdir, 'healthy.db')
+        conn = store.open_store(db)
+        conn.close()
+        conn = store.open_store(db)
+        conn.close()
+
+    def test_zero_filled_file_is_refused(self):
+        header = bytearray(100)
+        header[0:16] = b'SQLite format 3\x00'
+        header[16:18] = (1).to_bytes(2, 'big')  # page_size 4096 (1 == 65536? no: use 4096)
+        import struct
+        header[16:18] = struct.pack('>H', 4096)
+        header[28:32] = struct.pack('>I', 70)
+        page1 = bytes(header) + bytes(4096 - 100)
+        path = self._write_pages('zero.db', [page1] + [bytes(4096)] * 69)
+        with self.assertRaises(store.StoreError) as cm:
+            store.open_store(path)
+        self.assertIn('externally damaged', str(cm.exception))
+        self.assertIn('restore-from-snapshot', str(cm.exception))
+
+    def test_missing_file_still_creates(self):
+        db = os.path.join(self.tmpdir, 'new.db')
+        conn = store.open_store(db)
+        try:
+            self.assertEqual(
+                conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok'
+            )
+        finally:
+            conn.close()
+
+    def test_empty_file_still_creates(self):
+        db = os.path.join(self.tmpdir, 'empty.db')
+        pathlib.Path(db).write_bytes(b'')
+        conn = store.open_store(db)
+        try:
+            self.assertEqual(
+                conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok'
+            )
+        finally:
+            conn.close()
+
+
 class TestDoctorGatesOnBackups(unittest.TestCase):
     """doctor output must expose recovery state."""
 

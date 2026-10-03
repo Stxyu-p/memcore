@@ -27,7 +27,7 @@ not be edited directly.
 ```text
 memcore/
 ├── __init__.py              # registers MemCoreMemoryProvider
-├── plugin.yaml              # Hermes plugin manifest (0.7.0)
+├── plugin.yaml              # Hermes plugin manifest (0.8.0)
 ├── native_provider.py       # journal-first native MemoryProvider adapter
 ├── plugin.py                # binding, governed tools, recall builder, auto-join
 ├── semantic_analyzer.py     # host-LLM semantic review adapter
@@ -166,4 +166,4 @@ cd integrations/hermes/memcore
 python -m unittest discover -s tests -v
 ```
 
-Current integration gate: **92 tests passing** (run the command above to confirm).
+Current integration gate: **98 tests passing** (run the command above to confirm).

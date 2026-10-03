@@ -2,6 +2,51 @@
 
 All notable changes to MemCore are documented here.
 
+## [0.8.0] - 2026-10-03
+
+Capability release: recall quality is now measured, journal writes carry a
+provenance seal, decay is reinforcement-aware, contradictions are scanned
+(but only proposed, never auto-resolved), private scope subdivides without
+touching governance, and memory versions are readable at a point in time.
+
+### Added
+- Recall-quality baseline (`harness/test_recall_baseline.py`): precision@k
+  over fleet canonical facts in three tiers (exact/paraphrase/negation).
+  Pinned: p@3 overall=0.62 (exact=1.00, paraphrase=0.50, negation=0.20).
+  Any future retrieval change must move these numbers up, never down.
+- HMAC-SHA256 provenance seal on journal writes (stdlib only, `store.py`);
+  `doctor` reports sealed/valid/invalid counts.
+- `recall_count` + `last_recalled` with reinforcement-aware decay: memories
+  that proved useful resist freshness aging.
+- Contradiction sweep (`memcore/contradiction.py`, lexical/substring-based,
+  no new segmenter dep): `contradictions` scans read-only, `mark-conflict`
+  is a separate governed step — propose, never auto-resolve.
+- `scope_detail` subdivides the private scope; scope governance untouched.
+- Bi-temporal point-in-time reads: `core.version_at()` + `history` CLI over
+  `memory_version.valid_from/valid_until`.
+- Corroboration funnel in `doctor`: fingerprint counts at sources
+  1/2/accept(>=3)/golden(>=5) make the Golden Rule's reach visible.
+- Zero-filled (externally damaged) stores are refused at open time instead
+  of being treated as empty.
+
+### Fixed
+- Feedback-accept routes through `core.accept_memory`; tombstone veto kept
+  (SORA audit F1 — audit bypass, not trust bypass; SORA's
+  266/1247/corrupted-store numbers were stale).
+- SORA audit F6 verified benign + config validation added.
+
+### Validation
+- Harness suite: 327 tests, OK (2 expected failures, pre-existing).
+- Hermes integration suite: 98 tests, OK.
+- `memcore doctor` exit 0 (journal health=ok, 282 events, 0 pending;
+  6 snapshots, recovery_ready=True); plugin deploy `--check` in sync.
+
+### Known / carried forward
+- Corroboration still at_2=0 (88 fingerprints, all single-source; mika holds
+  84 of 97 memories). Fleet write re-dispatch is the next step.
+- SORA audit F2 (dual recall), F3 (dual connection lifecycle), P0 test gaps
+  still open.
+
 ## [0.7.1] - 2026-10-03
 
 Recovery-readiness release. MemCore had no backup mechanism for its entire

@@ -6,7 +6,7 @@
 
   <p>
     <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_Start-CLI-0284c7?style=for-the-badge" alt="Quick Start" /></a>
-    <a href="https://github.com/Stxyu-p/memcore/releases"><img src="https://img.shields.io/badge/Release-v0.6.1-10b981?style=for-the-badge" alt="Version 0.6.1" /></a>
+    <a href="https://github.com/Stxyu-p/memcore/releases"><img src="https://img.shields.io/badge/Release-v0.8.0-10b981?style=for-the-badge" alt="Version 0.8.0" /></a>
     <a href="https://github.com/NousResearch/hermes-agent"><img src="https://img.shields.io/badge/Hermes-Native_Provider-7B61FF?style=for-the-badge" alt="Hermes Provider" /></a>
   </p>
 
@@ -14,7 +14,7 @@
     <img src="https://img.shields.io/badge/Storage-SQLite_·_WAL_·_FTS5-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
     <img src="https://img.shields.io/badge/Dependencies-Stdlib_Only-success?style=flat-square" alt="Stdlib only" />
     <img src="https://img.shields.io/badge/Daemon-None-blue?style=flat-square" alt="Daemonless" />
-    <img src="https://img.shields.io/badge/Tests-243_·_Gate_OK-brightgreen?style=flat-square" alt="Tests" />
+    <img src="https://img.shields.io/badge/Tests-327_·_Gate_OK-brightgreen?style=flat-square" alt="Tests" />
   </p>
 
 </div>
@@ -162,8 +162,8 @@ python -m unittest discover -s integrations/hermes/memcore/tests -v
 Current gate:
 
 ```text
-243 tests           →  OK (expected failures=2)
-105 integration     →  OK
+327 tests           →  OK (expected failures=2)
+98 integration      →  OK
 ```
 
 The two expected failures are the legacy E12 token-budget evaluations, which join unbounded rows manually instead of calling the recall builder; the production builder is covered by its own regression tests.

@@ -21,3 +21,11 @@
 
 ## Closed
 - Word-boundary per-row cap in `build_recall_block` (review F5) was already implemented in `plugin.py` (`MAX_ROW_CHARS = 220`, `_truncate_row_content`) with coverage in `harness/test_recall_quality.py` and `tests/test_plugin.py`. The "remaining" list was stale, not the code.
+
+## 2026-10-03 — v0.8 closed
+- Closing gate all green: harness 327 OK (2 expected failures, pre-existing), integration 98 OK, deploy `--check` OK, `doctor` exit 0 (journal health=ok, 286 events, 0 pending; 6 snapshots, recovery_ready=True).
+- Shipped in 0.8.0: recall baseline p@3=0.62 (exact 1.00/paraphrase 0.50/negation 0.20), HMAC provenance seal, reinforcement-aware decay, contradiction sweep (propose-never-resolve), scope_detail, bi-temporal `version_at`, corroboration funnel, zero-filled-store refusal, feedback-accept via `core.accept_memory`.
+- CHANGELOG 0.8.0 written; plugin.yaml 0.8.0; README gates updated to 327/98.
+- Lesson: editing a deployed-tracked file (plugin.yaml) before `deploy` re-sync turns `doctor` red correctly — rule is `deploy` + `--check` BEFORE gate.
+- Completed plans removed (`task_plan.md`, `task_plan_v08.md`); outcomes live here and in CHANGELOG.
+- Carried forward: fleet write re-dispatch (funnel at_2=0, mika holds 84/97), SORA F2/F3/P0.

@@ -1,5 +1,5 @@
 manifest_version: 1
 name: memcore
 kind: exclusive
-version: 0.7.0
+version: 0.8.0
 description: "Native governed shared memory for Hermes with journal-first ingestion and canonical MemCore recall."

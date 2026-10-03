@@ -1198,6 +1198,10 @@ def cmd_doctor(args):
         golden_n=_core.GOLDEN_N,
     )
 
+    # 8d. Provenance seals (Phase 6a). Invalid seals gate doctor: a seal
+    # mismatch means attribution fields were altered after write.
+    report['provenance'] = store.verify_all_seals(conn)
+
     conn.close()
 
     # 9. Deployed Hermes plugin runtime must match the Git source of truth.
@@ -1255,6 +1259,16 @@ def cmd_doctor(args):
         f"at_accept>={corrob['accept_n']}={corrob['at_accept']} "
         f"at_golden>={corrob['golden_n']}={corrob['at_golden']})"
     )
+    prov = report['provenance']
+    print(
+        f"provenance: {prov['checked']} checked "
+        f"(sealed={prov['sealed']} valid={prov['valid']} "
+        f"invalid={prov['invalid']} unsealed={prov['unsealed']})"
+    )
+    if prov['invalid']:
+        print(f"  INVALID seals: {', '.join(prov['invalid_ids'])}")
+        print("  hint: attribution fields were altered after write. "
+              "Investigate before trusting these events.")
     if not corrob['reachable']:
         print('  hint: no claim has enough independent sources to promote. '
               "use 'memcore corroborate --project <p> --agent <a>' to inspect.")
@@ -1311,6 +1325,7 @@ def cmd_doctor(args):
         or not report['store_parent_writable']
         or not report['fts_index']['in_sync']
         or not report['backups']['recovery_ready']
+        or report['provenance']['invalid'] > 0
         or report['migration_locks'] != 'none'
         or report['journal']['by_status'].get('failed', 0) > 0
         or bool(deploy.get('missing_plugin'))

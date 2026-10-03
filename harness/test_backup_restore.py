@@ -284,6 +284,100 @@ class TestRestore(BackupBase):
             self._run(pathlib.Path(self.tmpdir) / 'ghost.db', confirm=True)
 
 
+class TestProvenanceSeal(unittest.TestCase):
+    """Phase 6a: tamper-evident seal on journal writes."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix='memcore_prov_')
+        self.db_path = os.path.join(self.tmpdir, 'prov.db')
+        self.conn = store.open_store(self.db_path)
+        self.project = 'proj-prov'
+        self.agent = 'agent-prov'
+        self.conn.execute(
+            "INSERT INTO project (id, name) VALUES (?, 'prov')", (self.project,)
+        )
+        self.conn.execute(
+            'INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)',
+            (self.agent, 'prov', 'prov'),
+        )
+        self.conn.execute(
+            'INSERT INTO project_membership (project_id, agent_id, role) '
+            'VALUES (?, ?, ?)', (self.project, self.agent, 'owner'),
+        )
+        self.conn.commit()
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def _event(self, user='provenance probe turn'):
+        from memcore import ingest as _ingest
+        eid, _ = _ingest.append_event(
+            self.conn, self.project, self.agent, 'turn',
+            session_id='prov-1', user_content=user,
+            assistant_content='ack',
+        )
+        return eid
+
+    def test_new_events_carry_valid_seal(self):
+        eid = self._event()
+        result = store.verify_event_seal(self.conn, eid)
+        self.assertTrue(result['sealed'])
+        self.assertTrue(result['valid'])
+
+    def test_tampered_attribution_fails_verification(self):
+        # FK guards agent_id, so simulate post-write tampering with FK off —
+        # exactly the kind of direct-file edit the seal exists to catch.
+        eid = self._event()
+        self.conn.execute('PRAGMA foreign_keys = OFF')
+        try:
+            self.conn.execute(
+                "UPDATE ingest_event SET agent_id='agent-impostor' WHERE id=?",
+                (eid,),
+            )
+            self.conn.commit()
+        finally:
+            self.conn.execute('PRAGMA foreign_keys = ON')
+        result = store.verify_event_seal(self.conn, eid)
+        self.assertTrue(result['sealed'])
+        self.assertFalse(result['valid'])
+
+    def test_tampered_content_hash_fails_verification(self):
+        eid = self._event()
+        self.conn.execute(
+            "UPDATE ingest_event SET content_hash='deadbeef' WHERE id=?",
+            (eid,),
+        )
+        self.conn.commit()
+        self.assertFalse(store.verify_event_seal(self.conn, eid)['valid'])
+
+    def test_census_counts_without_reading_text(self):
+        self._event(user='SECRETCANARY seal census probe')
+        report = store.verify_all_seals(self.conn)
+        self.assertEqual(report['checked'], 1)
+        self.assertEqual(report['valid'], 1)
+        self.assertEqual(report['invalid'], 0)
+        self.assertNotIn('SECRETCANARY', str(report))
+
+    def test_seal_survives_content_edit_but_attribution_change_does_not(self):
+        # Editing body text does not break the seal (seal covers the
+        # attribution triple, not the body); changing who-wrote-it does.
+        eid = self._event()
+        self.conn.execute(
+            "UPDATE ingest_event SET user_content='edited body' WHERE id=?",
+            (eid,),
+        )
+        self.conn.commit()
+        self.assertTrue(store.verify_event_seal(self.conn, eid)['valid'])
+
+
 class TestZeroFillGuard(unittest.TestCase):
     """open_store must refuse an externally-damaged file with a clear error.
 

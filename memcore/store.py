@@ -267,6 +267,28 @@ WHEN EXISTS (
 END;
 """
 
+_PROVENANCE_SEAL = """
+-- 0014: tamper-evident seal on journal writes (Phase 6a).
+-- Every ingest_event row carries an HMAC-SHA256 over
+-- (project_id, agent_id, content_hash) keyed by the store-local provenance
+-- key, so post-write tampering with attribution fields is detectable.
+-- Pre-migration rows get NULL seals and are reported as 'unsealed', never
+-- as failures.
+--
+-- NOTE: the ALTER TABLE lives in Python (_ensure_provenance_column), not
+-- here, because ADD COLUMN is not idempotent: wiping schema_migrations in
+-- tests (or a crashed first run) would replay it against an existing
+-- column and fail with "duplicate column name".
+CREATE TABLE IF NOT EXISTS provenance_key (
+    key_id       TEXT PRIMARY KEY,
+    key_material TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    rotated_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_event_seal ON ingest_event(provenance_seal);
+"""
+
+
 MIGRATIONS = [
     ('0001_initial_contract', None),  # None = apply schema.sql verbatim
     ('0002_fts_sync_triggers', _FTS_TRIGGERS),
@@ -294,6 +316,7 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0011_performance_round2', _PERFORMANCE_ROUND2),
     ('0012_unicode_fingerprint_repair', _UNICODE_FINGERPRINT_REPAIR),
     ('0013_current_version_ownership', _CURRENT_VERSION_OWNERSHIP),
+    ('0014_provenance_seal', _PROVENANCE_SEAL),
 ]
 
 
@@ -670,6 +693,100 @@ def corroboration_funnel(conn, accept_n: int = 3, golden_n: int = 5) -> dict:
     }
 
 
+def _active_provenance_key(conn) -> tuple:
+    """Return (key_id, key_material bytes), creating the key on first use.
+
+    The key is store-local and random (os.urandom 32 bytes, hex-encoded). It
+    is not a high-grade secret — it lives next to the data — but it makes
+    post-write attribution tampering detectable, which is the threat that
+    matters here (a writer claiming another agent's identity after the fact).
+    """
+    import hashlib as _hashlib
+    import hmac as _hmac
+    import os as _os
+    row = conn.execute(
+        'SELECT key_id, key_material FROM provenance_key '
+        "ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        return row[0], bytes.fromhex(row[1])
+    key_id = 'pk-' + _os.urandom(8).hex()
+    key_material = _os.urandom(32).hex()
+    conn.execute(
+        'INSERT INTO provenance_key (key_id, key_material) VALUES (?, ?)',
+        (key_id, key_material),
+    )
+    return key_id, bytes.fromhex(key_material)
+
+
+def seal_event(project_id: str, agent_id: str, content_hash: str,
+               key_material: bytes) -> str:
+    """HMAC-SHA256 seal over the attribution triple. Stdlib only."""
+    import hashlib as _hashlib
+    import hmac as _hmac
+    msg = f'{project_id}\0{agent_id}\0{content_hash}'.encode('utf-8')
+    return _hmac.new(key_material, msg, _hashlib.sha256).hexdigest()
+
+
+def verify_event_seal(conn, event_id: str) -> dict:
+    """Check one event's seal. Returns {sealed, valid, key_id}.
+
+    Unsealed (pre-migration) rows report sealed=False, valid=None — they are
+    historical, not failures.
+    """
+    row = conn.execute(
+        'SELECT project_id, agent_id, content_hash, provenance_seal '
+        'FROM ingest_event WHERE id=?', (event_id,),
+    ).fetchone()
+    if row is None:
+        return {'sealed': False, 'valid': False, 'key_id': None,
+                'reason': 'event_not_found'}
+    project_id, agent_id, content_hash, seal = row
+    if not seal:
+        return {'sealed': False, 'valid': None, 'key_id': None,
+                'reason': 'pre_migration_row'}
+    key_row = conn.execute(
+        'SELECT key_id, key_material FROM provenance_key '
+        'ORDER BY created_at DESC LIMIT 1'
+    ).fetchone()
+    if key_row is None:
+        return {'sealed': True, 'valid': False, 'key_id': None,
+                'reason': 'no_key'}
+    key_id, key_material = key_row[0], bytes.fromhex(key_row[1])
+    expected = seal_event(project_id, agent_id, content_hash, key_material)
+    import hmac as _hmac
+    valid = _hmac.compare_digest(expected, seal)
+    return {'sealed': True, 'valid': valid, 'key_id': key_id,
+            'reason': 'ok' if valid else 'mismatch'}
+
+
+def verify_all_seals(conn, limit: int = 10000) -> dict:
+    """Content-free seal census: {sealed, valid, invalid, unsealed}.
+
+    Never reads event text — only IDs and seal columns.
+    """
+    rows = conn.execute(
+        'SELECT id FROM ingest_event ORDER BY created_at DESC LIMIT ?',
+        (limit,),
+    ).fetchall()
+    report = {'checked': 0, 'sealed': 0, 'valid': 0, 'invalid': 0,
+              'unsealed': 0, 'invalid_ids': []}
+    for (event_id,) in rows:
+        result = verify_event_seal(conn, event_id)
+        report['checked'] += 1
+        if not result['sealed']:
+            report['unsealed'] += 1
+        elif result['valid']:
+            report['sealed'] += 1
+            report['valid'] += 1
+        else:
+            report['sealed'] += 1
+            report['invalid'] += 1
+            if len(report['invalid_ids']) < 10:
+                report['invalid_ids'].append(event_id)
+    return report
+
+
 def open_store_readonly(db_path: str) -> sqlite3.Connection:
     """Open an existing, current MemCore store without schema/domain writes."""
     conn = _open_existing_connection(db_path, readonly=True)
@@ -980,6 +1097,13 @@ def _apply_migration(conn, name, sql):
             ).fetchone():
                 conn.execute('ROLLBACK')
                 return
+            if name == '0014_provenance_seal':
+                cols = {r[1] for r in conn.execute(
+                    'PRAGMA table_info(ingest_event)')}
+                if 'provenance_seal' not in cols:
+                    conn.execute(
+                        'ALTER TABLE ingest_event '
+                        'ADD COLUMN provenance_seal TEXT')
             if name == '0013_current_version_ownership':
                 ownership_violations = _current_version_ownership_violations(conn)
                 if ownership_violations:

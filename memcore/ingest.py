@@ -99,15 +99,29 @@ def append_event(conn, project_id, agent_id, event_type, *, session_id='',
     try:
         core._require_membership(conn, project_id, agent_id)
         now = core._now()
+        # Phase 6a provenance seal: HMAC over the attribution triple with the
+        # store-local key. Detects post-write tampering with who-wrote-what.
+        # Pre-migration stores without the column accept unsealed rows; the
+        # column check keeps old databases readable until migration 0014 runs.
+        from memcore import store as _store
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(ingest_event)')}
+        if 'provenance_seal' in cols:
+            _key_id, _key_material = _store._active_provenance_key(conn)
+            _seal = _store.seal_event(
+                project_id, agent_id, content_hash, _key_material)
+        else:
+            _seal = None
         cur = conn.execute(
             'INSERT OR IGNORE INTO ingest_event '
             '(id, project_id, agent_id, session_id, event_type, user_content, '
-            ' assistant_content, metadata, content_hash, status, created_at) '
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+            ' assistant_content, metadata, content_hash, status, created_at'
+            + (', provenance_seal' if _seal else '') + ') '
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?"
+            + (', ?' if _seal else '') + ')',
             (event_id, project_id, agent_id, session_id, event_type,
              user_content, assistant_content,
              json.dumps(metadata, ensure_ascii=False, sort_keys=True),
-             content_hash, now)
+             content_hash, now) + ((_seal,) if _seal else ())
         )
         created = cur.rowcount == 1
         conn.execute('COMMIT')

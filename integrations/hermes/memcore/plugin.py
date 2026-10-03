@@ -20,8 +20,27 @@ _PLUGIN_DIR = pathlib.Path(__file__).resolve().parent
 # NOTE: never add _PLUGIN_DIR itself to sys.path. Hermes plugin directories can
 # contain names that shadow Hermes packages. Prefer an installed MemCore package,
 # then an explicit MEMCORE_SRC checkout, then repository/legacy development roots.
+def _memcore_engine_importable():
+    """True iff the ENGINE resolves, not merely a directory named ``memcore``.
+
+    ``memcore/memcore/`` has no ``__init__.py``, so the genuine engine is itself a
+    PEP 420 namespace package and ``find_spec('memcore')`` returns
+    ``origin=None`` for it. A plain folder named ``memcore/`` — which is what the
+    process cwd contributes when Hermes starts above the checkout, and what any
+    sibling directory looks like — is indistinguishable from it. Probing the
+    ``memcore.core`` SUBMODULE is the only sound test: the shadow cannot satisfy
+    it, the real engine can. Checking ``origin`` cannot separate the two, and
+    ``find_spec('memcore') is not None`` is what silently disabled the fleet's
+    memory provider from 2026-09-26 until 2026-10-03.
+    """
+    try:
+        return importlib.util.find_spec('memcore.core') is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
 def _ensure_memcore_importable():
-    if importlib.util.find_spec('memcore') is not None:
+    if _memcore_engine_importable():
         return
     candidates = []
     env_src = os.environ.get('MEMCORE_SRC')

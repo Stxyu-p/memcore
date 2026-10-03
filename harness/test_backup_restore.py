@@ -355,3 +355,85 @@ class TestDoctorGatesOnBackups(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestCorroborationFunnel(unittest.TestCase):
+    """The number that tells whether ADR-0018 can ever fire."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix='memcore_funnel_')
+        self.db_path = os.path.join(self.tmpdir, 'memory.db')
+        self.conn = store.open_store(self.db_path)
+        self.project = 'proj-funnel'
+        for suffix in ('', '-wal', '-shm'):
+            pass  # cleanup handles removal below
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def _agents(self, *names):
+        for name in names:
+            aid = f'agent-{name}'
+            self.conn.execute(
+                'INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)',
+                (aid, name, name),
+            )
+        self.conn.execute(
+            "INSERT INTO project (id, name) VALUES (?, 'funnel')", (self.project,)
+        )
+        for name in names:
+            self.conn.execute(
+                'INSERT INTO project_membership (project_id, agent_id, role) '
+                'VALUES (?, ?, ?)', (self.project, f'agent-{name}', 'member'),
+            )
+        self.conn.commit()
+
+    def test_funnel_counts_distinct_writers(self):
+        self._agents('a', 'b', 'c')
+        core.create_memory(self.conn, self.project, 'agent-a', 'shared claim', scope='private')
+        core.create_memory(self.conn, self.project, 'agent-b', 'shared claim', scope='private')
+        core.create_memory(self.conn, self.project, 'agent-c', 'lone claim', scope='private')
+        funnel = store.corroboration_funnel(self.conn)
+        self.assertEqual(funnel['fingerprints'], 2)
+        self.assertEqual(funnel['at_1'], 1)
+        self.assertEqual(funnel['at_2'], 1)
+        self.assertEqual(funnel['at_accept'], 0)
+
+    def test_funnel_sees_reachable_accept(self):
+        self._agents('a', 'b', 'c')
+        for agent in ('agent-a', 'agent-b', 'agent-c'):
+            core.create_memory(self.conn, self.project, agent, 'same claim', scope='private')
+        funnel = store.corroboration_funnel(self.conn)
+        self.assertTrue(funnel['reachable'])
+        self.assertEqual(funnel['at_accept'], 1)
+
+    def test_tombstoned_copies_still_count_but_cannot_promote(self):
+        """Funnel counts live rows; promotion is vetoed elsewhere. The two must agree."""
+        self._agents('a', 'b', 'c')
+        for agent in ('agent-a', 'agent-b', 'agent-c'):
+            core.create_memory(self.conn, self.project, agent, 'doomed claim', scope='private')
+        funnel = store.corroboration_funnel(self.conn)
+        self.assertEqual(funnel['at_accept'], 1)
+        fp = core.fingerprint('doomed claim')
+        outcome = core.maybe_auto_corrob(self.conn, self.project, fp, 'agent-a')
+        self.assertEqual(outcome['action'], 'accepted')
+        # a tombstone filed afterwards must veto the next sweep
+        core.reject(self.conn, outcome['canonical'], 'agent-a', reason='wrong')
+        outcome2 = core.maybe_auto_corrob(self.conn, self.project, fp, 'agent-a')
+        self.assertEqual(outcome2['action'], 'vetoed')
+
+    def test_funnel_never_contains_memory_text(self):
+        self._agents('a')
+        core.create_memory(
+            self.conn, self.project, 'agent-a',
+            'SECRETCANARY funnel content probe', scope='private',
+        )
+        self.assertNotIn('SECRETCANARY', str(store.corroboration_funnel(self.conn)))

@@ -1188,6 +1188,16 @@ def cmd_doctor(args):
     # is still one incident away from total data loss, so this gates doctor.
     report['backups'] = store.verify_backups(getattr(args, 'db', DEFAULT_DB))
 
+    # 8c. Corroboration funnel. Informational only — a cold pipeline is not a
+    # health failure, but an operator who never sees this number cannot tell
+    # whether the Golden Rule is alive or structurally unreachable.
+    from . import core as _core
+    report['corroboration'] = store.corroboration_funnel(
+        conn,
+        accept_n=_core.CORROBORATE_ACCEPT_N,
+        golden_n=_core.GOLDEN_N,
+    )
+
     conn.close()
 
     # 9. Deployed Hermes plugin runtime must match the Git source of truth.
@@ -1238,6 +1248,16 @@ def cmd_doctor(args):
     print(f"network path: {report['network_path']}")
     print(f"store parent writable: {report['store_parent_writable']}")
     print(f"fts index: in_sync={report['fts_index']['in_sync']}")
+    corrob = report['corroboration']
+    print(
+        f"corroboration: {corrob['fingerprints']} fingerprint(s) "
+        f"(at_1={corrob['at_1']} at_2={corrob['at_2']} "
+        f"at_accept>={corrob['accept_n']}={corrob['at_accept']} "
+        f"at_golden>={corrob['golden_n']}={corrob['at_golden']})"
+    )
+    if not corrob['reachable']:
+        print('  hint: no claim has enough independent sources to promote. '
+              "use 'memcore corroborate --project <p> --agent <a>' to inspect.")
     backup_report = report['backups']
     count = backup_report['snapshot_count']
     age = backup_report['newest_age_days']

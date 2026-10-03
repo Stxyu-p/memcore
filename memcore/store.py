@@ -584,6 +584,42 @@ def verify_backups(source_db: str, *, max_age_days: int = BACKUP_MAX_AGE_DAYS,
     return report
 
 
+def corroboration_funnel(conn, accept_n: int = 3, golden_n: int = 5) -> dict:
+    """Content-free corroboration funnel for one store.
+
+    Reports how live (candidate/accepted/conflict) claim fingerprints are
+    distributed by distinct writer count: at_1, at_2 .., at_accept,
+    at_golden. Never reads memory text — only fingerprint group sizes and
+    owner-agent counts.
+
+    This is the number that tells whether ADR-0018's Golden Rule can ever
+    fire. On 2026-10-03 the live store held 73 fingerprints, ALL at sources=1,
+    which is why `corroborate` had never promoted anything. The mechanism was
+    correct; it had no reachable inputs.
+    """
+    rows = conn.execute(
+        "SELECT fp, sources FROM ("
+        "SELECT claim_fingerprint AS fp, COUNT(DISTINCT owner_agent_id) AS sources "
+        "FROM memory WHERE claim_fingerprint IS NOT NULL "
+        "AND lifecycle IN ('candidate','accepted','conflict') "
+        "GROUP BY claim_fingerprint)"
+    ).fetchall()
+    at_1 = sum(1 for _, s in rows if s == 1)
+    at_2 = sum(1 for _, s in rows if s == 2)
+    at_accept = sum(1 for _, s in rows if s >= accept_n)
+    at_golden = sum(1 for _, s in rows if s >= golden_n)
+    return {
+        'fingerprints': len(rows),
+        'at_1': at_1,
+        'at_2': at_2,
+        'at_accept': at_accept,
+        'at_golden': at_golden,
+        'accept_n': accept_n,
+        'golden_n': golden_n,
+        'reachable': at_accept > 0,
+    }
+
+
 def open_store_readonly(db_path: str) -> sqlite3.Connection:
     """Open an existing, current MemCore store without schema/domain writes."""
     conn = _open_existing_connection(db_path, readonly=True)

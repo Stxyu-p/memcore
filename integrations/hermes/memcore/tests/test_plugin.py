@@ -333,6 +333,47 @@ class TestToolsAgainstRealStore(ToolTestBase):
         # ADR-0019: remember auto-accepts, so rollback restores 'accepted'.
         self.assertEqual(lifecycle, 'accepted')
 
+    def test_feedback_accepted_is_idempotent_no_rewrite(self):
+        # F1 fix: feedback routes through core.accept_memory, so accepting an
+        # already-accepted memory is a no-op (returns ok, writes no new
+        # lifecycle audit) instead of rewriting the row + audit every call.
+        out = json.loads(plugin.tool_memory_remember(
+            {'content': 'idempotent feedback candidate'}, self.ctx('sora')))
+        mem_id = out['memory_id']
+        conn = plugin._get_conn(self.store)
+        audits_before = conn.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE memory_id=? AND action='auto_accept'",
+            (mem_id,),
+        ).fetchone()[0]
+        first = json.loads(plugin.tool_memory_feedback(
+            {'memory_id': mem_id, 'outcome': 'accepted'}, self.ctx('sora')))
+        self.assertTrue(first['success'], first)
+        audits_after = conn.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE memory_id=? AND action='auto_accept'",
+            (mem_id,),
+        ).fetchone()[0]
+        # remember already accepted it; feedback must not add another accept audit.
+        self.assertEqual(audits_after, audits_before)
+
+    def test_feedback_accepted_leaves_verification_untouched(self):
+        # The old raw SQL never wrote verification; the core route must not either.
+        out = json.loads(plugin.tool_memory_remember(
+            {'content': 'verification probe candidate'}, self.ctx('sora')))
+        mem_id = out['memory_id']
+        conn = plugin._get_conn(self.store)
+        conn.execute(
+            "UPDATE memory SET lifecycle='candidate' WHERE id=?", (mem_id,))
+        conn.commit()
+        result = json.loads(plugin.tool_memory_feedback(
+            {'memory_id': mem_id, 'outcome': 'accepted'}, self.ctx('sora')))
+        self.assertTrue(result['success'], result)
+        row = conn.execute(
+            'SELECT lifecycle, verification FROM memory WHERE id=?',
+            (mem_id,),
+        ).fetchone()
+        self.assertEqual(row[0], 'accepted')
+        self.assertEqual(row[1], 'unverified')
+
     def test_feedback_audit_uses_iso_z_timestamp(self):
         out = json.loads(plugin.tool_memory_remember(
             {'content': 'feedback audit iso timestamp'}, self.ctx('sora')))

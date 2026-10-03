@@ -113,6 +113,21 @@ class MemCoreMemoryProvider(MemoryProvider):
             timeout_seconds = auto_cfg.get('timeout_seconds', 30.0)
             max_input_chars = auto_cfg.get('max_input_chars', 6000)
             min_confidence = auto_cfg.get('min_remember_confidence', 0.85)
+            # Two-tier trust, not a mismatch (SORA F6, verified benign):
+            # the analyzer's min_remember_confidence decides remember vs
+            # ignore/defer; the engine's HIGH_CONFIDENCE_ACCEPT (0.95) then
+            # decides accepted vs candidate. A remember below 0.95 still
+            # lands as a private candidate. Validate the ordering so a
+            # misconfigured analyzer threshold cannot silently exceed the
+            # engine's accept line.
+            from memcore import core as _core_thresholds
+            if not 0.0 <= float(min_confidence) <= 1.0:
+                raise ValueError('min_remember_confidence must be between 0 and 1')
+            if float(min_confidence) > _core_thresholds.HIGH_CONFIDENCE_ACCEPT:
+                raise ValueError(
+                    'min_remember_confidence must not exceed engine '
+                    f'HIGH_CONFIDENCE_ACCEPT ({_core_thresholds.HIGH_CONFIDENCE_ACCEPT})'
+                )
             failure_threshold = auto_cfg.get('failure_threshold', 2)
             cooldown_seconds = auto_cfg.get('cooldown_seconds', 60.0)
             if isinstance(max_events, bool) or not isinstance(max_events, int):

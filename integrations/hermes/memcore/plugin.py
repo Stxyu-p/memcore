@@ -565,28 +565,41 @@ def tool_memory_feedback(args, ctx=None):
                     f'(lifecycle={lifecycle})'
                 )
             if outcome == 'accepted':
-                content = conn.execute(
-                    'SELECT v.content FROM memory m JOIN memory_version v '
-                    'ON v.id=m.current_version_id WHERE m.id=?',
-                    (memory_id,)
-                ).fetchone()[0]
-                blocked = core._tombstone_active(
-                    conn, core.fingerprint(content), pid,
-                    scope=_scope, agent_id=_owner
+                # Route through core.accept_memory so the transition is
+                # idempotent (already-accepted is a no-op, not a rewrite) and
+                # carries the standard auto_accept audit trail. Verification
+                # is left untouched, exactly as the previous raw SQL did.
+                #
+                # accept_memory returns early on already-accepted rows WITHOUT
+                # a tombstone check, so check the veto explicitly first: a
+                # duplicate claim tombstoned elsewhere must still refuse here.
+                # ponytail: if core.accept_memory ever checks the veto before
+                # the early return, this pre-check becomes redundant — delete it.
+                _cur_ver, _claim_fp = core._current_claim_identity(conn, memory_id)
+                _mem_row = conn.execute(
+                    'SELECT project_id, scope, owner_agent_id FROM memory WHERE id=?',
+                    (memory_id,),
+                ).fetchone()
+                _veto = core._tombstone_active(
+                    conn, _claim_fp, _mem_row[0],
+                    scope=_mem_row[1], agent_id=_mem_row[2],
                 )
-                if blocked:
-                    raise core.TombstoneBlocked(
-                        core.fingerprint(content), blocked[0]
-                    )
-                conn.execute(
-                    "UPDATE memory SET lifecycle='accepted', updated_at=? WHERE id=?",
-                    (core._now(), memory_id))
+                if _veto:
+                    raise core.TombstoneBlocked(_claim_fp, _veto[0])
+                changed = core.accept_memory(
+                    conn, memory_id, aid,
+                    reason='accepted via memory_feedback tool',
+                    _manage_transaction=False,
+                )
+                store_audit(conn, 'feedback', aid, memory_id, pid,
+                            {'outcome': outcome, 'source': 'memory_feedback tool',
+                             'transition_applied': changed})
             else:
                 conn.execute(
                     "UPDATE memory SET freshness='stale', updated_at=? WHERE id=?",
                     (core._now(), memory_id))
-            store_audit(conn, 'feedback', aid, memory_id, pid,
-                        {'outcome': outcome, 'source': 'memory_feedback tool'})
+                store_audit(conn, 'feedback', aid, memory_id, pid,
+                            {'outcome': outcome, 'source': 'memory_feedback tool'})
             conn.execute('COMMIT')
         except Exception:
             try:

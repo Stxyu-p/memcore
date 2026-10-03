@@ -818,15 +818,27 @@ def apply_freshness_decay(conn, aging_days=30, stale_days=90):
     now = _now()
     conn.execute('BEGIN IMMEDIATE')
     try:
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
+        reinforced = (
+            "AND (last_recalled IS NULL OR datetime(last_recalled) < "
+            "datetime(?, '-' || ? || ' days')) "
+            if 'last_recalled' in cols else ''
+        )
+        params_aging = (now, aging_days) + (
+            (now, REINFORCEMENT_WINDOW_DAYS) if 'last_recalled' in cols else ())
         aged = [r[0] for r in conn.execute(
             "SELECT id FROM memory WHERE freshness='current' "
-            "AND datetime(updated_at) < datetime(?, '-' || ? || ' days')",
-            (now, aging_days),
+            "AND datetime(updated_at) < datetime(?, '-' || ? || ' days') "
+            + reinforced,
+            params_aging,
         ).fetchall()]
+        params_stale = (now, stale_days) + (
+            (now, REINFORCEMENT_WINDOW_DAYS) if 'last_recalled' in cols else ())
         staled = [r[0] for r in conn.execute(
             "SELECT id FROM memory WHERE freshness='aging' "
-            "AND datetime(updated_at) < datetime(?, '-' || ? || ' days')",
-            (now, stale_days),
+            "AND datetime(updated_at) < datetime(?, '-' || ? || ' days') "
+            + reinforced,
+            params_stale,
         ).fetchall()]
         for mem_id in aged:
             conn.execute(
@@ -942,6 +954,45 @@ def _fts_query(query: str) -> str:
     if not tokens:
         return ''
     return ' OR '.join('"%s"' % token for token in tokens)
+
+
+#: Memories recalled within this window resist freshness decay.
+#: A fact the fleet actually uses stays current; a fact nobody recalls fades
+#: on the plain clock. Tuned against the fleet's weekly cadence.
+REINFORCEMENT_WINDOW_DAYS = 14
+
+
+def record_recall(conn, memory_ids) -> int:
+    """Bump recall counters for retrieved memories. Best-effort, never raises.
+
+    Called by the tool layer AFTER a successful read-only search, on a
+    writable connection — never inside search() itself, which must stay
+    safe on read-only handles. Returns the number of rows touched.
+    """
+    ids = [m for m in dict.fromkeys(memory_ids) if m]
+    if not ids:
+        return 0
+    try:
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
+        if 'recall_count' not in cols:
+            return 0
+        now = _now()
+        touched = 0
+        for mem_id in ids:
+            cur = conn.execute(
+                'UPDATE memory SET recall_count = recall_count + 1, '
+                'last_recalled = ? WHERE id = ?',
+                (now, mem_id),
+            )
+            touched += cur.rowcount
+        conn.commit()
+        return touched
+    except Exception:
+        try:
+            conn.execute('ROLLBACK')
+        except Exception:
+            pass
+        return 0
 
 
 def search(conn, project_id, agent_id, query, limit=20):

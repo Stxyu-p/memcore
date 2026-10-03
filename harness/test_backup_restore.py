@@ -378,6 +378,95 @@ class TestProvenanceSeal(unittest.TestCase):
         self.assertTrue(store.verify_event_seal(self.conn, eid)['valid'])
 
 
+class TestReinforcementDecay(unittest.TestCase):
+    """Phase 6b: used facts resist decay, unused facts fade."""
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp(prefix='memcore_reinf_')
+        self.db_path = os.path.join(self.tmpdir, 'reinf.db')
+        self.conn = store.open_store(self.db_path)
+        self.project = 'proj-reinf'
+        self.agent = 'agent-reinf'
+        self.conn.execute(
+            "INSERT INTO project (id, name) VALUES (?, 'reinf')", (self.project,)
+        )
+        self.conn.execute(
+            'INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)',
+            (self.agent, 'reinf', 'reinf'),
+        )
+        self.conn.execute(
+            'INSERT INTO project_membership (project_id, agent_id, role) '
+            'VALUES (?, ?, ?)', (self.project, self.agent, 'owner'),
+        )
+        self.conn.commit()
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def _old_memory(self, content, updated_days_ago=60):
+        from memcore import core as _core
+        mem_id, _ = _core.create_memory(
+            self.conn, self.project, self.agent, content, scope='project')
+        self.conn.execute(
+            "UPDATE memory SET updated_at=datetime('now', '-' || ? || ' days') "
+            'WHERE id=?', (updated_days_ago, mem_id))
+        self.conn.commit()
+        return mem_id
+
+    def test_unused_old_memory_ages(self):
+        from memcore import core as _core
+        mem_id = self._old_memory('unrecalled old claim')
+        aged, _ = _core.apply_freshness_decay(self.conn)
+        self.assertIn(mem_id, aged)
+
+    def test_recently_recalled_memory_resists_decay(self):
+        from memcore import core as _core
+        mem_id = self._old_memory('recalled old claim')
+        self.assertEqual(_core.record_recall(self.conn, [mem_id]), 1)
+        aged, _ = _core.apply_freshness_decay(self.conn)
+        self.assertNotIn(mem_id, aged)
+        freshness = self.conn.execute(
+            'SELECT freshness FROM memory WHERE id=?', (mem_id,)).fetchone()[0]
+        self.assertEqual(freshness, 'current')
+
+    def test_recall_count_increments(self):
+        from memcore import core as _core
+        mem_id = self._old_memory('counted claim')
+        _core.record_recall(self.conn, [mem_id])
+        _core.record_recall(self.conn, [mem_id])
+        count = self.conn.execute(
+            'SELECT recall_count FROM memory WHERE id=?',
+            (mem_id,)).fetchone()[0]
+        self.assertEqual(count, 2)
+
+    def test_record_recall_never_raises(self):
+        from memcore import core as _core
+        # Unknown ids and empty lists are no-ops, not errors.
+        self.assertEqual(_core.record_recall(self.conn, []), 0)
+        self.assertEqual(_core.record_recall(self.conn, ['ghost-id']), 0)
+
+    def test_reinforcement_window_expires(self):
+        from memcore import core as _core
+        mem_id = self._old_memory('stale reinforcement claim')
+        _core.record_recall(self.conn, [mem_id])
+        # Backdate the recall beyond the window: protection lapses.
+        self.conn.execute(
+            "UPDATE memory SET last_recalled=datetime('now', '-30 days') "
+            'WHERE id=?', (mem_id,))
+        self.conn.commit()
+        aged, _ = _core.apply_freshness_decay(self.conn)
+        self.assertIn(mem_id, aged)
+
+
 class TestZeroFillGuard(unittest.TestCase):
     """open_store must refuse an externally-damaged file with a clear error.
 

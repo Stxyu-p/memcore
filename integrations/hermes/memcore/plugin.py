@@ -458,6 +458,13 @@ def tool_memory_search(args, ctx=None):
     try:
         pid, aid = _require_bound_membership(conn, project, agent_name)
         rows = core.search(conn, pid, aid, query, limit=10)
+        # Phase 6b reinforcement: retrieved memories prove useful. Recorded
+        # best-effort on this writable handle; search() itself stays read-only
+        # safe. A failure here must never break the read the user asked for.
+        try:
+            core.record_recall(conn, [r[0] for r in rows])
+        except Exception:
+            pass
         return _tool_ok(results=[
             {'id': r[0], 'scope': r[1], 'lifecycle': r[2],
              'verification': r[3], 'freshness': r[4], 'content': r[5]}

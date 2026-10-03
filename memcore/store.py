@@ -289,6 +289,17 @@ CREATE INDEX IF NOT EXISTS idx_ingest_event_seal ON ingest_event(provenance_seal
 """
 
 
+_REINFORCEMENT_DECAY = """
+-- 0015: reinforcement-aware decay (Phase 6b).
+-- recall_count / last_recalled record that a memory proved useful in
+-- retrieval. apply_freshness_decay skips recently-recalled rows, so used
+-- facts reinforce and never-recalled facts fade. Pure clock decay stays as
+-- the fallback for rows never recalled.
+-- NOTE: ALTER TABLE lives in Python like 0014 (ADD COLUMN is not idempotent).
+CREATE INDEX IF NOT EXISTS idx_memory_last_recalled ON memory(last_recalled);
+"""
+
+
 MIGRATIONS = [
     ('0001_initial_contract', None),  # None = apply schema.sql verbatim
     ('0002_fts_sync_triggers', _FTS_TRIGGERS),
@@ -317,6 +328,7 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0012_unicode_fingerprint_repair', _UNICODE_FINGERPRINT_REPAIR),
     ('0013_current_version_ownership', _CURRENT_VERSION_OWNERSHIP),
     ('0014_provenance_seal', _PROVENANCE_SEAL),
+    ('0015_reinforcement_decay', _REINFORCEMENT_DECAY),
 ]
 
 
@@ -1097,6 +1109,16 @@ def _apply_migration(conn, name, sql):
             ).fetchone():
                 conn.execute('ROLLBACK')
                 return
+            if name == '0015_reinforcement_decay':
+                cols = {r[1] for r in conn.execute(
+                    'PRAGMA table_info(memory)')}
+                if 'recall_count' not in cols:
+                    conn.execute(
+                        'ALTER TABLE memory '
+                        'ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0')
+                if 'last_recalled' not in cols:
+                    conn.execute(
+                        'ALTER TABLE memory ADD COLUMN last_recalled TEXT')
             if name == '0014_provenance_seal':
                 cols = {r[1] for r in conn.execute(
                     'PRAGMA table_info(ingest_event)')}

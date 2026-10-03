@@ -1,7 +1,5 @@
 """Regression tests for the Git-tracked Hermes plugin source and deployer."""
 import importlib.util
-import json
-import os
 import pathlib
 import tempfile
 import unittest
@@ -20,40 +18,26 @@ class HermesPluginSourceTests(unittest.TestCase):
         self.assertEqual(set(deploy.RUNTIME_FILES), {
             '__init__.py', 'plugin.yaml', 'plugin.py', 'native_provider.py',
             'semantic_analyzer.py', 'README.md',
-            'dashboard/plugin_api.py', 'dashboard/manifest.json', 'desktop/plugin.js',
         })
         for relative in deploy.RUNTIME_FILES:
             self.assertTrue((PLUGIN_ROOT / pathlib.PurePosixPath(relative)).is_file(), relative)
             self.assertNotIn('__pycache__', relative)
             self.assertNotIn('/tests/', '/' + relative)
 
-    def test_agent_dashboard_and_desktop_versions_match(self):
+    def test_no_dashboard_or_desktop_remnants(self):
+        self.assertFalse((PLUGIN_ROOT / 'dashboard').exists())
+        self.assertFalse((PLUGIN_ROOT / 'desktop').exists())
+
+    def test_plugin_version_is_0_7_0(self):
         plugin_yaml = (PLUGIN_ROOT / 'plugin.yaml').read_text(encoding='utf-8')
         version_line = next(
             line for line in plugin_yaml.splitlines() if line.startswith('version:')
         )
         version = version_line.split(':', 1)[1].strip()
-        manifest = json.loads(
-            (PLUGIN_ROOT / 'dashboard' / 'manifest.json').read_text(encoding='utf-8')
-        )
-        desktop = (PLUGIN_ROOT / 'desktop' / 'plugin.js').read_text(encoding='utf-8')
-        self.assertEqual(version, '0.6.1')
-        self.assertEqual(manifest['version'], version)
-        self.assertIn(f"version: '{version}'", desktop)
-
-    def test_desktop_avoids_search_and_cache_request_churn(self):
-        desktop = (PLUGIN_ROOT / 'desktop' / 'plugin.js').read_text(encoding='utf-8')
-        self.assertIn('function useDebouncedValue', desktop)
-        self.assertIn('clearTimeout(handle)', desktop)
-        self.assertIn('staleTime: 15000', desktop)
-        self.assertNotIn("queryKey: [PLUGIN_ID, 'projects']", desktop)
-        self.assertNotIn("projects: () => get('/projects')", desktop)
-        self.assertNotIn(
-            "invalidateQueries({ queryKey: [PLUGIN_ID] })", desktop
-        )
+        self.assertEqual(version, '0.7.0')
 
     def test_source_has_no_machine_specific_absolute_checkout(self):
-        for relative in ('plugin.py', 'native_provider.py', 'dashboard/plugin_api.py'):
+        for relative in ('plugin.py', 'native_provider.py'):
             text = (PLUGIN_ROOT / pathlib.PurePosixPath(relative)).read_text(encoding='utf-8')
             self.assertNotIn('C:\\Users\\BlankScreen', text)
         provider = (PLUGIN_ROOT / 'native_provider.py').read_text(encoding='utf-8')

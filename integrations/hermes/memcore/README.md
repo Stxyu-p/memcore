@@ -1,19 +1,22 @@
 # MemCore Hermes Integration
 
-## 0.6.1 — TRSS admission and recall fixes
+## 0.7.0 — Autonomy + Golden Rule (ADR-0018/0019/0020)
 
-- Recognize Thai durable signals without requiring whitespace after the verb.
-- Ignore standalone Thai greetings/acknowledgments/test pings before semantic review.
-- Route oversized explicit requests and fenced code to semantic review, not a
-  silently truncated candidate. Reject semantic proposals exceeding 4000 characters
-  before any write; their events remain reviewable.
-- Recall only complete facts that fit the character budget, skipping oversized
-  rows so a later short fact can still fit. The status count reflects rendered
-  facts, not all search hits. Increase `inject.budget_chars` when longer facts
-  are needed; skipped facts are not deleted from the store.
-- No automatic acceptance, verification, cleanup of existing memories, model
-  switch, or raw-JSON fallback was added. Structured-output provider failures
-  still fail closed; this patch does not establish live model reliability.
+- Corroboration: same claim from 3 distinct agents auto-accepts
+  (`source_backed`); 5 distinct agents crowns it Golden Rule
+  (pinned+critical, always injected). Tombstone veto always wins.
+- Auto-accept lanes: explicit durable signals ("จำไว้ว่า…",
+  `memory_remember`, `memory_write/add`) and semantic `remember` with
+  confidence ≥ 0.95 skip `candidate`. Assistant observations stay
+  candidate-only.
+- Recall: fingerprint dedup (corroborating copies collapse to one line) +
+  word-boundary per-row cap (220 chars, Thai hard-cut fallback) instead of
+  silently skipping oversized rows.
+- Full UI removal: `dashboard/` + `desktop/` deleted. Operator surface is
+  AI governed tools (`memory_*`) + `python -m memcore` CLI (`corroborate`,
+  `golden-list`, `journal-sweep`, `decay`, `doctor`).
+- Journal hygiene: stale builtin auto-dismiss (>7d), defer-cap auto-ignore
+  (≥3 defers), freshness decay (current → aging → stale).
 
 This directory is the **Git-tracked source of truth** for the MemCore Hermes plugin.
 The copy under the local Hermes plugin directory is a deployed artifact and should
@@ -24,18 +27,12 @@ not be edited directly.
 ```text
 memcore/
 ├── __init__.py              # registers MemCoreMemoryProvider
-├── plugin.yaml              # Hermes plugin manifest
+├── plugin.yaml              # Hermes plugin manifest (0.7.0)
 ├── native_provider.py       # journal-first native MemoryProvider adapter
 ├── plugin.py                # binding, governed tools, recall builder, auto-join
-├── dashboard/
-│   ├── plugin_api.py        # desktop/dashboard API
-│   └── manifest.json
-├── desktop/
-│   └── plugin.js            # Hermes Desktop UI
+├── semantic_analyzer.py     # host-LLM semantic review adapter
 └── tests/                   # integration regression suite
 ```
-
-Agent, dashboard, and desktop manifests use the same integration version: **0.6.0**.
 
 ## Deploy / verify
 
@@ -145,7 +142,7 @@ and stay pending when the target cannot be proven.
 
 | Tool | Purpose |
 |---|---|
-| `memory_remember` | Store explicit durable project memory |
+| `memory_remember` | Store explicit durable project memory (accepted directly) |
 | `memory_search` | Search canonical memory in the bound project |
 | `memory_promote` | Promote an owned private memory to project scope |
 | `memory_supersede` | Correct a memory while preserving version history |
@@ -154,8 +151,11 @@ and stay pending when the target cannot be proven.
 | `memory_review_queue` | Inspect this agent's pending semantic-review queue |
 | `memory_review_decide` | Apply `remember`, `ignore`, or `defer` |
 
-Semantic `remember` decisions can create only a **private candidate**. The analyzer
-cannot choose project scope or an accepted lifecycle.
+Trust lanes (ADR-0018/0019): explicit writes accept directly; semantic
+`remember` with confidence ≥ 0.95 accepts directly; the same claim repeated
+by 3 distinct agents auto-accepts project-wide (`source_backed`); 5 distinct
+agents crowns it Golden Rule (pinned+critical). The analyzer still cannot
+choose scope — corroboration is counted by the engine, never the model.
 
 ## Tests
 

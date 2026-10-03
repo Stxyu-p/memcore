@@ -133,18 +133,19 @@ class TestIngestJournal(IngestTestBase):
             self.conn, self.project, self.alice, 'quasarphoenix'
         ), [])
 
-    def test_explicit_remember_becomes_private_candidate(self):
+    def test_explicit_remember_becomes_private_accepted(self):
+        # ADR-0019: explicit durable signals auto-accept (was candidate pre-0.7).
         event_id, _ = ingest.append_event(
             self.conn, self.project, self.alice, 'turn', session_id='s4',
             user_content='จำไว้ว่าฉันชอบชาอู่หลง', assistant_content='รับทราบ'
         )
         result = ingest.process_event(self.conn, event_id)
-        self.assertEqual(result['decision'], 'private_candidate')
+        self.assertEqual(result['decision'], 'private_accepted')
         row = self.conn.execute(
             'SELECT scope, lifecycle, owner_agent_id FROM memory WHERE id=?',
             (result['memory_id'],)
         ).fetchone()
-        self.assertEqual(row, ('private', 'candidate', self.alice))
+        self.assertEqual(row, ('private', 'accepted', self.alice))
         content = self.conn.execute(
             'SELECT v.content FROM memory m JOIN memory_version v '
             'ON v.id=m.current_version_id WHERE m.id=?', (result['memory_id'],)

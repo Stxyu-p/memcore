@@ -136,20 +136,59 @@ def default_store_path(config):
 
 # -- Recall block builder (pure, unit-tested) -------------------------------
 
+#: Per-row content cap (F5 fix). Rows are truncated at a word boundary with
+#: an ellipsis instead of skipped entirely — a missing condition or negation
+#: can reverse a memory's meaning, so truncation only ever drops the TAIL.
+MAX_ROW_CHARS = 220
+
+
+def _truncate_row_content(content, max_chars):
+    """Collapse whitespace, cap at max_chars on a word boundary + ellipsis.
+
+    Space-separated text cuts at the last space (never mid-word). Thai and
+    other spaceless scripts fall back to a hard cut — there is no boundary
+    to respect. Short content passes through untouched.
+    """
+    text = ' '.join(str(content).split())
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    space = cut.rfind(' ')
+    if space > max_chars // 2:
+        cut = cut[:space]
+    return cut.rstrip() + '…'
+
+
 def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8):
     """Deterministic, budget-capped recall block. Empty rows -> ''.
 
-    Pinned/critical rows first, then search hits (deduped by memory id).
-    One line per item: "- [scope] content". Whole block capped at
-    budget_chars (header included). Oversized items are skipped, never clipped:
-    a missing condition or negation can reverse a memory's meaning.
+    Pinned/critical rows first, then search hits — deduped by memory id AND
+    by claim fingerprint, so N corroborating copies collapse to one line
+    (canonical first). One line per item: "- [scope] content". Whole block
+    capped at budget_chars (header included). Each row's content is capped
+    at MAX_ROW_CHARS on a word boundary (tail only). A row that still does
+    not fit the remaining budget is skipped so a shorter later row can use
+    the space — but when nothing fits, the first row is rendered truncated
+    instead of returning an empty block for a non-empty match set.
     """
-    seen = set()
+    seen_ids = set()
+    seen_fps = set()
     rows = []
     for r in list(pinned_rows or []) + list(search_rows or []):
-        if r[0] not in seen:
-            seen.add(r[0])
-            rows.append(r)
+        if r[0] in seen_ids:
+            continue
+        seen_ids.add(r[0])
+        try:
+            from memcore import core as _core
+            fp = _core.fingerprint(
+                ' '.join(str(r[5] if len(r) > 5 else r).split()))
+        except Exception:
+            fp = None
+        if fp is not None:
+            if fp in seen_fps:
+                continue
+            seen_fps.add(fp)
+        rows.append(r)
     lines = []
     header = 'Shared project memory (memcore):'
     budget_chars = max(0, int(budget_chars))
@@ -165,17 +204,30 @@ def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8)
         lifecycle = r[2] if len(r) > 2 else '?'
         verification = r[3] if len(r) > 3 else '?'
         freshness = r[4] if len(r) > 4 else '?'
-        line = '- [%s | %s | %s | %s] %s' % (
-            scope, lifecycle, verification, freshness, content
+        label = '- [%s | %s | %s | %s] ' % (
+            scope, lifecycle, verification, freshness
         )
         separator = 1 if lines else 0
         remaining = budget_chars - used - separator
-        if remaining <= 0:
-            break
+        if remaining <= len(label) + 40:
+            continue
+        line = label + _truncate_row_content(content, MAX_ROW_CHARS)
         if len(line) > remaining:
+            # Too long even capped — let a shorter later row use the space.
             continue
         lines.append(line)
         used += separator + len(line)
+    if not lines and rows:
+        # Fallback: a non-empty match set never renders empty. Truncate the
+        # first (highest-priority) row to whatever budget remains.
+        r = rows[0]
+        content = ' '.join(str(r[5] if len(r) > 5 else r).split())
+        label = '- [%s | %s | %s | %s] ' % (
+            r[1] if len(r) > 1 else '?', r[2] if len(r) > 2 else '?',
+            r[3] if len(r) > 3 else '?', r[4] if len(r) > 4 else '?')
+        available = budget_chars - prefix_len - len(label)
+        if available >= 40:
+            lines.append(label + _truncate_row_content(content, available))
     if not lines:
         return ''
     return header + '\n' + '\n'.join(lines)
@@ -355,14 +407,20 @@ def tool_memory_remember(args, ctx=None):
         return store_error
     try:
         pid, aid = _require_bound_membership(conn, project, agent_name)
-        # Idempotent per (project, agent, content) â€” repeated identical tool
+        # Idempotent per (project, agent, content) — repeated identical tool
         # calls don't duplicate rows (ALTIMA gate #2). Use supersede to update.
+        # ADR-0019 explicit lane: memory_remember is a deliberate durability
+        # request, so the row is accepted directly (not parked in candidate).
+        # Single source ≠ corroborated: verification stays unverified until
+        # independent agents repeat the claim (ADR-0018 sweep below).
         fp = core.fingerprint(content)
         mem_id, ver_id = core.create_memory(
             conn, pid, 'agent-' + agent_name, content,
             scope=scope, memory_type=args.get('type') or 'note',
-            reason='memory_remember tool',
+            lifecycle='accepted',
+            reason='memory_remember tool (explicit auto-accept)',
             idempotency_key=f'remember:{pid}:agent-{agent_name}:{fp}')
+        core.maybe_auto_corrob(conn, pid, fp, 'agent-' + agent_name)
         conn.commit()
         return _tool_ok(memory_id=mem_id, version_id=ver_id, scope=scope)
     except Exception as e:

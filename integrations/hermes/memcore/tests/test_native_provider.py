@@ -524,7 +524,8 @@ class NativeProviderTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_explicit_sync_turn_derives_private_candidate(self):
+    def test_explicit_sync_turn_derives_private_accepted(self):
+        # ADR-0019: explicit durable signals auto-accept (was candidate pre-0.7).
         p = self.provider()
         p.sync_turn('remember that I prefer oolong tea', 'Understood.',
                     session_id='session-2', messages=[{'role': 'user'}])
@@ -533,11 +534,11 @@ class NativeProviderTest(unittest.TestCase):
             event = conn.execute(
                 "SELECT status, decision FROM ingest_event WHERE session_id='session-2'"
             ).fetchone()
-            self.assertEqual(event, ('processed', 'private_candidate'))
+            self.assertEqual(event, ('processed', 'private_accepted'))
             memory = conn.execute(
                 "SELECT scope, lifecycle, owner_agent_id FROM memory"
             ).fetchone()
-            self.assertEqual(memory, ('private', 'candidate', 'agent-alice'))
+            self.assertEqual(memory, ('private', 'accepted', 'agent-alice'))
         finally:
             conn.close()
 
@@ -554,7 +555,8 @@ class NativeProviderTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_builtin_memory_write_is_explicit_private_candidate(self):
+    def test_builtin_memory_write_is_explicit_private_accepted(self):
+        # ADR-0019: explicit memory_write/add auto-accepts (was candidate pre-0.7).
         p = self.provider()
         p.on_memory_write('add', 'user', 'Preferred editor is Helix', {'tool_name': 'memory'})
         conn = store.open_store(self.db)
@@ -562,7 +564,7 @@ class NativeProviderTest(unittest.TestCase):
             event = conn.execute(
                 "SELECT event_type, status, decision FROM ingest_event"
             ).fetchone()
-            self.assertEqual(event, ('memory_write', 'processed', 'private_candidate'))
+            self.assertEqual(event, ('memory_write', 'processed', 'private_accepted'))
             content = conn.execute(
                 'SELECT v.content FROM memory m JOIN memory_version v '
                 'ON v.id=m.current_version_id'
@@ -598,7 +600,7 @@ class NativeProviderTest(unittest.TestCase):
                 "SELECT status, decision FROM ingest_event ORDER BY created_at, rowid"
             ).fetchall()
             self.assertEqual(events, [
-                ('processed', 'private_candidate'),
+                ('processed', 'private_accepted'),
                 ('processed', 'builtin_memory_removed'),
             ])
             lifecycle = conn.execute('SELECT lifecycle FROM memory').fetchone()[0]

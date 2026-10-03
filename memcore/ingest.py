@@ -1,8 +1,10 @@
 """Raw Hermes event journal and conservative admission bridge for MemCore.
 
 The journal is append-only ingress. Raw turns are never recalled directly.
-Only the analyzer may derive canonical MemCore memories, and automatic
-derivations are private candidates by default.
+Only the analyzer may derive canonical MemCore memories. Automatic
+derivations are private candidates by default, except the two auto-accept
+lanes (ADR-0019): explicit durable signals and high-confidence semantic
+verdicts (confidence >= 0.95).
 """
 import hashlib
 import json
@@ -301,6 +303,18 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
             idempotency_key=f'semantic:{event_id}',
             reason=f'semantic analysis by {analyzer}', _manage_transaction=False
         )
+        # ADR-0019 high-confidence lane: confidence >= 0.95 self-accepts.
+        # Below stays candidate. Tombstone-blocked claims refuse loudly.
+        decision = 'semantic_private_candidate'
+        if confidence is not None and float(confidence) >= core.HIGH_CONFIDENCE_ACCEPT:
+            core.accept_memory(
+                conn, memory_id, agent_id,
+                'high-confidence semantic auto-accept',
+                _manage_transaction=False)
+            decision = 'semantic_private_accepted'
+        # Either lane may complete a corroboration set started by other
+        # agents — always run the sweep on the new row.
+        core.maybe_auto_corrob(conn, project_id, claim_fp, agent_id)
         conn.execute(
             "INSERT INTO ingest_derivation "
             "(event_id,memory_id,relation,created_at) VALUES (?,?,'created',?)",
@@ -309,12 +323,12 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
         conn.execute('UPDATE ingest_analysis SET memory_id=? WHERE id=?',
                      (memory_id, analysis_id))
         conn.execute(
-            "UPDATE ingest_event SET status='processed', decision='semantic_private_candidate', "
-            'error=NULL, processed_at=? WHERE id=?', (now, event_id)
+            "UPDATE ingest_event SET status='processed', decision=?, "
+            "error=NULL, processed_at=? WHERE id=?", (decision, now, event_id)
         )
         conn.execute('COMMIT')
         return {'event_id': event_id, 'status': 'processed',
-                'decision': 'semantic_private_candidate', 'analysis_id': analysis_id,
+                'decision': decision, 'analysis_id': analysis_id,
                 'memory_id': memory_id}
     except Exception:
         try:
@@ -666,18 +680,28 @@ def process_event(conn, event_id):
             idempotency_key=f'ingest:{event_id}',
             reason='native provider journal analysis', _manage_transaction=False
         )
+        # ADR-0019 explicit lane: a deliberate durable signal ("จำไว้ว่า…",
+        # memory_write/add) self-accepts instead of parking in candidate.
+        # Tombstone-blocked claims refuse loudly; corroboration still runs.
+        decision = 'private_candidate'
+        core.accept_memory(
+            conn, memory_id, agent_id,
+            'explicit durable signal auto-accept', _manage_transaction=False)
+        decision = 'private_accepted'
+        core.maybe_auto_corrob(
+            conn, project_id, core.fingerprint(candidate), agent_id)
         conn.execute(
             "INSERT INTO ingest_derivation "
             "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'created', ?)",
             (event_id, memory_id, now)
         )
         conn.execute(
-            "UPDATE ingest_event SET status='processed', decision='private_candidate', processed_at=? "
-            'WHERE id=?', (now, event_id)
+            "UPDATE ingest_event SET status='processed', decision=?, processed_at=? "
+            'WHERE id=?', (decision, now, event_id)
         )
         conn.execute('COMMIT')
         return {'event_id': event_id, 'status': 'processed',
-                'decision': 'private_candidate', 'memory_id': memory_id}
+                'decision': decision, 'memory_id': memory_id}
     except Exception as exc:
         try:
             conn.execute('ROLLBACK')
@@ -757,6 +781,20 @@ def journal_stats(conn, project_id=None, agent_id=None):
         "OR decision LIKE '%_requires_review')",
         pending_params
     ).fetchone()[0]
+    # v0.7 hygiene (spec Part 5): old unresolved builtin rows are sweepable
+    # via `journal-sweep`, not alarming. Only YOUNG (<7d) builtin noise
+    # escalates to operator_attention.
+    unresolved_builtin_young = conn.execute(
+        'SELECT COUNT(*) FROM ingest_event' + pending_where +
+        " AND decision LIKE 'builtin_memory_%' "
+        "AND (decision LIKE '%_unresolved_target' "
+        "OR decision LIKE '%_missing_old_text' "
+        "OR decision='builtin_memory_replace_missing_content' "
+        "OR decision LIKE '%_requires_review') "
+        "AND datetime(created_at) >= datetime('now', '-7 days')",
+        pending_params
+    ).fetchone()[0]
+    sweepable_builtin = unresolved_builtin - unresolved_builtin_young
     oldest = conn.execute(
         'SELECT MIN(created_at) FROM ingest_event' + pending_where,
         pending_params
@@ -795,10 +833,12 @@ def journal_stats(conn, project_id=None, agent_id=None):
 
     if by_status.get('failed', 0):
         health = 'failed'
-    elif unresolved_builtin:
+    elif unresolved_builtin_young:
         health = 'operator_attention'
     elif semantic_pending:
         health = 'review_pending'
+    elif unresolved_builtin:
+        health = 'sweepable'
     else:
         health = 'ok'
 
@@ -810,6 +850,8 @@ def journal_stats(conn, project_id=None, agent_id=None):
         'pending_by_event_type': pending_by_event_type,
         'semantic_review_pending': semantic_pending,
         'unresolved_builtin_mutations': unresolved_builtin,
+        'unresolved_builtin_young': unresolved_builtin_young,
+        'sweepable_builtin': sweepable_builtin,
         'oldest_pending_at': oldest,
         'oldest_pending_age_seconds': oldest_age_seconds,
         'analysis': {
@@ -882,6 +924,118 @@ def dismiss_unresolved_event(conn, event_id, actor_agent_id, rationale='operator
         except Exception:
             pass
         raise
+
+
+#: Pending decisions a builtin stale-mutation sweep may auto-dismiss.
+_STALE_BUILTIN_DECISIONS = (
+    'builtin_memory_replace_unresolved_target',
+    'builtin_memory_remove_unresolved_target',
+    'builtin_memory_replace_missing_old_text',
+    'builtin_memory_remove_missing_old_text',
+    'builtin_memory_replace_missing_content',
+)
+
+
+def auto_dismiss_stale_builtin(conn, days=7, actor_agent_id=None):
+    """Auto-dismiss builtin mutation events stuck longer than `days`.
+
+    Old unresolved builtin targets are almost always orphaned hook payloads
+    (the target memory never existed or was already handled). Dismissing
+    them keeps `journal_stats` honest without human clicks. Audited per
+    event; returns dismissed event ids.
+    """
+    if days < 0:
+        raise core.MemCoreError('builtin stale days must be >= 0')
+    marks = ','.join('?' for _ in _STALE_BUILTIN_DECISIONS)
+    rows = conn.execute(
+        'SELECT id, project_id, agent_id, decision FROM ingest_event '
+        "WHERE status='pending' AND decision IN (" + marks + ') '
+        "AND datetime(created_at) < datetime('now', '-' || ? || ' days') "
+        'ORDER BY created_at, id',
+        (*_STALE_BUILTIN_DECISIONS, days),
+    ).fetchall()
+    dismissed = []
+    for event_id, project_id, event_agent_id, decision in rows:
+        now = core._now()
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            cur = conn.execute(
+                "UPDATE ingest_event SET status='ignored', "
+                "decision='builtin_memory_mutation_auto_dismissed', "
+                'processed_at=? WHERE id=? AND status=\'pending\'',
+                (now, event_id),
+            )
+            if cur.rowcount != 1:
+                conn.execute('ROLLBACK')
+                continue
+            core._audit(
+                conn, 'journal_auto_dismiss', actor_agent_id,
+                project_id=project_id,
+                detail={'event_id': event_id,
+                        'event_agent_id': event_agent_id,
+                        'previous_decision': decision,
+                        'rationale': f'stale builtin unresolved > {days}d'})
+            conn.execute('COMMIT')
+            dismissed.append(event_id)
+        except Exception:
+            try:
+                conn.execute('ROLLBACK')
+            except Exception:
+                pass
+            raise
+    return dismissed
+
+
+def auto_resolve_defer_cap(conn, max_defers=3, actor_agent_id=None):
+    """Auto-ignore semantic events deferred `max_defers` times or more.
+
+    A repeatedly deferred event is the analyzer saying "never sure" —
+    keeping it pending forever only inflates the review queue. Returns
+    dismissed event ids.
+    """
+    if not isinstance(max_defers, int) or max_defers < 1:
+        raise core.MemCoreError('max_defers must be an integer >= 1')
+    rows = conn.execute(
+        'SELECT e.id, e.project_id, e.agent_id, e.decision, '
+        '  (SELECT COUNT(*) FROM ingest_analysis a '
+        "   WHERE a.event_id=e.id AND a.verdict='defer') AS defers "
+        'FROM ingest_event e '
+        "WHERE e.status='pending' AND e.decision='semantic_deferred' "
+        'ORDER BY e.created_at, e.id',
+    ).fetchall()
+    dismissed = []
+    for event_id, project_id, event_agent_id, decision, defers in rows:
+        if (defers or 0) < max_defers:
+            continue
+        now = core._now()
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            cur = conn.execute(
+                "UPDATE ingest_event SET status='ignored', "
+                "decision='semantic_defer_cap_reached', "
+                'processed_at=? WHERE id=? AND status=\'pending\'',
+                (now, event_id),
+            )
+            if cur.rowcount != 1:
+                conn.execute('ROLLBACK')
+                continue
+            core._audit(
+                conn, 'journal_auto_dismiss', actor_agent_id,
+                project_id=project_id,
+                detail={'event_id': event_id,
+                        'event_agent_id': event_agent_id,
+                        'previous_decision': decision,
+                        'defer_count': defers,
+                        'rationale': f'defer cap reached ({defers}>={max_defers})'})
+            conn.execute('COMMIT')
+            dismissed.append(event_id)
+        except Exception:
+            try:
+                conn.execute('ROLLBACK')
+            except Exception:
+                pass
+            raise
+    return dismissed
 
 
 def prune_journal(conn, days=30, statuses=('ignored', 'processed'), project_id=None):

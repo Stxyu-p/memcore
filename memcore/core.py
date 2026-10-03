@@ -622,6 +622,236 @@ def override_tombstone(conn, tombstone_id, agent_id):
         raise
 
 
+# ── autonomy: corroboration → accept → Golden Rule (ADR-0018/0019) ──
+
+#: Distinct corroborating agents required to auto-accept a claim.
+CORROBORATE_ACCEPT_N = 3
+#: Distinct corroborating agents required to crown a claim a Golden Rule.
+GOLDEN_N = 5
+#: Semantic confidence at or above which a `remember` verdict self-accepts.
+HIGH_CONFIDENCE_ACCEPT = 0.95
+
+
+def corroboration_members(conn, project_id, claim_fp):
+    """Memories carrying one fingerprint: (id, scope, owner, lifecycle, created_at).
+
+    Only live, non-terminal rows count toward corroboration. The caller
+    decides whether the count is sufficient; tombstone-blocked fingerprints
+    must be filtered by the caller via ``admission_allowed`` semantics.
+    """
+    return conn.execute(
+        'SELECT m.id, m.scope, m.owner_agent_id, m.lifecycle, m.created_at '
+        'FROM memory m '
+        'WHERE m.project_id=? AND m.claim_fingerprint=? '
+        "  AND m.lifecycle IN ('candidate','accepted','conflict') "
+        'ORDER BY (m.scope = \'project\') DESC, datetime(m.created_at) ASC, m.id ASC',
+        (project_id, claim_fp),
+    ).fetchall()
+
+
+def accept_memory(conn, memory_id, agent_id, reason, _manage_transaction=True):
+    """Promote a memory candidate/conflict → accepted. Audited. Reversible.
+
+    Used by the autonomy paths (corroboration, explicit durable signals,
+    high-confidence semantic verdicts). Human-equivalent trust: verification
+    is left untouched here — callers set it explicitly. Tombstone-blocked
+    claims and terminal lifecycles refuse.
+    """
+    if _manage_transaction:
+        conn.execute('BEGIN IMMEDIATE')
+    try:
+        project_id, scope, owner, lifecycle, _role = _require_memory_write_access(
+            conn, memory_id, agent_id
+        )
+        if lifecycle == 'accepted':
+            if _manage_transaction:
+                conn.execute('ROLLBACK')
+            return False
+        if lifecycle in ('rejected', 'disabled', 'superseded'):
+            raise MemCoreError(
+                f'cannot accept terminal memory (lifecycle={lifecycle})'
+            )
+        _cur_ver, claim_fp = _current_claim_identity(conn, memory_id)
+        blocked = _tombstone_active(
+            conn, claim_fp, project_id, scope=scope, agent_id=owner
+        )
+        if blocked:
+            raise TombstoneBlocked(claim_fp, blocked[0])
+        conn.execute(
+            "UPDATE memory SET lifecycle='accepted', updated_at=? WHERE id=?",
+            (_now(), memory_id),
+        )
+        _audit(conn, 'auto_accept', agent_id, memory_id, project_id,
+               {'reason': reason, 'previous_lifecycle': lifecycle})
+        if _manage_transaction:
+            conn.execute('COMMIT')
+        return True
+    except Exception:
+        if _manage_transaction:
+            try:
+                conn.execute('ROLLBACK')
+            except sqlite3.OperationalError:
+                pass
+        raise
+
+
+def set_golden(conn, memory_id, agent_id, golden=True, _manage_transaction=True):
+    """Pin/unpin a memory as Golden Rule (pinned+critical). Audited."""
+    if _manage_transaction:
+        conn.execute('BEGIN IMMEDIATE')
+    try:
+        project_id, _scope, _owner, _lifecycle, _role = _require_memory_write_access(
+            conn, memory_id, agent_id
+        )
+        conn.execute(
+            'UPDATE memory SET pinned=?, critical=?, updated_at=? WHERE id=?',
+            (1 if golden else 0, 1 if golden else 0, _now(), memory_id),
+        )
+        _audit(conn, 'auto_golden_promote' if golden else 'auto_golden_demote',
+               agent_id, memory_id, project_id, {'golden': golden})
+        if _manage_transaction:
+            conn.execute('COMMIT')
+        return True
+    except Exception:
+        if _manage_transaction:
+            try:
+                conn.execute('ROLLBACK')
+            except sqlite3.OperationalError:
+                pass
+        raise
+
+
+def maybe_auto_corrob(conn, project_id, claim_fp, actor_agent_id):
+    """Corroboration sweep for one fingerprint. Returns a result dict.
+
+    Counts DISTINCT owner agents holding the claim. Tombstone-blocked →
+    no-op (veto wins). >=3 → canonical copy accepted project-wide;
+    >=5 → canonical additionally crowned Golden (pinned+critical).
+    Runs in the caller's transaction when one is open, else its own.
+    """
+    members = corroboration_members(conn, project_id, claim_fp)
+    agents = sorted({m[2] for m in members})
+    if not members:
+        return {'fingerprint': claim_fp, 'sources': 0, 'action': 'none'}
+    # Tombstone veto: a blocked claim never auto-promotes. Check the project
+    # guard plus every member's private guard — a private rejection must also
+    # stop a later project-wide coronation of the same claim.
+    veto = _tombstone_active(conn, claim_fp, project_id)
+    veto_by = None
+    if veto:
+        veto_by = veto[0]
+    else:
+        for _mid, _scope, owner, _lc, _ts in members:
+            priv = _tombstone_active(
+                conn, claim_fp, project_id, scope='private', agent_id=owner)
+            if priv:
+                veto_by = priv[0]
+                break
+    if veto_by:
+        return {'fingerprint': claim_fp, 'sources': len(agents),
+                'action': 'vetoed', 'tombstone_id': veto_by}
+    if len(agents) < CORROBORATE_ACCEPT_N:
+        return {'fingerprint': claim_fp, 'sources': len(agents),
+                'action': 'none'}
+    canonical_id = members[0][0]
+    result = {'fingerprint': claim_fp, 'sources': len(agents),
+              'canonical': canonical_id}
+    outer_tx = conn.in_transaction
+    if not outer_tx:
+        conn.execute('BEGIN IMMEDIATE')
+    try:
+        row = conn.execute(
+            'SELECT scope, lifecycle, verification FROM memory WHERE id=?',
+            (canonical_id,),
+        ).fetchone()
+        scope, lifecycle, verification = row
+        if scope != 'project':
+            conn.execute(
+                "UPDATE memory SET scope='project', updated_at=? WHERE id=?",
+                (_now(), canonical_id),
+            )
+        if lifecycle != 'accepted':
+            conn.execute(
+                "UPDATE memory SET lifecycle='accepted', updated_at=? WHERE id=?",
+                (_now(), canonical_id),
+            )
+        if verification not in ('source_backed', 'runtime_verified',
+                                 'user_authoritative'):
+            conn.execute(
+                "UPDATE memory SET verification='source_backed', updated_at=? "
+                'WHERE id=?',
+                (_now(), canonical_id),
+            )
+        _audit(conn, 'auto_corrob_accept', actor_agent_id, canonical_id,
+               project_id, {'fingerprint': claim_fp, 'sources': agents,
+                            'member_ids': [m[0] for m in members]})
+        result['action'] = 'accepted'
+        if len(agents) >= GOLDEN_N:
+            conn.execute(
+                'UPDATE memory SET pinned=1, critical=1, updated_at=? WHERE id=?',
+                (_now(), canonical_id),
+            )
+            _audit(conn, 'auto_golden_promote', actor_agent_id, canonical_id,
+                   project_id, {'fingerprint': claim_fp, 'sources': agents})
+            result['action'] = 'golden'
+        if not outer_tx:
+            conn.execute('COMMIT')
+        return result
+    except Exception:
+        if not outer_tx:
+            try:
+                conn.execute('ROLLBACK')
+            except sqlite3.OperationalError:
+                pass
+        raise
+
+
+def apply_freshness_decay(conn, aging_days=30, stale_days=90):
+    """Age-based freshness decay: current → aging → stale by updated_at.
+
+    Decay never changes lifecycle, never tombstones, and never hides rows —
+    it only lowers recall rank via the existing CASE ordering. Returns
+    (aged_ids, staled_ids). Fully reversible: any write refreshes updated_at.
+    """
+    if stale_days < aging_days:
+        raise MemCoreError('stale_days must be >= aging_days')
+    now = _now()
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        aged = [r[0] for r in conn.execute(
+            "SELECT id FROM memory WHERE freshness='current' "
+            "AND datetime(updated_at) < datetime(?, '-' || ? || ' days')",
+            (now, aging_days),
+        ).fetchall()]
+        staled = [r[0] for r in conn.execute(
+            "SELECT id FROM memory WHERE freshness='aging' "
+            "AND datetime(updated_at) < datetime(?, '-' || ? || ' days')",
+            (now, stale_days),
+        ).fetchall()]
+        for mem_id in aged:
+            conn.execute(
+                "UPDATE memory SET freshness='aging', updated_at=? WHERE id=?",
+                (now, mem_id),
+            )
+            _audit(conn, 'auto_decay_aging', None, mem_id, None,
+                   {'aging_days': aging_days})
+        for mem_id in staled:
+            conn.execute(
+                "UPDATE memory SET freshness='stale', updated_at=? WHERE id=?",
+                (now, mem_id),
+            )
+            _audit(conn, 'auto_decay_stale', None, mem_id, None,
+                   {'stale_days': stale_days})
+        conn.execute('COMMIT')
+        return aged, staled
+    except Exception:
+        try:
+            conn.execute('ROLLBACK')
+        except sqlite3.OperationalError:
+            pass
+        raise
+
+
 # Ã¢â€â‚¬Ã¢â€â‚¬ reads (scope enforced in SQL WHERE) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 def _recall_tombstone_guard(alias='m'):

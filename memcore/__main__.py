@@ -638,6 +638,137 @@ def cmd_journal_dismiss(args):
     _out(result)
 
 
+def cmd_corroborate(args):
+    """Scan one project's fingerprints for corroboration sets (dry-run default)."""
+    conn = _open(args) if args.apply else _open_readonly(args)
+    try:
+        project_id = _project_or_exit(conn, args.project)
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        rows = conn.execute(
+            'SELECT claim_fingerprint, COUNT(DISTINCT owner_agent_id) AS sources, '
+            '  COUNT(*) AS copies '
+            'FROM memory '
+            'WHERE project_id=? AND claim_fingerprint IS NOT NULL '
+            "  AND lifecycle IN ('candidate','accepted','conflict') "
+            'GROUP BY claim_fingerprint HAVING sources >= 2 '
+            'ORDER BY sources DESC, copies DESC',
+            (project_id,),
+        ).fetchall()
+        results = []
+        for claim_fp, sources, copies in rows:
+            if args.apply:
+                outcome = core.maybe_auto_corrob(conn, project_id, claim_fp, agent_id)
+            else:
+                outcome = {'fingerprint': claim_fp, 'sources': sources,
+                           'action': ('would_accept' if sources >= core.CORROBORATE_ACCEPT_N
+                                      else 'below_threshold')}
+            outcome['copies'] = copies
+            results.append(outcome)
+        acted = [r for r in results if r.get('action') in ('accepted', 'golden')]
+    finally:
+        conn.close()
+    print(f'corroboration scan: {len(results)} multi-source claim(s)')
+    for r in results:
+        extra = f" canonical={r['canonical']}" if 'canonical' in r else ''
+        print(f"  {r['fingerprint'][:8]}… sources={r['sources']} "
+              f"copies={r['copies']} action={r['action']}{extra}")
+    if args.apply:
+        print(f'  promoted: {len(acted)}')
+    else:
+        print('  dry-run: no writes (use --apply)')
+
+
+def cmd_golden_list(args):
+    """List the Golden Rule set: pinned+critical rows (always injected)."""
+    conn = _open_readonly(args)
+    try:
+        project_id = _project_or_exit(conn, args.project)
+        rows = conn.execute(
+            'SELECT m.id, m.owner_agent_id, m.lifecycle, m.verification, '
+            '  v.content, m.updated_at '
+            'FROM memory m JOIN memory_version v '
+            'ON v.id=m.current_version_id AND v.memory_id=m.id '
+            'WHERE m.project_id=? AND m.pinned=1 AND m.critical=1 '
+            "  AND m.lifecycle IN ('candidate','accepted','conflict') "
+            'ORDER BY datetime(m.updated_at) DESC, m.id ASC',
+            (project_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    _out({'project_id': project_id, 'golden_count': len(rows), 'golden': [
+        {'id': r[0], 'owner': r[1], 'lifecycle': r[2], 'verification': r[3],
+         'content': r[4], 'updated_at': r[5]}
+        for r in rows
+    ]})
+
+
+def cmd_journal_sweep(args):
+    """Auto-hygiene sweep: stale builtin dismiss + defer-cap (dry-run default)."""
+    conn = _open(args) if args.apply else _open_readonly(args)
+    try:
+        if args.apply:
+            dismissed_builtin = ingest.auto_dismiss_stale_builtin(
+                conn, days=args.builtin_days)
+            dismissed_defer = ingest.auto_resolve_defer_cap(
+                conn, max_defers=args.max_defers)
+        else:
+            marks = ','.join('?' for _ in ingest._STALE_BUILTIN_DECISIONS)
+            dismissed_builtin = [r[0] for r in conn.execute(
+                'SELECT id FROM ingest_event '
+                "WHERE status='pending' AND decision IN (" + marks + ') '
+                "AND datetime(created_at) < datetime('now', '-' || ? || ' days')",
+                (*ingest._STALE_BUILTIN_DECISIONS, args.builtin_days),
+            ).fetchall()]
+            dismissed_defer = [r[0] for r in conn.execute(
+                'SELECT e.id FROM ingest_event e '
+                'WHERE e.status=\'pending\' AND e.decision=\'semantic_deferred\' '
+                'AND (SELECT COUNT(*) FROM ingest_analysis a '
+                'WHERE a.event_id=e.id AND a.verdict=\'defer\') >= ?',
+                (args.max_defers,),
+            ).fetchall()]
+    finally:
+        conn.close()
+    print(f'journal sweep ({"applied" if args.apply else "dry-run"}):')
+    print(f'  stale builtin (>{args.builtin_days}d): {len(dismissed_builtin)}')
+    for eid in dismissed_builtin:
+        print(f'    {eid}')
+    print(f'  defer cap (>={args.max_defers} defers): {len(dismissed_defer)}')
+    for eid in dismissed_defer:
+        print(f'    {eid}')
+
+
+def cmd_decay(args):
+    """Freshness decay sweep: current → aging → stale (dry-run default)."""
+    conn = _open(args) if args.apply else _open_readonly(args)
+    try:
+        if args.apply:
+            aged, staled = core.apply_freshness_decay(
+                conn, aging_days=args.aging_days, stale_days=args.stale_days)
+        else:
+            now = core._now()
+            aged = [r[0] for r in conn.execute(
+                "SELECT id FROM memory WHERE freshness='current' "
+                "AND datetime(updated_at) < datetime(?, '-' || ? || ' days')",
+                (now, args.aging_days),
+            ).fetchall()]
+            staled = [r[0] for r in conn.execute(
+                "SELECT id FROM memory WHERE freshness='aging' "
+                "AND datetime(updated_at) < datetime(?, '-' || ? || ' days')",
+                (now, args.stale_days),
+            ).fetchall()]
+    finally:
+        conn.close()
+    print(f'decay ({"applied" if args.apply else "dry-run"}):')
+    print(f'  current → aging (>{args.aging_days}d): {len(aged)}')
+    for mid in aged:
+        print(f'    {mid}')
+    print(f'  aging → stale (>{args.stale_days}d): {len(staled)}')
+    for mid in staled:
+        print(f'    {mid}')
+
+
 def cmd_import(args):
     """Import memories from JSON file with --agent and --project options."""
     conn = None
@@ -1191,6 +1322,35 @@ def main(argv=None):
     p.add_argument('--agent', required=True, help='operator agent name')
     p.add_argument('--rationale', default='operator_dismissed', help='reason for dismissal')
     p.set_defaults(func=cmd_journal_dismiss)
+
+    p = sub.add_parser('corroborate', help='scan/apply corroboration promotion (dry-run default)')
+    p.add_argument('--project', required=True,
+                   help='project id/UUID or unique name/slug')
+    p.add_argument('--agent', required=True, help='operator agent name')
+    p.add_argument('--apply', action='store_true',
+                   help='promote eligible claims (dry-run otherwise)')
+    p.set_defaults(func=cmd_corroborate)
+
+    p = sub.add_parser('golden-list', help='list the Golden Rule set')
+    p.add_argument('--project', required=True,
+                   help='project id/UUID or unique name/slug')
+    p.set_defaults(func=cmd_golden_list)
+
+    p = sub.add_parser('journal-sweep', help='auto-dismiss stale builtin + defer-cap (dry-run default)')
+    p.add_argument('--builtin-days', type=int, default=7,
+                   help='builtin unresolved older than N days is dismissed')
+    p.add_argument('--max-defers', type=int, default=3,
+                   help='semantic events deferred N+ times are ignored')
+    p.add_argument('--apply', action='store_true',
+                   help='perform the sweep (dry-run otherwise)')
+    p.set_defaults(func=cmd_journal_sweep)
+
+    p = sub.add_parser('decay', help='freshness decay sweep (dry-run default)')
+    p.add_argument('--aging-days', type=int, default=30)
+    p.add_argument('--stale-days', type=int, default=90)
+    p.add_argument('--apply', action='store_true',
+                   help='perform the sweep (dry-run otherwise)')
+    p.set_defaults(func=cmd_decay)
 
     p = sub.add_parser('import', help='import memories from JSON')
     p.add_argument('--file', required=True, help='JSON file path')

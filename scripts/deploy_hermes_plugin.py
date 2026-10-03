@@ -24,9 +24,6 @@ RUNTIME_FILES = (
     'native_provider.py',
     'semantic_analyzer.py',
     'README.md',
-    'dashboard/plugin_api.py',
-    'dashboard/manifest.json',
-    'desktop/plugin.js',
 )
 
 

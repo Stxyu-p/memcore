@@ -330,7 +330,8 @@ class TestToolsAgainstRealStore(ToolTestBase):
         lifecycle = conn.execute(
             'SELECT lifecycle FROM memory WHERE id=?', (mem_id,)
         ).fetchone()[0]
-        self.assertEqual(lifecycle, 'candidate')
+        # ADR-0019: remember auto-accepts, so rollback restores 'accepted'.
+        self.assertEqual(lifecycle, 'accepted')
 
     def test_feedback_audit_uses_iso_z_timestamp(self):
         out = json.loads(plugin.tool_memory_remember(
@@ -378,7 +379,9 @@ class TestToolsAgainstRealStore(ToolTestBase):
         lifecycle = conn.execute(
             'SELECT lifecycle FROM memory WHERE id=?', (first['memory_id'],)
         ).fetchone()[0]
-        self.assertEqual(lifecycle, 'candidate')
+        # ADR-0019: remember auto-accepts, so the tombstone-blocked row stays
+        # 'accepted' (feedback changed nothing — the block is the point).
+        self.assertEqual(lifecycle, 'accepted')
 
     def test_stale_feedback_does_not_mutate_terminal_memory(self):
         out = json.loads(plugin.tool_memory_remember(
@@ -480,7 +483,9 @@ class TestToolsAgainstRealStore(ToolTestBase):
         self.assertFalse(superseded['success'])
         conn = plugin._get_conn(self.store)
         row = conn.execute('SELECT lifecycle FROM memory WHERE id=?', (other_mem,)).fetchone()
-        self.assertEqual(row[0], 'candidate')
+        # ADR-0019: the other-project row was accepted at remember time; the
+        # cross-project attempts changed nothing.
+        self.assertEqual(row[0], 'accepted')
 
     def test_auto_join_audited_once(self):
         cfg = {'config': make_config(store_path=self.store, project='auditjoin',

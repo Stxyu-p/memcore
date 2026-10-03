@@ -168,9 +168,33 @@ def _require_memory_write_access(conn, memory_id, agent_id):
 
 # Ã¢â€â‚¬Ã¢â€â‚¬ writes Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
+#: Allowed scope_detail prefixes. A detail tag subdivides private scope
+#: for filtering; it never widens read access (project -> members, anything
+#: else -> owner only, unchanged).
+SCOPE_DETAIL_PREFIXES = ('skill:', 'episode:', 'session:')
+
+
+def _validate_scope_detail(scope, scope_detail):
+    """Detail tags subdivide private scope only. Project memories stay
+    untagged so shared recall never silently narrows."""
+    if scope_detail is None:
+        return None
+    detail = str(scope_detail).strip()[:128]
+    if not detail:
+        return None
+    if scope != 'private':
+        raise MemCoreError(
+            'scope_detail is only allowed on private-scope memories')
+    if not detail.startswith(SCOPE_DETAIL_PREFIXES):
+        raise MemCoreError(
+            f'invalid scope_detail {detail!r}; '
+            f'must start with one of {SCOPE_DETAIL_PREFIXES}')
+    return detail
+
+
 def create_memory(conn, project_id, agent_id, content, scope='private',
                   memory_type='fact', lifecycle='candidate', idempotency_key=None,
-                  reason=None, _manage_transaction=True):
+                  reason=None, scope_detail=None, _manage_transaction=True):
     """Create a memory + first immutable version. Tombstone guard applies.
 
     Returns (memory_id, version_id) or existing ids if idempotency_key replays.
@@ -251,14 +275,32 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         mem_id = _new_id('mem')
         ver_id = _new_id('ver')
         now = _now()
-        conn.execute(
-            'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
-            '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
-            '  created_at, updated_at) '
-            "VALUES (?, ?, ?, ?, ?, ?, 'unverified', 'current', ?, ?, ?, ?)",
-            (mem_id, project_id, scope, agent_id, memory_type,
-             lifecycle, ver_id, claim_fp, now, now)
-        )
+        detail = _validate_scope_detail(scope, scope_detail)
+        mem_cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
+        if detail is not None and 'scope_detail' not in mem_cols:
+            raise MemCoreError(
+                'scope_detail requires migration 0016; open the store normally first')
+        if 'scope_detail' in mem_cols:
+            conn.execute(
+                'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
+                '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
+                '  created_at, updated_at, scope_detail) '
+                "VALUES (?, ?, ?, ?, ?, ?, 'unverified', 'current', ?, ?, ?, ?, ?)",
+                (mem_id, project_id, scope, agent_id, memory_type,
+                 lifecycle, ver_id, claim_fp, now, now, detail)
+            )
+        else:
+            if detail is not None:
+                raise MemCoreError(
+                    'scope_detail requires migration 0016; open the store normally first')
+            conn.execute(
+                'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
+                '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
+                '  created_at, updated_at) '
+                "VALUES (?, ?, ?, ?, ?, ?, 'unverified', 'current', ?, ?, ?, ?)",
+                (mem_id, project_id, scope, agent_id, memory_type,
+                 lifecycle, ver_id, claim_fp, now, now)
+            )
         conn.execute(
             'INSERT INTO memory_version (id, memory_id, content, reason, '
             '  created_by_agent_id, created_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -1071,12 +1113,16 @@ def record_recall(conn, memory_ids) -> int:
         return 0
 
 
-def search(conn, project_id, agent_id, query, limit=20):
+def search(conn, project_id, agent_id, query, limit=20,
+           scope_detail=None):
     """FTS5 search over memory content, scope-enforced in SQL.
 
     Deterministic rank: FTS bm25 + pinned + lifecycle/verification/freshness.
     For non-ASCII queries, try an exact Unicode substring match first because
     SQLite unicode61 does not segment Thai/CJK natural-language words well.
+
+    scope_detail narrows to one private subdivision (e.g. 'skill:x'); None
+    means no narrowing. Project-scope rows never carry a detail tag.
     """
     try:
         limit = int(limit)
@@ -1090,6 +1136,14 @@ def search(conn, project_id, agent_id, query, limit=20):
         return []
     if _membership_role(conn, project_id, agent_id) is None:
         return []
+    detail_filter = ''
+    detail_params: tuple = ()
+    if scope_detail is not None:
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
+        if 'scope_detail' not in cols:
+            return []
+        detail_filter = '  AND m.scope_detail = ? '
+        detail_params = (str(scope_detail),)
     exact_rows = []
     if any(ord(ch) > 127 for ch in raw_query):
         exact_rows = conn.execute(
@@ -1100,13 +1154,13 @@ def search(conn, project_id, agent_id, query, limit=20):
             "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
             "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
             '  AND ' + _recall_tombstone_guard('m') + ' '
-            '  AND instr(v.content, ?) > 0 '
+            '  AND instr(v.content, ?) > 0 ' + detail_filter +
             'ORDER BY m.pinned DESC, ' +
             "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
             "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
             "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END, " +
             'm.updated_at DESC, m.id ASC LIMIT ?',
-            (project_id, agent_id, raw_query, limit)
+            (project_id, agent_id, raw_query) + detail_params + (limit,)
         ).fetchall()
         if len(exact_rows) >= limit:
             return exact_rows[:limit]
@@ -1126,13 +1180,13 @@ def search(conn, project_id, agent_id, query, limit=20):
         '  AND m.project_id = ? '
         "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
         "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-        '  AND ' + _recall_tombstone_guard('m') + ' '
+        '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter +
         'ORDER BY m.pinned DESC, ' +
         "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
         "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
         "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END, " +
         'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
-        (match_expr, project_id, agent_id, fts_limit)
+        (match_expr, project_id, agent_id) + detail_params + (fts_limit,)
     )
     fts_rows = cur.fetchall()
     if not exact_rows:

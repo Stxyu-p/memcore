@@ -566,6 +566,91 @@ class TestContradictionSweep(unittest.TestCase):
                 self.conn, a, b, self.agent, reason='test pair')
 
 
+class TestScopeDetail(unittest.TestCase):
+    """Phase 6d: scope_detail subdivides private scope; governance untouched."""
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp(prefix='memcore_scoped_')
+        self.db_path = os.path.join(self.tmpdir, 'scoped.db')
+        self.conn = store.open_store(self.db_path)
+        self.project = 'proj-scoped'
+        self.agent = 'agent-scoped'
+        self.other = 'agent-other'
+        for aid in (self.agent, self.other):
+            self.conn.execute(
+                'INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)',
+                (aid, aid.removeprefix('agent-'), aid.removeprefix('agent-')),
+            )
+        self.conn.execute(
+            "INSERT INTO project (id, name) VALUES (?, 'scoped')", (self.project,)
+        )
+        for aid in (self.agent, self.other):
+            self.conn.execute(
+                'INSERT INTO project_membership (project_id, agent_id, role) '
+                'VALUES (?, ?, ?)', (self.project, aid, 'member'),
+            )
+        self.conn.commit()
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def test_tagged_private_memory_filters_by_detail(self):
+        from memcore import core as _core
+        _core.create_memory(
+            self.conn, self.project, self.agent, 'skill tagged probe alpha',
+            scope='private', scope_detail='skill:alpha')
+        _core.create_memory(
+            self.conn, self.project, self.agent, 'skill tagged probe beta',
+            scope='private', scope_detail='skill:beta')
+        hits = _core.search(
+            self.conn, self.project, self.agent, 'probe',
+            scope_detail='skill:alpha')
+        self.assertEqual(len(hits), 1)
+        self.assertIn('alpha', hits[0][5])
+
+    def test_untagged_search_sees_everything(self):
+        from memcore import core as _core
+        _core.create_memory(
+            self.conn, self.project, self.agent, 'detail visibility probe',
+            scope='private', scope_detail='skill:x')
+        _core.create_memory(
+            self.conn, self.project, self.agent, 'detail visibility probe',
+            scope='private')
+        hits = _core.search(self.conn, self.project, self.agent, 'probe')
+        self.assertEqual(len(hits), 2)
+
+    def test_detail_does_not_widen_access(self):
+        from memcore import core as _core
+        _core.create_memory(
+            self.conn, self.project, self.agent, 'owner only detail probe',
+            scope='private', scope_detail='skill:x')
+        hits = _core.search(self.conn, self.project, self.other, 'probe')
+        self.assertEqual(hits, [])
+
+    def test_project_scope_rejects_detail(self):
+        from memcore import core as _core
+        with self.assertRaises(_core.MemCoreError):
+            _core.create_memory(
+                self.conn, self.project, self.agent, 'project detail probe',
+                scope='project', scope_detail='skill:x')
+
+    def test_invalid_prefix_rejected(self):
+        from memcore import core as _core
+        with self.assertRaises(_core.MemCoreError):
+            _core.create_memory(
+                self.conn, self.project, self.agent, 'bad prefix probe',
+                scope='private', scope_detail='bogus:x')
+
+
 class TestZeroFillGuard(unittest.TestCase):
     """open_store must refuse an externally-damaged file with a clear error.
 

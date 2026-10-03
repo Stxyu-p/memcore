@@ -300,6 +300,18 @@ CREATE INDEX IF NOT EXISTS idx_memory_last_recalled ON memory(last_recalled);
 """
 
 
+_SCOPE_DETAIL = """
+-- 0016: optional scope subdivision tag (Phase 6d).
+-- scope itself stays project/private (governance untouched). scope_detail
+-- holds 'skill:<name>' / 'episode:<id>' / 'session:<id>' or NULL for
+-- untagged rows. Read rule unchanged: project -> members, anything else ->
+-- owner only. Recall can filter by detail opt-in.
+-- NOTE: ALTER TABLE lives in Python like 0014/0015 (not idempotent in SQL).
+CREATE INDEX IF NOT EXISTS idx_memory_scope_detail
+    ON memory(project_id, scope_detail);
+"""
+
+
 MIGRATIONS = [
     ('0001_initial_contract', None),  # None = apply schema.sql verbatim
     ('0002_fts_sync_triggers', _FTS_TRIGGERS),
@@ -329,6 +341,7 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0013_current_version_ownership', _CURRENT_VERSION_OWNERSHIP),
     ('0014_provenance_seal', _PROVENANCE_SEAL),
     ('0015_reinforcement_decay', _REINFORCEMENT_DECAY),
+    ('0016_scope_detail', _SCOPE_DETAIL),
 ]
 
 
@@ -1109,6 +1122,12 @@ def _apply_migration(conn, name, sql):
             ).fetchone():
                 conn.execute('ROLLBACK')
                 return
+            if name == '0016_scope_detail':
+                cols = {r[1] for r in conn.execute(
+                    'PRAGMA table_info(memory)')}
+                if 'scope_detail' not in cols:
+                    conn.execute(
+                        'ALTER TABLE memory ADD COLUMN scope_detail TEXT')
             if name == '0015_reinforcement_decay':
                 cols = {r[1] for r in conn.execute(
                     'PRAGMA table_info(memory)')}

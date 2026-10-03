@@ -166,4 +166,4 @@ cd integrations/hermes/memcore
 python -m unittest discover -s tests -v
 ```
 
-Current integration gate: **105 tests passing**.
+Current integration gate: **92 tests passing** (run the command above to confirm).

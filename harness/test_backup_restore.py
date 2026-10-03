@@ -467,6 +467,105 @@ class TestReinforcementDecay(unittest.TestCase):
         self.assertIn(mem_id, aged)
 
 
+class TestContradictionSweep(unittest.TestCase):
+    """Phase 6c: same subject + opposite polarity proposes, never resolves."""
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp(prefix='memcore_contra_')
+        self.db_path = os.path.join(self.tmpdir, 'contra.db')
+        self.conn = store.open_store(self.db_path)
+        self.project = 'proj-contra'
+        self.agent = 'agent-contra'
+        self.conn.execute(
+            "INSERT INTO project (id, name) VALUES (?, 'contra')", (self.project,)
+        )
+        self.conn.execute(
+            'INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)',
+            (self.agent, 'contra', 'contra'),
+        )
+        self.conn.execute(
+            'INSERT INTO project_membership (project_id, agent_id, role) '
+            'VALUES (?, ?, ?)', (self.project, self.agent, 'owner'),
+        )
+        self.conn.commit()
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def _add(self, content, lifecycle='accepted'):
+        from memcore import core as _core
+        mem_id, _ = _core.create_memory(
+            self.conn, self.project, self.agent, content,
+            scope='project', lifecycle=lifecycle)
+        return mem_id
+
+    def test_polarity_pair_is_found(self):
+        from memcore import core as _core
+        a = self._add('scan pacing uses 250ms per page')
+        b = self._add('scan pacing does not use 250ms per page')
+        pairs = _core.scan_contradictions(self.conn, self.project)
+        found = {(x, y) for x, y, _ in pairs} | {(y, x) for x, y, _ in pairs}
+        self.assertIn((a, b), found)
+
+    def test_thai_negation_pair_is_found(self):
+        from memcore import core as _core
+        a = self._add('ต่อไปนี้ใช้ B.AI สำหรับงานนี้')
+        b = self._add('ห้ามใช้ B.AI สำหรับงานนี้')
+        pairs = _core.scan_contradictions(self.conn, self.project)
+        found = {(x, y) for x, y, _ in pairs} | {(y, x) for x, y, _ in pairs}
+        self.assertIn((a, b), found)
+
+    def test_numeric_disagreement_is_found(self):
+        from memcore import core as _core
+        a = self._add('gateway port is 20128')
+        b = self._add('gateway port is 8080')
+        pairs = _core.scan_contradictions(self.conn, self.project)
+        found = {(x, y) for x, y, _ in pairs} | {(y, x) for x, y, _ in pairs}
+        self.assertIn((a, b), found)
+
+    def test_agreeing_claims_are_not_flagged(self):
+        from memcore import core as _core
+        self._add('gateway port is 20128')
+        self._add('gateway answers at localhost:20128')
+        self.assertEqual(
+            _core.scan_contradictions(self.conn, self.project), [])
+
+    def test_marking_requires_confirm_and_is_reversible(self):
+        from memcore import core as _core
+        a = self._add('scan pacing uses 250ms per page')
+        b = self._add('scan pacing does not use 250ms per page')
+        _core.mark_contradiction(
+            self.conn, a, b, self.agent, reason='test pair')
+        for mem_id in (a, b):
+            lc = self.conn.execute(
+                'SELECT lifecycle FROM memory WHERE id=?',
+                (mem_id,)).fetchone()[0]
+            self.assertEqual(lc, 'conflict')
+        # reversible via supersede
+        _core.supersede(self.conn, a, self.agent, 'scan pacing uses 300ms')
+        lc = self.conn.execute(
+            'SELECT lifecycle FROM memory WHERE id=?', (a,)).fetchone()[0]
+        self.assertEqual(lc, 'candidate')
+
+    def test_marking_terminal_memory_refuses(self):
+        from memcore import core as _core
+        a = self._add('terminal claim one')
+        b = self._add('terminal claim two')
+        _core.reject(self.conn, a, self.agent, reason='wrong')
+        with self.assertRaises(_core.MemCoreError):
+            _core.mark_contradiction(
+                self.conn, a, b, self.agent, reason='test pair')
+
+
 class TestZeroFillGuard(unittest.TestCase):
     """open_store must refuse an externally-damaged file with a clear error.
 

@@ -997,6 +997,42 @@ def cmd_restore_backup(args):
     print("run 'memcore doctor' to verify the restored store.")
 
 
+def cmd_contradictions(args):
+    """Scan one project for disagreeing claim pairs (read-only)."""
+    conn = _open_readonly(args)
+    try:
+        project_id = _project_or_exit(conn, args.project)
+        pairs = core.scan_contradictions(conn, project_id, limit_pairs=args.limit)
+    finally:
+        conn.close()
+    print(f'contradiction scan: {len(pairs)} candidate pair(s)')
+    for a_id, b_id, reason in pairs:
+        print(f'  {a_id} <-> {b_id} ({reason})')
+    if not pairs:
+        print('  no disagreeing pairs found')
+
+
+def cmd_mark_conflict(args):
+    """Mark two memories as conflict (governed, audited, reversible)."""
+    conn = _open_existing(args)
+    try:
+        project_id = _project_or_exit(conn, args.project)
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        if not args.confirm:
+            print('marking conflict is a governed mutation. Re-run with --confirm.')
+            print(f'  pair: {args.memory_a} <-> {args.memory_b}')
+            print(f'  reason: {args.reason}')
+            return
+        core.mark_contradiction(
+            conn, args.memory_a, args.memory_b, agent_id, args.reason)
+        conn.commit()
+        print(f'marked conflict: {args.memory_a} <-> {args.memory_b}')
+    finally:
+        conn.close()
+
+
 def cmd_doctor(args):
     conn = None
     try:
@@ -1541,7 +1577,24 @@ def main(argv=None):
                    help='actually perform the restore (preview otherwise)')
     p.set_defaults(func=cmd_restore_backup)
 
-    sub.add_parser('doctor', help='integrity + drift checks', parents=[common]).set_defaults(func=cmd_doctor)
+    p = sub.add_parser('contradictions', help='scan for disagreeing claim pairs (read-only)', parents=[common])
+    p.add_argument('--project', required=True,
+                   help='project id/UUID or unique name/slug')
+    p.add_argument('--limit', type=int, default=200)
+    p.set_defaults(func=cmd_contradictions)
+
+    p = sub.add_parser('mark-conflict', help='mark two memories as conflict (governed)', parents=[common])
+    p.add_argument('--project', required=True,
+                   help='project id/UUID or unique name/slug')
+    p.add_argument('--agent', required=True, help='acting agent name')
+    p.add_argument('--memory-a', required=True)
+    p.add_argument('--memory-b', required=True)
+    p.add_argument('--reason', required=True)
+    p.add_argument('--confirm', action='store_true',
+                   help='actually perform the marking (preview otherwise)')
+    p.set_defaults(func=cmd_mark_conflict)
+
+    sub.add_parser('doctor', help='integrity + drift checks').set_defaults(func=cmd_doctor)
 
     args = parser.parse_args(argv)
     # --db is accepted before or after the subcommand; the fallback is resolved

@@ -622,6 +622,82 @@ def override_tombstone(conn, tombstone_id, agent_id):
         raise
 
 
+def scan_contradictions(conn, project_id, limit_pairs: int = 200) -> list:
+    """Find live claim pairs that disagree. Content-free report.
+
+    Groups live memories by subject key (from contradiction.subject_key),
+    then tests pairs within each group with is_contradiction_pair. Returns
+    [(id_a, id_b, reason)] capped at limit_pairs. Never mutates: marking a
+    pair as conflict is a separate governed step (mark_contradiction).
+
+    Scales as O(groups x pairs-in-group); subject keys keep groups small.
+    On the live fleet (87 fingerprints) this is trivial.
+    """
+    from memcore import contradiction as _cd
+    rows = conn.execute(
+        'SELECT m.id, v.content FROM memory m '
+        'JOIN memory_version v ON v.id = m.current_version_id '
+        'AND v.memory_id = m.id '
+        'WHERE m.project_id = ? '
+        "AND m.lifecycle IN ('candidate','accepted') ",
+        (project_id,),
+    ).fetchall()
+    groups = {}
+    for mem_id, content in rows:
+        key = _cd.subject_key(content)
+        if key:
+            groups.setdefault(key, []).append((mem_id, content))
+    pairs = []
+    for _key, members in groups.items():
+        if len(members) < 2:
+            continue
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                (a_id, a_text), (b_id, b_text) = members[i], members[j]
+                hit, reason = _cd.is_contradiction_pair(a_text, b_text)
+                if hit:
+                    pairs.append((a_id, b_id, reason))
+                    if len(pairs) >= limit_pairs:
+                        return pairs
+    return pairs
+
+
+def mark_contradiction(conn, memory_id_a, memory_id_b, agent_id,
+                       reason, _manage_transaction=True):
+    """Mark two disagreeing memories as conflict. Audited. Reversible.
+
+    Both rows must be live (candidate/accepted/conflict) in the same project
+    and owned-writable by agent_id. Does NOT resolve: resolution is supersede
+    or reject by a human or governed tool. Returns True.
+    """
+    if _manage_transaction:
+        conn.execute('BEGIN IMMEDIATE')
+    try:
+        for mem_id in (memory_id_a, memory_id_b):
+            project_id, _scope, _owner, lifecycle, _role = (
+                _require_memory_write_access(conn, mem_id, agent_id))
+            if lifecycle in ('rejected', 'disabled', 'superseded'):
+                raise MemCoreError(
+                    f'cannot mark terminal memory as conflict: {mem_id}')
+        conn.execute(
+            "UPDATE memory SET lifecycle='conflict', updated_at=? WHERE id IN (?, ?)",
+            (_now(), memory_id_a, memory_id_b),
+        )
+        for mem_id in (memory_id_a, memory_id_b):
+            _audit(conn, 'mark_conflict', agent_id, mem_id, project_id,
+                   {'reason': reason, 'pair': [memory_id_a, memory_id_b]})
+        if _manage_transaction:
+            conn.execute('COMMIT')
+        return True
+    except Exception:
+        if _manage_transaction:
+            try:
+                conn.execute('ROLLBACK')
+            except sqlite3.OperationalError:
+                pass
+        raise
+
+
 # ── autonomy: corroboration → accept → Golden Rule (ADR-0018/0019) ──
 
 #: Distinct corroborating agents required to auto-accept a claim.

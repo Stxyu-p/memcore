@@ -1033,6 +1033,26 @@ def cmd_mark_conflict(args):
         conn.close()
 
 
+def cmd_history(args):
+    """Show the version valid at a timestamp (point-in-time read)."""
+    conn = _open_readonly(args)
+    try:
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        row = core.version_at(conn, args.memory_id, agent_id, args.as_of)
+    finally:
+        conn.close()
+    if row is None:
+        print('no version valid at that time (or not accessible)')
+        return
+    ver_id, content, valid_from, valid_until, by = row
+    print(f'version: {ver_id}')
+    print(f'valid: {valid_from} .. {valid_until or "now"}')
+    print(f'by: {by}')
+    print(f'content: {content}')
+
+
 def cmd_doctor(args):
     conn = None
     try:
@@ -1593,6 +1613,13 @@ def main(argv=None):
     p.add_argument('--confirm', action='store_true',
                    help='actually perform the marking (preview otherwise)')
     p.set_defaults(func=cmd_mark_conflict)
+
+    p = sub.add_parser('history', help='show the version valid at a timestamp', parents=[common])
+    p.add_argument('--agent', required=True, help='reading agent name')
+    p.add_argument('memory_id')
+    p.add_argument('--as-of', required=True, dest='as_of',
+                   help="ISO timestamp, e.g. '2026-09-01T00:00:00Z'")
+    p.set_defaults(func=cmd_history)
 
     sub.add_parser('doctor', help='integrity + drift checks').set_defaults(func=cmd_doctor)
 

@@ -998,6 +998,36 @@ def _recall_tombstone_guard(alias='m'):
     )
 
 
+def version_at(conn, memory_id, agent_id, as_of):
+    """The version of one memory that was valid at a timestamp.
+
+    Point-in-time read: the version whose [valid_from, valid_until) window
+    contains as_of. Scope-enforced like every other read. Returns the
+    memory_version row or None. Never mutates.
+    """
+    row = conn.execute(
+        'SELECT m.project_id FROM memory m WHERE m.id=?', (memory_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    project_id = row[0]
+    if _membership_role(conn, project_id, agent_id) is None:
+        return None
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(memory_version)')}
+    if 'valid_until' not in cols:
+        return None
+    return conn.execute(
+        'SELECT v.id, v.content, v.valid_from, v.valid_until, v.created_by_agent_id '
+        'FROM memory_version v JOIN memory m ON m.id = v.memory_id '
+        'WHERE v.memory_id = ? '
+        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+        '  AND datetime(v.valid_from) <= datetime(?) '
+        '  AND (v.valid_until IS NULL OR datetime(?) < datetime(v.valid_until)) '
+        'ORDER BY datetime(v.valid_from) DESC LIMIT 1',
+        (memory_id, agent_id, as_of, as_of),
+    ).fetchone()
+
+
 def visible_memories(conn, project_id, agent_id, include_disabled=False,
                      include_rejected=False):
     """All memories agent_id may read in project_id.

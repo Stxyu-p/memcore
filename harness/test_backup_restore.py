@@ -651,6 +651,89 @@ class TestScopeDetail(unittest.TestCase):
                 scope='private', scope_detail='bogus:x')
 
 
+class TestBitemporalRead(unittest.TestCase):
+    """Phase 6e: point-in-time reads over closed validity windows."""
+
+    def setUp(self):
+        import tempfile, time
+        self.tmpdir = tempfile.mkdtemp(prefix='memcore_bitemp_')
+        self.db_path = os.path.join(self.tmpdir, 'bitemp.db')
+        self.conn = store.open_store(self.db_path)
+        self.project = 'proj-bitemp'
+        self.agent = 'agent-bitemp'
+        self.other = 'agent-reader'
+        for aid in (self.agent, self.other):
+            self.conn.execute(
+                'INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)',
+                (aid, aid.removeprefix('agent-'), aid.removeprefix('agent-')),
+            )
+        self.conn.execute(
+            "INSERT INTO project (id, name) VALUES (?, 'bitemp')", (self.project,)
+        )
+        for aid in (self.agent, self.other):
+            self.conn.execute(
+                'INSERT INTO project_membership (project_id, agent_id, role) '
+                'VALUES (?, ?, ?)', (self.project, aid, 'member'),
+            )
+        self.conn.commit()
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def test_supersede_closes_old_window(self):
+        from memcore import core as _core
+        mem_id, v1 = _core.create_memory(
+            self.conn, self.project, self.agent, 'original bitemporal claim',
+            scope='project')
+        _core.supersede(self.conn, mem_id, self.agent, 'revised bitemporal claim')
+        row = self.conn.execute(
+            'SELECT valid_from, valid_until FROM memory_version WHERE id=?',
+            (v1,)).fetchone()
+        self.assertIsNotNone(row[0])
+        self.assertIsNotNone(row[1])
+
+    def test_version_at_returns_old_content_before_supersede(self):
+        import time
+        from memcore import core as _core
+        mem_id, v1 = _core.create_memory(
+            self.conn, self.project, self.agent, 'bitemporal before claim',
+            scope='project')
+        before = self.conn.execute(
+            'SELECT created_at FROM memory_version WHERE id=?',
+            (v1,)).fetchone()[0]
+        time.sleep(1.01)  # ISO timestamps have 1s resolution
+        _core.supersede(self.conn, mem_id, self.agent, 'bitemporal after claim')
+        row = _core.version_at(self.conn, mem_id, self.agent, before)
+        self.assertIsNotNone(row)
+        self.assertIn('before', row[1])
+        now_row = _core.version_at(
+            self.conn, mem_id, self.agent, '2999-01-01T00:00:00Z')
+        self.assertIn('after', now_row[1])
+
+    def test_version_at_respects_scope(self):
+        from memcore import core as _core
+        mem_id, _ = _core.create_memory(
+            self.conn, self.project, self.agent, 'private bitemporal claim',
+            scope='private')
+        row = _core.version_at(
+            self.conn, mem_id, self.other, '2999-01-01T00:00:00Z')
+        self.assertIsNone(row)
+
+    def test_version_at_unknown_memory_is_none(self):
+        from memcore import core as _core
+        self.assertIsNone(
+            _core.version_at(
+                self.conn, 'mem-ghost', self.agent, '2999-01-01T00:00:00Z'))
+
+
 class TestZeroFillGuard(unittest.TestCase):
     """open_store must refuse an externally-damaged file with a clear error.
 

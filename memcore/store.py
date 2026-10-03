@@ -312,6 +312,18 @@ CREATE INDEX IF NOT EXISTS idx_memory_scope_detail
 """
 
 
+_BITEMPORAL_VALID_UNTIL = """
+-- 0017: close the bi-temporal loop (Phase 6e).
+-- memory_version.valid_from has existed since the frozen schema but nothing
+-- ever closed a version's validity window. This adds valid_until, backfilled
+-- so every superseded version ends when its successor begins; current tips
+-- stay open (NULL). Point-in-time recall filters on the window.
+-- NOTE: ALTER TABLE lives in Python like 0014-0016 (not idempotent in SQL).
+CREATE INDEX IF NOT EXISTS idx_memory_version_validity
+    ON memory_version(memory_id, valid_from, valid_until);
+"""
+
+
 MIGRATIONS = [
     ('0001_initial_contract', None),  # None = apply schema.sql verbatim
     ('0002_fts_sync_triggers', _FTS_TRIGGERS),
@@ -342,6 +354,7 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0014_provenance_seal', _PROVENANCE_SEAL),
     ('0015_reinforcement_decay', _REINFORCEMENT_DECAY),
     ('0016_scope_detail', _SCOPE_DETAIL),
+    ('0017_bitemporal_valid_until', _BITEMPORAL_VALID_UNTIL),
 ]
 
 
@@ -1122,6 +1135,22 @@ def _apply_migration(conn, name, sql):
             ).fetchone():
                 conn.execute('ROLLBACK')
                 return
+            if name == '0017_bitemporal_valid_until':
+                cols = {r[1] for r in conn.execute(
+                    'PRAGMA table_info(memory_version)')}
+                if 'valid_until' not in cols:
+                    conn.execute(
+                        'ALTER TABLE memory_version '
+                        'ADD COLUMN valid_until TEXT')
+                # Backfill: every superseded version ends when its successor
+                # begins. Idempotent — only touches rows still open.
+                conn.execute(
+                    'UPDATE memory_version SET valid_until = ('
+                    '  SELECT s.created_at FROM memory_version s '
+                    '  WHERE s.supersedes_version_id = memory_version.id'
+                    ') WHERE valid_until IS NULL AND EXISTS ('
+                    '  SELECT 1 FROM memory_version s '
+                    '  WHERE s.supersedes_version_id = memory_version.id)')
             if name == '0016_scope_detail':
                 cols = {r[1] for r in conn.execute(
                     'PRAGMA table_info(memory)')}

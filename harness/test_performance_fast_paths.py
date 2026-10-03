@@ -33,7 +33,7 @@ class PerformanceFastPathTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_schema_installs_fast_path_indexes(self):
-        self.assertEqual(store.MIGRATIONS[-1][0], '0016_scope_detail')
+        self.assertEqual(store.MIGRATIONS[-1][0], '0017_bitemporal_valid_until')
         memory_indexes = {
             row[1] for row in self.conn.execute("PRAGMA index_list('memory')").fetchall()
         }
@@ -100,7 +100,7 @@ class PerformanceFastPathTests(unittest.TestCase):
                 upgraded.execute('SELECT claim_fingerprint FROM memory WHERE id=\'m\'').fetchone()[0],
                 core.fingerprint('Legacy durable claim')
             )
-            self.assertEqual(store._current_version(upgraded), '0016_scope_detail')
+            self.assertEqual(store._current_version(upgraded), '0017_bitemporal_valid_until')
         finally:
             upgraded.close()
 
@@ -132,7 +132,7 @@ class PerformanceFastPathTests(unittest.TestCase):
             conn.execute(
                 "DELETE FROM schema_migrations WHERE version IN "
                 "('0012_unicode_fingerprint_repair','0013_current_version_ownership',"
-                "'0014_provenance_seal','0015_reinforcement_decay','0016_scope_detail')"
+                "'0014_provenance_seal','0015_reinforcement_decay','0016_scope_detail','0017_bitemporal_valid_until')"
             )
         finally:
             conn.close()
@@ -202,7 +202,7 @@ class PerformanceFastPathTests(unittest.TestCase):
             # the ownership check inside 0013 must fire before 0014 runs.
             conn.execute(
                 "DELETE FROM schema_migrations WHERE version IN "
-                "('0013_current_version_ownership','0014_provenance_seal','0015_reinforcement_decay','0016_scope_detail')"
+                "('0013_current_version_ownership','0014_provenance_seal','0015_reinforcement_decay','0016_scope_detail','0017_bitemporal_valid_until')"
             )
             conn.execute(
                 'UPDATE memory SET current_version_id=?, claim_fingerprint=? WHERE id=?',

@@ -184,6 +184,9 @@ class JournalCliTests(unittest.TestCase):
             f.write('plugins:\n  enabled: []\n')
         old_home = os.environ.get('HERMES_HOME')
         os.environ['HERMES_HOME'] = hermes_home
+        # doctor gates on recovery readiness; this test is about journal health
+        # output, so give the fixture a snapshot so that gate stays quiet.
+        store.backup_store(self.db)
         output = io.StringIO()
         try:
             with contextlib.redirect_stdout(output):

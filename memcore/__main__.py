@@ -2,7 +2,10 @@
 import argparse
 import json
 import os
+import shutil
+import sqlite3
 import sys
+import time
 import pathlib
 
 from . import store, core, ingest
@@ -899,6 +902,101 @@ def _load_deploy_module(path: pathlib.Path):
     return module
 
 
+def cmd_backup(args):
+    """Create a verified recovery snapshot of the store."""
+    db_path = getattr(args, 'db', DEFAULT_DB)
+    try:
+        dest = store.backup_store(db_path, keep=args.keep)
+    except store.StoreError as e:
+        sys.exit(f'error: {e}')
+    size_kb = dest.stat().st_size // 1024
+    print(f'backup created: {dest} ({size_kb} KB)')
+    print(f'integrity_check: ok')
+    report = store.verify_backups(db_path)
+    print(f'snapshots retained: {report["snapshot_count"]}')
+    print(f'recovery_ready: {report["recovery_ready"]}')
+    if report['problems']:
+        print(f'  remaining problems: {", ".join(report["problems"])}')
+        print(f'  hint: run \'memcore backup\' again after '
+              f'{store.BACKUP_MAX_AGE_DAYS} more days to clear staleness, '
+              f'or repeat until {store.BACKUP_MIN_COUNT} snapshots exist.')
+
+
+def cmd_backup_status(args):
+    """Report recovery readiness without creating a snapshot."""
+    db_path = getattr(args, 'db', DEFAULT_DB)
+    _out(store.verify_backups(
+        db_path,
+        max_age_days=args.max_age_days,
+        min_count=args.min_count,
+    ))
+
+
+def cmd_restore_backup(args):
+    """Restore the store from a snapshot file. Requires --confirm.
+
+    The current store is preserved next to itself before being replaced, so an
+    accidental restore is itself recoverable.
+    """
+    db_path = pathlib.Path(getattr(args, 'db', DEFAULT_DB)).expanduser()
+    snapshot = pathlib.Path(args.snapshot).expanduser()
+    if not snapshot.is_file():
+        sys.exit(f'error: snapshot does not exist: {snapshot}')
+
+    check = sqlite3.connect(str(snapshot), timeout=10)
+    try:
+        row = check.execute('PRAGMA integrity_check').fetchone()
+        if not row or row[0] != 'ok':
+            sys.exit(f'error: snapshot failed integrity check: '
+                     f'{row[0] if row else "no result"}')
+        counts = {
+            'memories': check.execute('SELECT COUNT(*) FROM memory').fetchone()[0],
+            'journal_events': check.execute(
+                'SELECT COUNT(*) FROM ingest_event').fetchone()[0],
+        }
+    except sqlite3.DatabaseError as e:
+        sys.exit(f'error: snapshot is unreadable: {e}')
+    finally:
+        check.close()
+
+    if not args.confirm:
+        print('restore is a destructive operation. Re-run with --confirm.')
+        print(f'  target   : {db_path}')
+        print(f'  snapshot : {snapshot}')
+        print(f'  contents : {counts["memories"]} memories, '
+              f'{counts["journal_events"]} journal events')
+        print('  the existing store is preserved as <name>.pre-restore-<ts>.bak')
+        return
+
+    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    if db_path.is_file():
+        preserved = db_path.with_name(f'{db_path.name}.pre-restore-{stamp}.bak')
+        shutil.copy2(db_path, preserved)
+        print(f'preserved current store: {preserved}')
+
+    # Sidecars belong to the file being replaced; keeping them would graft
+    # another database's WAL frames onto the restored image. A sidecar held by
+    # another live connection cannot be deleted, so fail loudly instead of
+    # silently producing a store whose WAL belongs to a different database.
+    for ext in ('-wal', '-shm'):
+        stale = db_path.with_name(db_path.name + ext)
+        if not stale.exists():
+            continue
+        try:
+            stale.unlink()
+        except PermissionError:
+            sys.exit(
+                f'error: cannot remove {stale.name} — it is in use. '
+                f'Close every process using this store, then retry.'
+            )
+
+    shutil.copy2(snapshot, db_path)
+    print(f'restored: {snapshot} -> {db_path}')
+    print(f'  memories={counts["memories"]} '
+          f'journal_events={counts["journal_events"]}')
+    print("run 'memcore doctor' to verify the restored store.")
+
+
 def cmd_doctor(args):
     conn = None
     try:
@@ -1086,6 +1184,10 @@ def cmd_doctor(args):
     # failed processing is an actual health failure.
     report['journal'] = ingest.journal_stats(conn)
 
+    # 8b. Recovery readiness. A healthy store with no recent verified backup
+    # is still one incident away from total data loss, so this gates doctor.
+    report['backups'] = store.verify_backups(getattr(args, 'db', DEFAULT_DB))
+
     conn.close()
 
     # 9. Deployed Hermes plugin runtime must match the Git source of truth.
@@ -1136,6 +1238,17 @@ def cmd_doctor(args):
     print(f"network path: {report['network_path']}")
     print(f"store parent writable: {report['store_parent_writable']}")
     print(f"fts index: in_sync={report['fts_index']['in_sync']}")
+    backup_report = report['backups']
+    count = backup_report['snapshot_count']
+    age = backup_report['newest_age_days']
+    print(
+        f"backups: {count} snapshot(s), "
+        f"newest {age if age is not None else 'n/a'}d old, "
+        f"recovery_ready={backup_report['recovery_ready']}"
+    )
+    if backup_report['problems']:
+        print(f"  backup problems: {', '.join(backup_report['problems'])}")
+        print(f"  hint: run 'memcore backup' to create a recovery point.")
     print(f"migration locks: {report['migration_locks']}")
     print(
         "journal: "
@@ -1177,6 +1290,7 @@ def cmd_doctor(args):
         or report['config_check'].get('errors')
         or not report['store_parent_writable']
         or not report['fts_index']['in_sync']
+        or not report['backups']['recovery_ready']
         or report['migration_locks'] != 'none'
         or report['journal']['by_status'].get('failed', 0) > 0
         or bool(deploy.get('missing_plugin'))
@@ -1193,33 +1307,42 @@ def main(argv=None):
         description='MemCore — shared project memory core + CLI'
     )
     parser.add_argument('--db', default=DEFAULT_DB, help='store path (default ~/.memcore/memory.db)')
+    # --db must be accepted in either position (`memcore --db X doctor` and
+    # `memcore doctor --db X`). argparse handles the former natively; the
+    # latter needs the flag re-declared on each subparser.
+    common = argparse.ArgumentParser(add_help=False)
+    # SUPPRESS (not None) so an absent --db leaves no attribute for the
+    # subparser to overwrite — that is what made `--db X doctor` silently
+    # fall back to DEFAULT_DB and touch the real user store.
+    common.add_argument('--db', default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+
     sub = parser.add_subparsers(dest='command', required=True)
 
-    sub.add_parser('init', help='create store').set_defaults(func=cmd_init)
+    sub.add_parser('init', help='create store', parents=[common]).set_defaults(func=cmd_init)
 
-    p = sub.add_parser('project', help='project management')
+    p = sub.add_parser('project', help='project management', parents=[common])
     psub = p.add_subparsers(dest='subcommand', required=True)
-    pa = psub.add_parser('add')
+    pa = psub.add_parser('add', parents=[common])
     pa.add_argument('name')
     pa.add_argument('--description', default='')
     pa.set_defaults(func=cmd_project_add)
-    psub.add_parser('list').set_defaults(func=cmd_project_list)
+    psub.add_parser('list', parents=[common]).set_defaults(func=cmd_project_list)
 
-    p = sub.add_parser('agent', help='agent management')
+    p = sub.add_parser('agent', help='agent management', parents=[common])
     psub = p.add_subparsers(dest='subcommand', required=True)
-    pa = psub.add_parser('add')
+    pa = psub.add_parser('add', parents=[common])
     pa.add_argument('name')
     pa.set_defaults(func=cmd_agent_add)
 
-    p = sub.add_parser('member', help='membership management')
+    p = sub.add_parser('member', help='membership management', parents=[common])
     psub = p.add_subparsers(dest='subcommand', required=True)
-    pa = psub.add_parser('add')
+    pa = psub.add_parser('add', parents=[common])
     pa.add_argument('project', help='project id/UUID or unique name/slug')
     pa.add_argument('agent')
     pa.add_argument('--role', default='member', choices=['member', 'owner'])
     pa.set_defaults(func=cmd_member_add)
 
-    p = sub.add_parser('remember', help='store a memory')
+    p = sub.add_parser('remember', help='store a memory', parents=[common])
     p.add_argument('--project', required=True,
                    help='project id/UUID or unique name/slug')
     p.add_argument('--agent', required=True)
@@ -1230,7 +1353,7 @@ def main(argv=None):
     p.add_argument('--reason', default=None)
     p.set_defaults(func=cmd_remember)
 
-    p = sub.add_parser('search', help='FTS5 search over memories')
+    p = sub.add_parser('search', help='FTS5 search over memories', parents=[common])
     p.add_argument('--project', required=True,
                    help='project id/UUID or unique name/slug')
     p.add_argument('--agent', required=True)
@@ -1238,42 +1361,42 @@ def main(argv=None):
     p.add_argument('--limit', type=int, default=20)
     p.set_defaults(func=cmd_search)
 
-    p = sub.add_parser('promote', help='private -> project scope')
+    p = sub.add_parser('promote', help='private -> project scope', parents=[common])
     p.add_argument('memory_id')
     p.add_argument('--agent', required=True)
     p.set_defaults(func=cmd_promote)
 
-    p = sub.add_parser('supersede', help='correct a memory (new version)')
+    p = sub.add_parser('supersede', help='correct a memory (new version)', parents=[common])
     p.add_argument('memory_id')
     p.add_argument('--agent', required=True)
     p.add_argument('content')
     p.add_argument('--reason', default=None)
     p.set_defaults(func=cmd_supersede)
 
-    p = sub.add_parser('deactivate', help='soft delete a memory')
+    p = sub.add_parser('deactivate', help='soft delete a memory', parents=[common])
     p.add_argument('memory_id')
     p.add_argument('--agent', required=True)
     p.set_defaults(func=cmd_deactivate)
 
-    p = sub.add_parser('restore', help='restore a disabled memory')
+    p = sub.add_parser('restore', help='restore a disabled memory', parents=[common])
     p.add_argument('memory_id')
     p.add_argument('--agent', required=True)
     p.set_defaults(func=cmd_restore)
 
-    p = sub.add_parser('reject', help='reject a memory and create a tombstone')
+    p = sub.add_parser('reject', help='reject a memory and create a tombstone', parents=[common])
     p.add_argument('memory_id')
     p.add_argument('--agent', required=True)
     p.add_argument('reason')
     p.set_defaults(func=cmd_reject)
 
-    p = sub.add_parser('tombstone', help='tombstone management')
+    p = sub.add_parser('tombstone', help='tombstone management', parents=[common])
     tsub = p.add_subparsers(dest='subcommand', required=True)
-    to = tsub.add_parser('override', help='explicitly override an active refusal guard')
+    to = tsub.add_parser('override', help='explicitly override an active refusal guard', parents=[common])
     to.add_argument('tombstone_id')
     to.add_argument('--agent', required=True)
     to.set_defaults(func=cmd_tombstone_override)
 
-    p = sub.add_parser('gc', help='retention sweep (reversible for memories)')
+    p = sub.add_parser('gc', help='retention sweep (reversible for memories)', parents=[common])
     p.add_argument('--candidate-days', type=int, default=30,
                    help='inactive unevidenced candidates older than N days are disabled (default 30)')
     p.add_argument('--tombstone-days', type=int, default=90,
@@ -1284,15 +1407,15 @@ def main(argv=None):
                    help='perform the sweep (dry-run otherwise)')
     p.set_defaults(func=cmd_gc)
 
-    sub.add_parser('stats', help='operational statistics').set_defaults(func=cmd_stats)
+    sub.add_parser('stats', help='operational statistics', parents=[common]).set_defaults(func=cmd_stats)
 
-    p = sub.add_parser('journal-stats', help='content-free ingest journal health')
+    p = sub.add_parser('journal-stats', help='content-free ingest journal health', parents=[common])
     p.add_argument('--project', default=None,
                    help='optional project id/UUID or unique name/slug')
     p.add_argument('--agent', default=None, help='optional agent name')
     p.set_defaults(func=cmd_journal_stats)
 
-    p = sub.add_parser('journal-review-list', help='list pending semantic review events')
+    p = sub.add_parser('journal-review-list', help='list pending semantic review events', parents=[common])
     p.add_argument('--project', required=True,
                    help='project id/UUID or unique name/slug')
     p.add_argument('--agent', required=True, help='agent name')
@@ -1301,7 +1424,7 @@ def main(argv=None):
                    help='explicitly reveal raw untrusted journal content')
     p.set_defaults(func=cmd_journal_review_list)
 
-    p = sub.add_parser('journal-review-decide', help='remember/ignore/defer one review event')
+    p = sub.add_parser('journal-review-decide', help='remember/ignore/defer one review event', parents=[common])
     p.add_argument('event_id')
     p.add_argument('--agent', required=True, help='event owner agent name')
     p.add_argument('--verdict', required=True, choices=['remember', 'ignore', 'defer'])
@@ -1312,18 +1435,18 @@ def main(argv=None):
     p.add_argument('--analyzer', default='memcore-cli')
     p.set_defaults(func=cmd_journal_review_decide)
 
-    p = sub.add_parser('journal-analysis-history', help='show semantic analysis audit history')
+    p = sub.add_parser('journal-analysis-history', help='show semantic analysis audit history', parents=[common])
     p.add_argument('event_id')
     p.add_argument('--agent', required=True, help='event owner agent name')
     p.set_defaults(func=cmd_journal_analysis_history)
 
-    p = sub.add_parser('journal-dismiss', help='dismiss pending unresolved built-in mutation or event')
+    p = sub.add_parser('journal-dismiss', help='dismiss pending unresolved built-in mutation or event', parents=[common])
     p.add_argument('event_id')
     p.add_argument('--agent', required=True, help='operator agent name')
     p.add_argument('--rationale', default='operator_dismissed', help='reason for dismissal')
     p.set_defaults(func=cmd_journal_dismiss)
 
-    p = sub.add_parser('corroborate', help='scan/apply corroboration promotion (dry-run default)')
+    p = sub.add_parser('corroborate', help='scan/apply corroboration promotion (dry-run default)', parents=[common])
     p.add_argument('--project', required=True,
                    help='project id/UUID or unique name/slug')
     p.add_argument('--agent', required=True, help='operator agent name')
@@ -1331,12 +1454,12 @@ def main(argv=None):
                    help='promote eligible claims (dry-run otherwise)')
     p.set_defaults(func=cmd_corroborate)
 
-    p = sub.add_parser('golden-list', help='list the Golden Rule set')
+    p = sub.add_parser('golden-list', help='list the Golden Rule set', parents=[common])
     p.add_argument('--project', required=True,
                    help='project id/UUID or unique name/slug')
     p.set_defaults(func=cmd_golden_list)
 
-    p = sub.add_parser('journal-sweep', help='auto-dismiss stale builtin + defer-cap (dry-run default)')
+    p = sub.add_parser('journal-sweep', help='auto-dismiss stale builtin + defer-cap (dry-run default)', parents=[common])
     p.add_argument('--builtin-days', type=int, default=7,
                    help='builtin unresolved older than N days is dismissed')
     p.add_argument('--max-defers', type=int, default=3,
@@ -1345,14 +1468,14 @@ def main(argv=None):
                    help='perform the sweep (dry-run otherwise)')
     p.set_defaults(func=cmd_journal_sweep)
 
-    p = sub.add_parser('decay', help='freshness decay sweep (dry-run default)')
+    p = sub.add_parser('decay', help='freshness decay sweep (dry-run default)', parents=[common])
     p.add_argument('--aging-days', type=int, default=30)
     p.add_argument('--stale-days', type=int, default=90)
     p.add_argument('--apply', action='store_true',
                    help='perform the sweep (dry-run otherwise)')
     p.set_defaults(func=cmd_decay)
 
-    p = sub.add_parser('import', help='import memories from JSON')
+    p = sub.add_parser('import', help='import memories from JSON', parents=[common])
     p.add_argument('--file', required=True, help='JSON file path')
     p.add_argument('--agent', required=True, help='agent name')
     p.add_argument('--project', required=True,
@@ -1363,9 +1486,34 @@ def main(argv=None):
                    help='preview validation/dedup results without writing anything')
     p.set_defaults(func=cmd_import)
 
-    sub.add_parser('doctor', help='integrity + drift checks').set_defaults(func=cmd_doctor)
+    p = sub.add_parser('backup', help='create a verified recovery snapshot', parents=[common])
+    p.add_argument('--keep', type=int, default=14,
+                   help='snapshots to retain (default 14)')
+    p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser('backup-status', help='report recovery readiness (no writes)', parents=[common])
+    p.add_argument('--max-age-days', type=int, default=store.BACKUP_MAX_AGE_DAYS,
+                   help=f'newest snapshot older than this is stale '
+                        f'(default {store.BACKUP_MAX_AGE_DAYS})')
+    p.add_argument('--min-count', type=int, default=store.BACKUP_MIN_COUNT,
+                   help=f'snapshots required for recovery_ready '
+                        f'(default {store.BACKUP_MIN_COUNT})')
+    p.set_defaults(func=cmd_backup_status)
+
+    p = sub.add_parser('restore-from-snapshot', help='restore the store from a snapshot', parents=[common])
+    p.add_argument('--snapshot', required=True, help='snapshot file to restore from')
+    p.add_argument('--confirm', action='store_true',
+                   help='actually perform the restore (preview otherwise)')
+    p.set_defaults(func=cmd_restore_backup)
+
+    sub.add_parser('doctor', help='integrity + drift checks', parents=[common]).set_defaults(func=cmd_doctor)
 
     args = parser.parse_args(argv)
+    # --db is accepted before or after the subcommand; the fallback is resolved
+    # here, once, because the subparser cannot distinguish "not given" from
+    # "given at the top level" without suppressing its own default.
+    if not getattr(args, 'db', None):
+        args.db = DEFAULT_DB
     args.func(args)
 
 

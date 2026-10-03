@@ -153,6 +153,10 @@ class CliImportTests(unittest.TestCase):
         }
         os.environ['MEMCORE_HERMES_PLUGIN_DIR'] = str(target)
         os.environ['HERMES_HOME'] = str(hermes_home)
+        # doctor gates on recovery readiness; these tests are about plugin
+        # deployment, so give the fixture store a snapshot to keep that gate
+        # from masking the deployment signal.
+        store.backup_store(self.db)
         output = io.StringIO()
         try:
             with contextlib.redirect_stdout(output):
@@ -509,6 +513,9 @@ class CliImportTests(unittest.TestCase):
             "VALUES ('proj-demo','agent-checker','member')"
         )
         conn.close()
+        # doctor gates on recovery readiness; give the fixture one so the
+        # assertion under test (binding check) is not masked by a missing backup.
+        store.backup_store(self.db)
         old = os.environ.get('HERMES_HOME')
         os.environ['HERMES_HOME'] = home
         output = io.StringIO()
@@ -532,6 +539,9 @@ class CliImportTests(unittest.TestCase):
             "VALUES ('uuid-project-123','agent-checker','member')"
         )
         conn.close()
+        # doctor gates on recovery readiness; without a snapshot the binding
+        # assertion below would be masked by an unrelated backup failure.
+        store.backup_store(self.db)
         old = os.environ.get('HERMES_HOME')
         os.environ['HERMES_HOME'] = home
         output = io.StringIO()

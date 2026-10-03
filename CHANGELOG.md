@@ -2,6 +2,57 @@
 
 All notable changes to MemCore are documented here.
 
+## [0.7.1] - 2026-10-03
+
+Recovery-readiness release. MemCore had no backup mechanism for its entire
+lifetime and `doctor` never checked for one; a zero-filled `memory.db`
+discovered on 2026-10-03 lost roughly ten days of memories for want of any
+recovery point. This release closes that gap and fixes the CLI defect that
+made the incident harder to contain.
+
+### Added
+- `store.backup_store()` — snapshot via SQLite's online backup API
+  (transaction-safe against concurrent writers, unlike a file copy), written
+  to a temp file, `PRAGMA integrity_check`ed, then atomically moved into
+  place. Retention keeps the newest `--keep` (default 14) managed snapshots.
+- `store.verify_backups()` — content-free recovery-readiness report:
+  snapshot count, newest/oldest age, `recovery_ready`, and specific problems.
+  Only snapshots this module wrote (`<stem>-<YYYYmmddTHHMMSSZ>.db`) count, so
+  a hand-placed `.bak` in the backup directory cannot make a store look
+  recoverable.
+- `memcore backup`, `memcore backup-status`, and
+  `memcore restore-from-snapshot --snapshot <file> [--confirm]`. Restore
+  previews without writing, preserves the current store as
+  `<name>.pre-restore-<ts>.bak`, removes the replaced file's `-wal`/`-shm`
+  sidecars, and aborts loudly if one of them is held by a live connection
+  rather than grafting foreign WAL frames onto the restored image.
+- `doctor` reports backup state and exits 1 when no verified snapshot exists
+  or the newest is older than 7 days. Snapshot count is reported but does not
+  gate: one integrity-checked snapshot is a usable recovery path.
+- `harness/test_backup_restore.py` — 25 tests covering snapshot fidelity,
+  self-containment, retention, foreign-file rejection, content-free reporting,
+  restore preview/preserve/sidecar handling, and the doctor gate.
+
+### Fixed
+- `--db` is now honoured before *or* after the subcommand. Previously the flag
+  was declared only on the top-level parser, so `memcore doctor --db X`
+  silently fell back to `~/.memcore/memory.db` and wrote to the real user
+  store. Every subparser now inherits a shared parent carrying `--db` with
+  `default=argparse.SUPPRESS`, and `main()` resolves the fallback once.
+
+### Validation
+- Harness suite: 291 tests, OK (2 expected failures, pre-existing).
+- Hermes integration suite: 96 tests, OK.
+- `memcore doctor` OK; plugin deploy `--check` reports the deployed copy in
+  sync with the Git source.
+
+### Known
+- The cause of the 2026-10-03 store corruption was never identified. Forensics
+  showed surviving btree interior nodes with wiped leaf payloads, consistent
+  with an interrupted bulk write rather than bit rot or a torn WAL checkpoint.
+  No process in the agent log wrote the store during the relevant window.
+  This release hardens recovery, not the (unknown) cause.
+
 ## [0.7.0] - 2026-10-03
 
 Autonomy release: MemCore can now accept deliberate writes and earn trust from

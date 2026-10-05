@@ -1,6 +1,6 @@
 # Seed Canon List — 2026-10-05 (Task 6, MIKA-owned)
 
-- **Status:** Pending P Choke approval (one click). No writes done.
+- **Status:** Approved by P Choke 2026-10-06. Batch 1 (claims 1-5) dispatched to NUA/SORA/MILIM; batch 2 (claims 6-10) follows after funnel verification.
 - **Project:** `proj-shared-platform` (all 10 rows, read-only verified 2026-10-06)
 - **Rule:** writers must store each sentence **verbatim** — do not reword. Corroboration keys on byte-identical normalized text; paraphrase = different fingerprint = no count.
 - **Writers:** MIKA + NUA + SORA + MILIM (≥3 distinct `owner_agent_id` per claim)

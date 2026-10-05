@@ -300,6 +300,8 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
                 "(event_id,memory_id,relation,created_at) VALUES (?,?,'duplicate',?)",
                 (event_id, existing, now)
             )
+            core._audit(conn, 'duplicate-merge', agent_id, existing,
+                        project_id, {'event_id': event_id})
             conn.execute('UPDATE ingest_analysis SET memory_id=? WHERE id=?',
                          (existing, analysis_id))
             conn.execute(
@@ -705,6 +707,8 @@ def process_event(conn, event_id):
                 "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'duplicate', ?)",
                 (event_id, existing, now)
             )
+            core._audit(conn, 'duplicate-merge', agent_id, existing,
+                        project_id, {'event_id': event_id})
             conn.execute(
                 "UPDATE ingest_event SET status='processed', decision='duplicate', processed_at=? "
                 'WHERE id=?', (now, event_id)

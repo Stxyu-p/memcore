@@ -497,6 +497,7 @@ def cmd_stats(args):
         stats = core.stats(conn)
         stats['schema_version'] = store._current_version(conn)
         stats['journal'] = ingest.journal_stats(conn)
+        stats['autonomy_per_day'] = ingest.autonomy_per_day(conn)
     finally:
         conn.close()
     _out(stats)
@@ -1239,6 +1240,9 @@ def cmd_doctor(args):
     # 8. Journal health is content-free. Review backlog is informational;
     # failed processing is an actual health failure.
     report['journal'] = ingest.journal_stats(conn)
+    # 8a. Journal age: how many whole days the oldest pending row has waited.
+    # Informational only — a cold queue reports None, never a health failure.
+    report['journal_age'] = ingest.journal_age(conn)
 
     # 8b. Recovery readiness. A healthy store with no recent verified backup
     # is still one incident away from total data loss, so this gates doctor.
@@ -1348,6 +1352,8 @@ def cmd_doctor(args):
         f"unresolved_builtin={report['journal']['unresolved_builtin_mutations']}, "
         f"failed={report['journal']['by_status'].get('failed', 0)}"
     )
+    oldest_days = report['journal_age']['oldest_pending_days']
+    print(f"journal age: oldest_pending={'n/a' if oldest_days is None else f'{oldest_days}d'}")
     if report['journal']['unresolved_builtin_mutations'] > 0:
         print("  hint: pending unresolved built-in mutations detected. Run 'memcore journal-stats' to inspect and 'memcore journal-dismiss <id> --agent <agent>' to resolve.")
     deploy = report['plugin_deployment']

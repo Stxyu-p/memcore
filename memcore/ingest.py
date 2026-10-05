@@ -930,6 +930,66 @@ def journal_stats(conn, project_id=None, agent_id=None):
     }
 
 
+#: Audit actions counted by the autonomy observability surface (Task 4).
+#: Content-free: only action names and day buckets, never memory text.
+AUTONOMY_AUDIT_ACTIONS = (
+    'auto_corrob_accept',
+    'auto_golden_promote',
+    'auto_accept',
+    'duplicate-merge',
+    'contradiction-hold',
+)
+
+
+def journal_age(conn, project_id=None, agent_id=None):
+    """Content-free age of the oldest pending journal row, in whole days.
+
+    Returns {'oldest_pending_days': int | None} — None when nothing is
+    pending. Whole days, not seconds: the seed-week question is whether
+    anything has been stuck for days, and seconds-level precision would
+    make the doctor line flap between runs.
+    """
+    filters = ["status='pending'"]
+    params = []
+    if project_id is not None:
+        filters.append('project_id=?')
+        params.append(project_id)
+    if agent_id is not None:
+        filters.append('agent_id=?')
+        params.append(agent_id)
+    where = ' WHERE ' + ' AND '.join(filters)
+    oldest = conn.execute(
+        'SELECT MIN(created_at) FROM ingest_event' + where, params
+    ).fetchone()[0]
+    if not oldest:
+        return {'oldest_pending_days': None}
+    days = conn.execute(
+        "SELECT CAST(julianday('now') - julianday(?) AS INTEGER)",
+        (oldest,),
+    ).fetchone()[0]
+    return {'oldest_pending_days': max(0, int(days))}
+
+
+def autonomy_per_day(conn, *, days=30):
+    """Content-free per-day counts of autonomy audit actions.
+
+    Returns {YYYY-MM-DD: {action: count}}. Only the AUTONOMY_AUDIT_ACTIONS
+    strings are counted; no memory text, no detail payloads.
+    """
+    marks = ','.join('?' for _ in AUTONOMY_AUDIT_ACTIONS)
+    rows = conn.execute(
+        'SELECT date(created_at), action, COUNT(*) FROM audit_event '
+        f"WHERE action IN ({marks}) "
+        "AND datetime(created_at) >= datetime('now', '-' || ? || ' days') "
+        'GROUP BY 1, 2 ORDER BY 1, 2',
+        (*AUTONOMY_AUDIT_ACTIONS, int(days)),
+    ).fetchall()
+    per_day = {}
+    for day, action, count in rows:
+        per_day.setdefault(day, {})[action] = count
+    return per_day
+
+
 def _dismissable_pending_decision(decision):
     if decision in SEMANTIC_QUEUE_DECISIONS:
         return True

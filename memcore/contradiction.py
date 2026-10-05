@@ -28,7 +28,9 @@ _POSITIVE_TH = frozenset({
 })
 
 # Numeric claims: "port 20128" vs "port 8080" on the same subject disagree.
-_NUMBER_RE = re.compile(r'\d+(?:\.\d+)*')
+# Standalone numbers only: digits glued inside a word (the "9" in "9router",
+# the "1" in "v1") are identifiers, not claims. Lookarounds keep stdlib-only.
+_NUMBER_RE = re.compile(r'(?<![A-Za-z0-9_])\d+(?:\.\d+)*(?![A-Za-z0-9_])')
 
 
 def _tokens(text):

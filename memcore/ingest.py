@@ -319,8 +319,33 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
         )
         # ADR-0019 high-confidence lane: confidence >= 0.95 self-accepts.
         # Below stays candidate. Tombstone-blocked claims refuse loudly.
+        # Task 2 gate: contradiction hit holds the accept, audits
+        # contradiction-hold, never resolves.
         decision = 'semantic_private_candidate'
         if confidence is not None and float(confidence) >= core.HIGH_CONFIDENCE_ACCEPT:
+            gate_hits = core.pre_accept_conflict_check(
+                conn, project_id, candidate_content,
+                exclude_memory_id=memory_id)
+            if gate_hits:
+                core._audit(conn, 'contradiction-hold', agent_id, memory_id,
+                            project_id, {'hits': [list(h) for h in gate_hits]})
+                now = core._now()
+                conn.execute(
+                    "INSERT INTO ingest_derivation "
+                    "(event_id,memory_id,relation,created_at) VALUES (?,?,'ignored',?)",
+                    (event_id, memory_id, now)
+                )
+                conn.execute('UPDATE ingest_analysis SET memory_id=? WHERE id=?',
+                             (memory_id, analysis_id))
+                conn.execute(
+                    "UPDATE ingest_event SET status='processed', decision=?, "
+                    "error=NULL, processed_at=? WHERE id=?",
+                    ('contradiction_hold', now, event_id)
+                )
+                conn.execute('COMMIT')
+                return {'event_id': event_id, 'status': 'processed',
+                        'decision': 'contradiction_hold', 'analysis_id': analysis_id,
+                        'memory_id': memory_id, 'held': True}
             core.accept_memory(
                 conn, memory_id, agent_id,
                 'high-confidence semantic auto-accept',
@@ -697,6 +722,32 @@ def process_event(conn, event_id):
         # ADR-0019 explicit lane: a deliberate durable signal ("จำไว้ว่า…",
         # memory_write/add) self-accepts instead of parking in candidate.
         # Tombstone-blocked claims refuse loudly; corroboration still runs.
+        # Task 2 gate: contradiction hit holds the accept, audits
+        # contradiction-hold, marks conflict when permitted, never resolves.
+        gate_hits = core.pre_accept_conflict_check(
+            conn, project_id, candidate, exclude_memory_id=memory_id)
+        if gate_hits:
+            try:
+                core.mark_contradiction(
+                    conn, memory_id, gate_hits[0][0], agent_id,
+                    gate_hits[0][1], _manage_transaction=False)
+            except core.PermissionDenied:
+                pass
+            core._audit(conn, 'contradiction-hold', agent_id, memory_id,
+                        project_id, {'hits': [list(h) for h in gate_hits]})
+            conn.execute(
+                "INSERT INTO ingest_derivation "
+                "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'ignored', ?)",
+                (event_id, memory_id, now)
+            )
+            conn.execute(
+                "UPDATE ingest_event SET status='processed', decision=?, processed_at=? "
+                'WHERE id=?', ('contradiction_hold', now, event_id)
+            )
+            conn.execute('COMMIT')
+            return {'event_id': event_id, 'status': 'processed',
+                    'decision': 'contradiction_hold', 'memory_id': memory_id,
+                    'held': True}
         decision = 'private_candidate'
         core.accept_memory(
             conn, memory_id, agent_id,

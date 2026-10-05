@@ -740,6 +740,36 @@ def mark_contradiction(conn, memory_id_a, memory_id_b, agent_id,
         raise
 
 
+def pre_accept_conflict_check(conn, project_id, content, exclude_memory_id=None):
+    """Read-only contradiction pre-check for auto-accept gates.
+
+    Returns list of (live_memory_id, reason) where reason in {'polarity', 'numeric'}.
+    Empty list = clean. Empty subject key -> fails closed with ('__empty_subject__', 'empty_subject_hold').
+    Only checks live rows (candidate/accepted/conflict) in the project, excluding exclude_memory_id.
+    """
+    from memcore import contradiction as _cd
+
+    key = _cd.subject_key(content)
+    if not key:
+        return [('__empty_subject__', 'empty_subject_hold')]
+
+    rows = conn.execute(
+        'SELECT m.id, v.content FROM memory m '
+        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+        'WHERE m.project_id = ? '
+        "AND m.lifecycle IN ('candidate','accepted','conflict') "
+        'AND (m.id != ? OR ? IS NULL)',
+        (project_id, exclude_memory_id, exclude_memory_id),
+    ).fetchall()
+
+    hits = []
+    for mem_id, mem_content in rows:
+        hit, reason = _cd.is_contradiction_pair(content, mem_content)
+        if hit:
+            hits.append((mem_id, reason))
+    return hits
+
+
 # ── autonomy: corroboration → accept → Golden Rule (ADR-0018/0019) ──
 
 #: Distinct corroborating agents required to auto-accept a claim.
@@ -851,6 +881,30 @@ def maybe_auto_corrob(conn, project_id, claim_fp, actor_agent_id):
     agents = sorted({m[2] for m in members})
     if not members:
         return {'fingerprint': claim_fp, 'sources': 0, 'action': 'none'}
+    # Task 2 gate: a live contradiction against this claim holds the
+    # promotion even when corroboration counts are met. Never resolves —
+    # audit contradiction-hold and return without accepting.
+    gate_hits = []
+    for mid in [m[0] for m in members]:
+        row = conn.execute(
+            'SELECT v.content FROM memory m '
+            'JOIN memory_version v ON v.id = m.current_version_id '
+            'AND v.memory_id = m.id WHERE m.id=?',
+            (mid,),
+        ).fetchone()
+        if row:
+            gate_hits = pre_accept_conflict_check(
+                conn, project_id, row[0], exclude_memory_id=mid)
+            if gate_hits:
+                break
+    if gate_hits:
+        _audit(conn, 'contradiction-hold', actor_agent_id, members[0][0],
+               project_id, {'fingerprint': claim_fp,
+                            'hits': [list(h) for h in gate_hits]})
+        if not conn.in_transaction:
+            conn.commit()
+        return {'fingerprint': claim_fp, 'sources': len(agents),
+                'action': 'contradiction_hold', 'hits': gate_hits}
     # Tombstone veto: a blocked claim never auto-promotes. Check the project
     # guard plus every member's private guard — a private rejection must also
     # stop a later project-wide coronation of the same claim.

@@ -85,6 +85,21 @@ class ContradictionGateTests(unittest.TestCase):
         self.assertEqual(hits[0][0], mem_id)
         self.assertEqual(hits[0][1], 'numeric')
 
+    def test_number_boundary_identifiers_ignored(self):
+        """ALTIMA minor: digits glued inside identifiers are not claims.
+
+        '9router' contributes no '9'; 'v1' contributes no '1'. Standalone
+        ports ('port 20128') still count. stdlib-only, no segmenter.
+        """
+        self.assertEqual(cd.numbers('9router listens on port 20128 v1'), frozenset({'20128'}))
+        self.assertEqual(cd.numbers('9router v1'), frozenset())
+        self.assertEqual(cd.numbers('port 8080 vs 20128'), frozenset({'8080', '20128'}))
+        # Same identifier on both sides with no standalone numbers: not numeric.
+        hit, reason = cd.is_contradiction_pair(
+            'use 9router gateway', 'use 9router gateway v1')
+        self.assertFalse(hit)
+        self.assertNotEqual(reason, 'numeric')
+
     def test_precheck_clean(self):
         """Unrelated subjects → empty list (clean)."""
         core.create_memory(

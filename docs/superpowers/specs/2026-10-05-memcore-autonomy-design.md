@@ -58,13 +58,20 @@ Corroboration keys on byte-identical normalized text. Different wording = differ
 
 ### 4.1 Allowed unattended (via `accept_memory`, audited)
 
-| Entry | Condition | Audit reason |
+| Entry | Condition | Audit action (exact string in `audit_event.action`) |
 |---|---|---|
 | Corroboration | distinct writers ≥ 3, tombstone clear, contradiction pre-check clean | `auto_corrob_accept` |
 | Golden | distinct writers ≥ 5, same pre-checks | `auto_golden_promote` |
-| High-confidence semantic | `remember` verdict confidence ≥ 0.95, pre-check clean | `high-confidence semantic auto-accept` |
-| Explicit durable signal | `memory_remember` / "จำไว้ว่า…" / `memory_write/add` journal event, pre-check clean | `explicit durable signal auto-accept` |
+| High-confidence semantic | `remember` verdict confidence ≥ 0.95, pre-check clean | `auto_accept` with `detail.reason='high-confidence semantic auto-accept'` |
+| Explicit durable signal | `memory_remember` / "จำไว้ว่า…" / `memory_write/add` journal event, pre-check clean | `auto_accept` with `detail.reason='explicit durable signal auto-accept'` |
 | Duplicate merge | same fingerprint already accepted & unblocked; new copy superseded into canonical | `duplicate-merge` (new audit string) |
+| Contradiction hold (blocked, not an accept) | pre-check hit on any of the above | `contradiction-hold` |
+
+> Note: `accept_memory()` always writes `action='auto_accept'` and carries
+> the lane in `detail.reason` (`core.py:832`). Only corroboration, golden,
+> duplicate-merge, and contradiction-hold have their own top-level actions.
+> `AUTONOMY_AUDIT_ACTIONS` in `ingest.py:935-941` enumerates exactly these
+> five plus `auto_accept`.
 
 ### 4.2 Blocked from auto (stay candidate + human queue)
 

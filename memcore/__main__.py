@@ -401,8 +401,68 @@ def cmd_reject(args):
         agent_id, exists = _agent_identity_or_exit(conn, args.agent)
         if not exists:
             sys.exit(f'error: agent {agent_id} does not exist; create it first')
-        core.reject(conn, args.memory_id, agent_id, args.reason)
-        print(f'rejected + tombstoned: {args.memory_id}')
+        result = core.reject(conn, args.memory_id, agent_id, args.reason)
+        if result['swept']:
+            print(f"rejected + tombstoned: {args.memory_id} "
+                  f"(swept {result['swept']} duplicate(s): "
+                  f"{', '.join(result['swept_ids'])})")
+        else:
+            print(f'rejected + tombstoned: {args.memory_id}')
+    except core.MemCoreError as e:
+        sys.exit(f'error: {e}')
+    finally:
+        conn.close()
+
+
+def cmd_reject_value(args):
+    conn = _open(args)
+    try:
+        project_id = _project_or_exit(conn, args.project)
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        result = core.reject_value(
+            conn, project_id, agent_id, args.content, args.reason)
+        print(f"rejected value + tombstoned: {result['fingerprint'][:8]}... "
+              f"(tombstone {result['tombstone_id']})")
+        if result['swept']:
+            print(f"swept {result['swept']} duplicate(s): "
+                  f"{', '.join(result['swept_ids'])}")
+    except core.MemCoreError as e:
+        sys.exit(f'error: {e}')
+    finally:
+        conn.close()
+
+
+def cmd_tombstone_list(args):
+    conn = _open_readonly(args)
+    try:
+        project_id = _project_or_exit(conn, args.project)
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        rows = core.list_tombstones(conn, project_id, agent_id)
+    except core.MemCoreError as e:
+        sys.exit(f'error: {e}')
+    finally:
+        conn.close()
+    if not rows:
+        print('(no active refusal guards)')
+        return
+    for tomb_id, claim_fp, scope, reason, created_at in rows:
+        print(f'{tomb_id} fp:{claim_fp[:8]} scope:{scope} '
+              f'created:{created_at} reason:{reason}')
+
+
+def cmd_tombstone_unreject(args):
+    conn = _open(args)
+    try:
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        outcome = core.unreject_tombstone(conn, args.tombstone_ref, agent_id)
+        print(('unrejected' if outcome['overridden'] else 'already overridden')
+              + f": {outcome['tombstone_id']}")
     except core.MemCoreError as e:
         sys.exit(f'error: {e}')
     finally:
@@ -1486,12 +1546,29 @@ def main(argv=None):
     p.add_argument('reason')
     p.set_defaults(func=cmd_reject)
 
+    p = sub.add_parser('reject-value', help='file a project refusal guard for a value (pre-emptive)', parents=[common])
+    p.add_argument('--project', required=True,
+                   help='project id/UUID or unique name/slug')
+    p.add_argument('--agent', required=True)
+    p.add_argument('--reason', required=True)
+    p.add_argument('content')
+    p.set_defaults(func=cmd_reject_value)
+
     p = sub.add_parser('tombstone', help='tombstone management', parents=[common])
     tsub = p.add_subparsers(dest='subcommand', required=True)
     to = tsub.add_parser('override', help='explicitly override an active refusal guard', parents=[common])
     to.add_argument('tombstone_id')
     to.add_argument('--agent', required=True)
     to.set_defaults(func=cmd_tombstone_override)
+    tl = tsub.add_parser('list', help='list active refusal guards (content-free)', parents=[common])
+    tl.add_argument('--project', required=True,
+                    help='project id/UUID or unique name/slug')
+    tl.add_argument('--agent', required=True)
+    tl.set_defaults(func=cmd_tombstone_list)
+    tu = tsub.add_parser('unreject', help='lift a refusal guard by id or fingerprint prefix', parents=[common])
+    tu.add_argument('tombstone_ref')
+    tu.add_argument('--agent', required=True)
+    tu.set_defaults(func=cmd_tombstone_unreject)
 
     p = sub.add_parser('gc', help='retention sweep (reversible for memories)', parents=[common])
     p.add_argument('--candidate-days', type=int, default=30,

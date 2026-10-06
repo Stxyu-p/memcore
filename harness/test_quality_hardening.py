@@ -82,10 +82,13 @@ class QualityHardeningTests(unittest.TestCase):
         self.assertEqual(
             core.visible_memories(self.conn, 'proj-main', 'agent-alice'), []
         )
+        # The reject sweeps the same-claim duplicate into rejected too, so
+        # both rows are in the rejected history — recall stays clean.
         historical = core.visible_memories(
             self.conn, 'proj-main', 'agent-alice', include_rejected=True
         )
-        self.assertEqual([row[0] for row in historical], [second])
+        self.assertEqual(
+            sorted(row[0] for row in historical), sorted([first, second]))
 
     def test_null_fingerprint_memory_fails_closed_from_recall(self):
         memory_id, _ = core.create_memory(

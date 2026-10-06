@@ -204,9 +204,12 @@ class AutoAcceptGatesTests(unittest.TestCase):
 
     def test_tombstone_blocked_accept_refuses(self):
         claim = 'tombstone blocked probe claim gates'
+        # Private lane: the project-row reject below sweeps project duplicates
+        # only, so this row stays a live candidate — and the accept path still
+        # meets the project guard as TombstoneBlocked.
         mem_candidate, _ = core.create_memory(
             self.conn, 'proj-test', 'agent-alice', claim,
-            scope='project', lifecycle='candidate',
+            scope='private', lifecycle='candidate',
         )
         mem_other, _ = core.create_memory(
             self.conn, 'proj-test', 'agent-alice', claim,

@@ -35,6 +35,31 @@ class NotFound(MemCoreError):
     pass
 
 
+class AmbiguousTombstonePrefix(MemCoreError):
+    """A fingerprint prefix matched more than one active refusal guard."""
+    def __init__(self, prefix, candidates):
+        self.prefix = prefix
+        self.candidates = candidates
+        super().__init__(
+            f'ambiguous refusal-guard prefix {prefix!r}: '
+            f'matches {len(candidates)} active guards; '
+            'use a longer prefix or the tombstone id'
+        )
+
+
+class RejectResult(dict):
+    """Outcome of reject(): a dict that stays truthy-compatible.
+
+    Existing callers treat reject() as a boolean (True = this call moved the
+    row to rejected). RejectResult preserves that: bool(result) is True only
+    when this call performed the transition. New callers read the counts.
+    Keys: rejected, tombstone_created, tombstone_id (the guard this call
+    created, or the pre-existing guard it reused), swept, swept_ids.
+    """
+    def __bool__(self):
+        return bool(self.get('rejected'))
+
+
 # ————— helpers ————————————————————————————————————————————————————————————————
 
 def fingerprint(content: str) -> str:
@@ -81,7 +106,8 @@ def admission_allowed(conn, content: str, project_id: str,
     return blocked is None
 
 
-def _tombstone_active(conn, claim_fp, project_id, scope='project', agent_id=None):
+def _active_tombstone_row(conn, claim_fp, project_id, scope='project', agent_id=None):
+    """The active refusal guard a lookup would hit: (id, reason) or None."""
     scopes = [project_id, 'global']
     if scope == 'private':
         if not agent_id:
@@ -91,13 +117,86 @@ def _tombstone_active(conn, claim_fp, project_id, scope='project', agent_id=None
         raise MemCoreError(f'invalid tombstone lookup scope: {scope}')
     marks = ','.join('?' for _ in scopes)
     cur = conn.execute(
-        'SELECT reason FROM tombstone '
+        'SELECT id, reason FROM tombstone '
         f'WHERE claim_fingerprint = ? AND scope IN ({marks}) '
         'AND overridden_by IS NULL ORDER BY '
         "CASE scope WHEN 'global' THEN 0 ELSE 1 END, created_at DESC LIMIT 1",
         (claim_fp, *scopes)
     )
     return cur.fetchone()
+
+
+def _tombstone_active(conn, claim_fp, project_id, scope='project', agent_id=None):
+    row = _active_tombstone_row(
+        conn, claim_fp, project_id, scope=scope, agent_id=agent_id)
+    return (row[1],) if row else None
+
+
+def _active_tombstone_id(conn, claim_fp, project_id, scope='project', agent_id=None):
+    """Id of the active guard _tombstone_active would report, or None."""
+    row = _active_tombstone_row(
+        conn, claim_fp, project_id, scope=scope, agent_id=agent_id)
+    return row[0] if row else None
+
+
+def _require_nonempty_reason(reason):
+    """A refusal guard stores no content; a non-empty reason is its identity."""
+    if not isinstance(reason, str) or not reason.strip():
+        raise MemCoreError(
+            'reject requires a non-empty reason '
+            '(the refusal guard stores no content; the reason is its identity)'
+        )
+    return reason
+
+
+def _sweep_duplicate_claims(conn, project_id, claim_fp, refusal_scope,
+                             actor_agent_id, reason, exclude_memory_id,
+                             tombstone_id):
+    """Reject live same-claim rows covered by one refusal guard.
+
+    One indexed query on (project_id, scope, claim_fingerprint, lifecycle) —
+    O(same-fingerprint), never a full-table scan. Only rows whose guard
+    mapping equals refusal_scope are swept, so a project guard sweeps project
+    rows and a private guard sweeps that owner's private rows; other lanes
+    are left alone. Each swept row moves to rejected with its own 'reject'
+    audit (swept:true, no write_key — recovery attribution stays on the
+    primary row). Legacy NULL-fingerprint rows never match; they are already
+    excluded from recall by the guard predicate. Returns [swept_ids].
+    """
+    if refusal_scope.startswith('private:'):
+        parts = refusal_scope.split(':', 2)
+        if len(parts) != 3 or parts[1] != project_id:
+            raise MemCoreError(f'invalid private refusal scope: {refusal_scope}')
+        sql = (
+            'SELECT id FROM memory WHERE project_id=? AND scope=\'private\' '
+            'AND owner_agent_id=? AND claim_fingerprint=? '
+            'AND lifecycle IN (\'candidate\',\'accepted\',\'conflict\') '
+        )
+        args = [project_id, parts[2], claim_fp]
+    else:
+        if refusal_scope != project_id:
+            raise MemCoreError(f'invalid project refusal scope: {refusal_scope}')
+        sql = (
+            'SELECT id FROM memory WHERE project_id=? AND scope=\'project\' '
+            'AND claim_fingerprint=? '
+            'AND lifecycle IN (\'candidate\',\'accepted\',\'conflict\') '
+        )
+        args = [project_id, claim_fp]
+    if exclude_memory_id is not None:
+        sql += 'AND id != ? '
+        args.append(exclude_memory_id)
+    sql += 'ORDER BY id'
+    swept = []
+    now = _now()
+    for (dup_id,) in conn.execute(sql, args).fetchall():
+        conn.execute(
+            "UPDATE memory SET lifecycle='rejected', updated_at=? WHERE id=?",
+            (now, dup_id)
+        )
+        _audit(conn, 'reject', actor_agent_id, dup_id, project_id,
+               {'reason': reason, 'swept': True, 'tombstone_id': tombstone_id})
+        swept.append(dup_id)
+    return swept
 
 
 def _membership_role(conn, project_id, agent_id):
@@ -553,9 +652,18 @@ def restore(conn, memory_id, agent_id):
 
 
 def reject(conn, memory_id, agent_id, reason, create_tombstone=True, write_key=None):
-    """Reject a memory and always leave a refusal fingerprint."""
+    """Reject a memory and always leave a refusal fingerprint.
+
+    The refusal guard covers one scope lane; every OTHER live row in the
+    same lane carrying the same claim is swept to rejected in the same
+    transaction (a rejected value may not linger where recall or a later
+    accept could resurrect it). Returns a RejectResult (truthy exactly
+    when this call moved the row to rejected): rejected, tombstone_created,
+    tombstone_id, swept, swept_ids.
+    """
     if not create_tombstone:
         raise MemCoreError('rejection requires a tombstone refusal guard')
+    _require_nonempty_reason(reason)
     conn.execute('BEGIN IMMEDIATE')
     try:
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
@@ -564,48 +672,204 @@ def reject(conn, memory_id, agent_id, reason, create_tombstone=True, write_key=N
         _cur_ver, claim_fp = _current_claim_identity(conn, memory_id)
 
         if lifecycle == 'rejected':
-            if create_tombstone and not _tombstone_active(
+            tombstone_id = _active_tombstone_id(
                 conn, claim_fp, project_id, scope=scope, agent_id=owner
-            ):
+            )
+            tombstone_created = False
+            if tombstone_id is None:
                 refusal_scope = _tombstone_scope(project_id, scope, owner)
+                tombstone_id = _new_id('tomb')
                 conn.execute(
                     'INSERT INTO tombstone (id, claim_fingerprint, scope, reason, created_at) '
                     'VALUES (?, ?, ?, ?, ?)',
-                    (_new_id('tomb'), claim_fp, refusal_scope, reason, _now())
+                    (tombstone_id, claim_fp, refusal_scope, reason, _now())
                 )
+                tombstone_created = True
+            else:
+                refusal_scope = _tombstone_scope(project_id, scope, owner)
+            swept = _sweep_duplicate_claims(
+                conn, project_id, claim_fp, refusal_scope,
+                agent_id, reason, memory_id, tombstone_id)
+            if tombstone_created:
                 _audit(conn, 'reject_tombstone_repair', agent_id, memory_id, project_id,
-                       {'reason': reason, 'scope': refusal_scope})
+                       {'reason': reason, 'scope': refusal_scope,
+                        'swept': len(swept), 'swept_ids': swept})
+                conn.execute('COMMIT')
+            elif swept:
+                _audit(conn, 'reject', agent_id, memory_id, project_id,
+                       {'reason': reason, 'tombstoned': False, 'swept': len(swept),
+                        'swept_ids': swept, 'repair_sweep': True},
+                       write_key=write_key)
                 conn.execute('COMMIT')
             else:
                 conn.execute('ROLLBACK')
-            return False
+            return RejectResult(rejected=False, tombstone_created=tombstone_created,
+                                tombstone_id=tombstone_id, swept=len(swept),
+                                swept_ids=swept)
 
         conn.execute(
             "UPDATE memory SET lifecycle='rejected', updated_at=? WHERE id=?",
             (_now(), memory_id)
         )
         tombstone_created = False
-        if create_tombstone and not _tombstone_active(
+        tombstone_id = _active_tombstone_id(
             conn, claim_fp, project_id, scope=scope, agent_id=owner
-        ):
+        )
+        if tombstone_id is None:
             refusal_scope = _tombstone_scope(project_id, scope, owner)
+            tombstone_id = _new_id('tomb')
             conn.execute(
                 'INSERT INTO tombstone (id, claim_fingerprint, scope, reason, created_at) '
                 'VALUES (?, ?, ?, ?, ?)',
-                (_new_id('tomb'), claim_fp, refusal_scope, reason, _now())
+                (tombstone_id, claim_fp, refusal_scope, reason, _now())
             )
             tombstone_created = True
+        else:
+            refusal_scope = _tombstone_scope(project_id, scope, owner)
+        swept = _sweep_duplicate_claims(
+            conn, project_id, claim_fp, refusal_scope,
+            agent_id, reason, memory_id, tombstone_id)
         _audit(conn, 'reject', agent_id, memory_id, project_id,
-               {'reason': reason, 'tombstoned': tombstone_created},
+               {'reason': reason, 'tombstoned': tombstone_created,
+                'tombstone_id': tombstone_id,
+                'swept': len(swept), 'swept_ids': swept},
                write_key=write_key)
         conn.execute('COMMIT')
-        return True
+        return RejectResult(rejected=True, tombstone_created=tombstone_created,
+                            tombstone_id=tombstone_id, swept=len(swept),
+                            swept_ids=swept)
     except Exception:
         try:
             conn.execute('ROLLBACK')
         except sqlite3.OperationalError:
             pass
         raise
+
+
+def reject_value(conn, project_id, agent_id, content, reason):
+    """File a project-scope refusal guard for a value with no memory row.
+
+    Pre-emptive form of reject: the claim need not be stored (or may
+    already be gone). Inserts the project guard, sweeps live project rows
+    carrying the same claim in the same transaction, and blocks later
+    admission via the normal guard. Already-guarded values are idempotent
+    (no duplicate guard row). Returns
+    {'tombstone_id', 'tombstone_created', 'swept', 'swept_ids',
+     'fingerprint'}. Project scope is deliberate: a value rejected without
+    a row has no owner lane, so the guard must cover the whole project —
+    the same lane a project-row reject would cover.
+    """
+    _require_nonempty_reason(reason)
+    if not isinstance(content, str):
+        raise MemCoreError('reject-value content must be a non-empty string')
+    claim_fp = fingerprint(content)
+    if not unicodedata.normalize('NFC', ' '.join(content.lower().strip().split())):
+        raise MemCoreError('reject-value content must be a non-empty string')
+    _require_membership(conn, project_id, agent_id)
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        existing = _active_tombstone_row(conn, claim_fp, project_id)
+        tombstone_created = False
+        if existing is None:
+            tombstone_id = _new_id('tomb')
+            conn.execute(
+                'INSERT INTO tombstone (id, claim_fingerprint, scope, reason, created_at) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (tombstone_id, claim_fp, project_id, reason, _now())
+            )
+            tombstone_created = True
+        else:
+            tombstone_id = existing[0]
+        swept = _sweep_duplicate_claims(
+            conn, project_id, claim_fp, project_id,
+            agent_id, reason, None, tombstone_id)
+        _audit(conn, 'reject_value', agent_id, None, project_id,
+               {'fingerprint': claim_fp, 'tombstone_id': tombstone_id,
+                'tombstone_created': tombstone_created,
+                'swept': len(swept), 'swept_ids': swept})
+        conn.execute('COMMIT')
+        return {'tombstone_id': tombstone_id,
+                'tombstone_created': tombstone_created,
+                'swept': len(swept), 'swept_ids': swept,
+                'fingerprint': claim_fp}
+    except Exception:
+        try:
+            conn.execute('ROLLBACK')
+        except sqlite3.OperationalError:
+            pass
+        raise
+
+
+def list_tombstones(conn, project_id, agent_id):
+    """Active refusal guards visible in one project, newest first.
+
+    Content-free rows: (id, claim_fingerprint, scope, reason, created_at).
+    The guard stores no content, so there is nothing to leak; the
+    fingerprint alone cannot reconstruct the claim. Overridden guards are
+    excluded — override is the soft-delete and GC purges them after 90d.
+    """
+    _require_membership(conn, project_id, agent_id)
+    scopes = [project_id, 'global', _private_tombstone_scope(project_id, agent_id)]
+    marks = ','.join('?' for _ in scopes)
+    return conn.execute(
+        'SELECT id, claim_fingerprint, scope, reason, created_at FROM tombstone '
+        f'WHERE scope IN ({marks}) AND overridden_by IS NULL '
+        'ORDER BY datetime(created_at) DESC, id ASC',
+        scopes,
+    ).fetchall()
+
+
+def unreject_tombstone(conn, tombstone_ref, agent_id, project_id=None):
+    """Lift one refusal guard by exact id or unique fingerprint prefix.
+
+    Exact id routes through the existing override path (same membership
+    rules; global still fails closed). Otherwise the ref is a leading
+    substring of the 16-char fingerprint, matched against the active
+    guards in the caller's member projects: zero matches raise NotFound,
+    more than one raises AmbiguousTombstonePrefix with content-free
+    (id, scope) candidates. No hard delete — unreject is a soft override
+    and GC still purges the row after 90d. Returns
+    {'tombstone_id', 'overridden'}.
+    """
+    ref = (tombstone_ref or '').strip().lower()
+    if not ref:
+        raise NotFound(f'tombstone {tombstone_ref!r} not found')
+    exact = conn.execute(
+        'SELECT id FROM tombstone WHERE id=?', (tombstone_ref,),
+    ).fetchone()
+    if exact is not None:
+        return {'tombstone_id': exact[0],
+                'overridden': override_tombstone(conn, exact[0], agent_id)}
+    if project_id is not None:
+        _require_membership(conn, project_id, agent_id)
+        scopes = [project_id, 'global',
+                  _private_tombstone_scope(project_id, agent_id)]
+    else:
+        memberships = conn.execute(
+            'SELECT project_id FROM project_membership WHERE agent_id=?',
+            (agent_id,),
+        ).fetchall()
+        if not memberships:
+            raise NotFound(f'tombstone {tombstone_ref!r} not found')
+        scopes = ['global']
+        for (pid,) in memberships:
+            scopes.append(pid)
+            scopes.append(_private_tombstone_scope(pid, agent_id))
+    marks = ','.join('?' for _ in scopes)
+    candidates = conn.execute(
+        'SELECT id, scope FROM tombstone '
+        'WHERE claim_fingerprint LIKE ? ESCAPE \'\\\' '
+        f'AND scope IN ({marks}) AND overridden_by IS NULL '
+        'ORDER BY id',
+        (ref.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%', *scopes),
+    ).fetchall()
+    if not candidates:
+        raise NotFound(f'tombstone {tombstone_ref!r} not found')
+    if len(candidates) > 1:
+        raise AmbiguousTombstonePrefix(ref, [(c[0], c[1]) for c in candidates])
+    resolved = candidates[0][0]
+    return {'tombstone_id': resolved,
+            'overridden': override_tombstone(conn, resolved, agent_id)}
 
 
 def override_tombstone(conn, tombstone_id, agent_id):

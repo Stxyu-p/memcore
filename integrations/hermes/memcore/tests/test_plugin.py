@@ -415,14 +415,17 @@ class TestToolsAgainstRealStore(ToolTestBase):
         accepted = json.loads(plugin.tool_memory_feedback(
             {'memory_id': first['memory_id'], 'outcome': 'accepted'}, self.ctx('sora')))
         self.assertFalse(accepted['success'])
-        self.assertIn('TombstoneBlocked', accepted['error'])
+        # The duplicate sweep rejects the same-claim row outright, so the
+        # feedback fails on the terminal-lifecycle check (fail-closed); the
+        # project guard stands behind it for any future re-admission.
+        self.assertIn('terminal', accepted['error'])
         conn = plugin._get_conn(self.store)
         lifecycle = conn.execute(
             'SELECT lifecycle FROM memory WHERE id=?', (first['memory_id'],)
         ).fetchone()[0]
-        # ADR-0019: remember auto-accepts, so the tombstone-blocked row stays
-        # 'accepted' (feedback changed nothing — the block is the point).
-        self.assertEqual(lifecycle, 'accepted')
+        self.assertEqual(lifecycle, 'rejected')
+        self.assertIsNotNone(plugin.core._tombstone_active(
+            conn, plugin.core.fingerprint(content), 'proj-demo'))
 
     def test_stale_feedback_does_not_mutate_terminal_memory(self):
         out = json.loads(plugin.tool_memory_remember(
@@ -455,11 +458,17 @@ class TestToolsAgainstRealStore(ToolTestBase):
         accepted = json.loads(plugin.tool_memory_feedback(
             {'memory_id': first, 'outcome': 'accepted'}, self.ctx('sora')))
         self.assertFalse(accepted['success'])
-        self.assertIn('TombstoneBlocked', accepted['error'])
+        # Same-lane sweep rejects the duplicate directly; feedback stays
+        # fail-closed on the terminal-lifecycle check with the private
+        # guard standing behind it.
+        self.assertIn('terminal', accepted['error'])
         self.assertEqual(
             conn.execute('SELECT lifecycle FROM memory WHERE id=?', (first,)).fetchone()[0],
-            'candidate'
+            'rejected'
         )
+        self.assertIsNotNone(plugin.core._active_tombstone_row(
+            conn, plugin.core.fingerprint(content), 'proj-demo',
+            scope='private', agent_id='agent-sora'))
 
     def test_reject_tombstones_the_claim(self):
         out = json.loads(plugin.tool_memory_remember(

@@ -46,10 +46,14 @@ class TestRecall2dot0(unittest.TestCase):
     """Table-driven tests for Recall 2.0 lanes."""
 
     def setUp(self):
+        from memcore import ablation as _ablation
+        _ablation._reset_ablation_cache()
         self.tmpdir = tempfile.mkdtemp(prefix='memcore_recall2_')
         self.conn, self.db_path, self.project, self.agent = _make_store(self.tmpdir)
 
     def tearDown(self):
+        from memcore import ablation as _ablation
+        _ablation._reset_ablation_cache()
         try:
             self.conn.close()
         except Exception:

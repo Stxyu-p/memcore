@@ -1151,7 +1151,14 @@ def _expand_aliases(query: str) -> str:
     """Expand known fleet aliases in the raw query before tokenization.
 
     Substring match on lowered query; matched values appended with spaces.
+    Eval-only: MEMCORE_ABLATE_ALIAS_EXPANSION=1 returns query unchanged.
     """
+    try:
+        from . import ablation as _ablation
+        if _ablation.is_alias_expansion_ablated():
+            return query
+    except Exception:
+        pass
     q = str(query).lower()
     expansions = []
     for key, val in _FLEET_ALIASES.items():
@@ -1168,7 +1175,14 @@ def _thai_bigrams(token: str) -> list[str]:
     Used as extra OR-terms in FTS5 query (as prefix terms) and exact-fallback
     (as substring ORs) to catch glued-word substrings. Capped by caller
     (total OR-terms <= 32).
+    Eval-only: MEMCORE_ABLATE_THAI_BIGRAM=1 returns [].
     """
+    try:
+        from . import ablation as _ablation
+        if _ablation.is_thai_bigram_ablated():
+            return []
+    except Exception:
+        pass
     if len(token) < 4:
         return []
     # Only emit for tokens containing non-ASCII
@@ -1286,6 +1300,14 @@ def search(conn, project_id, agent_id, query, limit=20,
     user_query = str(query or '').strip()
     if not user_query:
         return []
+    # Eval-only stub: parse DECAY/FAKE_NOW flags so invalid values surface
+    # early in ablation arms; deliberately no ranking effect today.
+    try:
+        from . import ablation as _ablation
+        _ablation.is_decay_ablated()
+        _ablation.fake_now()
+    except Exception:
+        pass
     # Lane 3.2: expand fleet aliases before any matching (FTS lane).
     # The exact-fallback below keeps using user_query (pre-expansion) so
     # appended alias values can never break the verbatim substring check.

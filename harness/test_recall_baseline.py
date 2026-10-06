@@ -66,6 +66,8 @@ FACTS = (
 
 class RecallBaselineBase(unittest.TestCase):
     def setUp(self):
+        from memcore import ablation as _ablation
+        _ablation._reset_ablation_cache()
         self.tmpdir = tempfile.mkdtemp(prefix='memcore_recall_base_')
         self.db_path = os.path.join(self.tmpdir, 'recall.db')
         self.conn = store.open_store(self.db_path)
@@ -90,6 +92,8 @@ class RecallBaselineBase(unittest.TestCase):
             )
 
     def tearDown(self):
+        from memcore import ablation as _ablation
+        _ablation._reset_ablation_cache()
         try:
             self.conn.close()
         except Exception:

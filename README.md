@@ -67,27 +67,14 @@ graph TD
     M --> R[Safe Recall, critical pins + ranked hits]
 ```
 
-### 1. 🗄️ Governed canonical memory
-* **Project / private scope** with membership checks at every read and write boundary.
-* **Immutable version chain**: supersede appends history instead of rewriting truth.
-* **Tombstone guards**: rejected or corrected claims cannot resurface, even by replay.
-* **Trust labels on every recalled line**: `[project | accepted | source_backed | current]`.
+### 🏛️ Subsystem Architecture & Trust Matrix
 
-### 2. 📥 Raw ingest journal
-* Every turn, built-in memory write, and delegation is journaled **before** any analysis.
-* Deterministic gate admits explicit durable signals, ignores greetings/acks/probe text, and queues the ambiguous rest.
-* Raw rows are never recalled directly, the journal is a source of record, not a prompt.
-
-### 3. 🔬 Governed semantic review
-* Optional host-LLM side call (`ctx.llm.complete_structured`) with a strict verdict schema: `remember / ignore / defer` only.
-* Analyzers **cannot** choose scope, lifecycle, or verification, attempts are rejected and the event stays pending.
-* Bounded batches with a failure circuit breaker; provider outages never become memory-provider failures.
-* Trivial turns (greetings, standalone `test`, acknowledgements) never reach the LLM at all.
-
-### 4. 🛡️ Recall that respects the budget
-* Only **critical** pins bypass query relevance; ordinary pins compete in ranked hits.
-* Oversized facts are skipped whole, never clipped mid-negation.
-* The rendered block is hard-capped at the configured character budget, header included.
+| Subsystem | Primary Function | Core Mechanical Guarantees | Trust Level |
+| :--- | :--- | :--- | :--- |
+| **🗄️ Canonical Store** | Long-term governed knowledge layer | • Scoped project/private access enforced in SQL<br>• Immutable version chain preserves full history<br>• Tombstones prevent resurrection of rejected facts | Evaluated & Verified (`[scope \| lifecycle \| verification \| freshness]`) |
+| **📥 Ingest Journal** | Append-only raw execution ledger | • Captures turns, writes, and delegations pre-analysis<br>• Deterministic triage excludes greetings and probes<br>• Never recalled or injected into context directly | Raw Audit Trail (Untrusted for recall) |
+| **🔬 Semantic Review** | Host-LLM triage for ambiguous events | • Strict verdict contract (`remember` \| `ignore` \| `defer`)<br>• Analyzers cannot pick scope, lifecycle, or verification<br>• Circuit-breaker batching isolates provider errors | Candidate Admission (Private proposals only) |
+| **🛡️ Budgeted Recall** | Dynamic query-time context injection | • Critical pins inject first; ordinary pins compete via BM25<br>• Oversized facts skipped whole (never clipped mid-negation)<br>• Hard character budget enforcement including headers | Prompt Context Deliverable |
 
 ---
 
@@ -139,24 +126,17 @@ When `semantic.auto_review.enabled: true`, a bounded number of new `semantic_rev
 ---
 
 ## 🚀 Quick Start
-
-### 1. Clone
-
-```powershell
+ 
+```bash
+# Clone & workspace setup
 git clone https://github.com/Stxyu-p/memcore.git
 cd memcore
-```
 
-### 2. Initialize / inspect the store
-
-```powershell
+# Inspect store health and operational stats
 python -m memcore doctor
 python -m memcore stats
-```
 
-### 3. Run the full test suite
-
-```powershell
+# Run full test suite & baseline gates
 python -m harness
 python -m unittest discover -s integrations/hermes/memcore/tests -v
 ```

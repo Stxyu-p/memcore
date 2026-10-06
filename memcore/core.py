@@ -1242,16 +1242,20 @@ def maybe_auto_corrob(conn, project_id, claim_fp, actor_agent_id):
         raise
 
 
-def apply_freshness_decay(conn, aging_days=30, stale_days=90):
+def apply_freshness_decay(conn, aging_days=30, stale_days=90, now=None):
     """Age-based freshness decay: current → aging → stale by updated_at.
 
     Decay never changes lifecycle, never tombstones, and never hides rows —
     it only lowers recall rank via the existing CASE ordering. Returns
     (aged_ids, staled_ids). Fully reversible: any write refreshes updated_at.
+
+    now: optional override for deterministic tests — a datetime, an ISO-8601
+    Z string (simulated-time protocol), or None for the simulated clock
+    (FAKE_NOW else real time). CLI behaviour is unchanged when unset.
     """
     if stale_days < aging_days:
         raise MemCoreError('stale_days must be >= aging_days')
-    now = _now()
+    now = _coerce_now(now)
     conn.execute('BEGIN IMMEDIATE')
     try:
         cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
@@ -1504,6 +1508,131 @@ def _fts_query(query: str) -> str:
     return ' OR '.join(terms)
 
 
+def _eval_now_iso() -> str:
+    """Simulated now as an ISO-8601 Z string: FAKE_NOW else real clock.
+
+    Junk FAKE_NOW falls back to the real clock inside ablation.eval_now(),
+    so this never raises.
+    """
+    try:
+        from . import ablation as _ablation
+        now = _ablation.eval_now()
+        if isinstance(now, datetime):
+            dt = now
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    except Exception:
+        pass
+    return _now()
+
+
+def _coerce_now(now) -> str:
+    """Normalize an apply_freshness_decay now override to an ISO Z string."""
+    if now is None:
+        return _eval_now_iso()
+    if isinstance(now, datetime):
+        dt = now
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    text = str(now).strip()
+    if text:
+        return text
+    return _eval_now_iso()
+
+
+#: Retention-ranking coefficients (Adopt-1; reference: ai-memory decay.rs).
+#: retention = salience * exp(-lambda(type) * age_days)
+#:             + sigma * ln(1 + recall_count) * exp(-mu * days_since_access)
+#: Higher score ranks first. Derived ONLY from existing columns; decay never
+#: hides rows and never tombstones — it only refines rank inside the
+#: existing CASE ordering family.
+_DECAY_LAMBDA_DEFAULT = 0.02  # scalar fall-back, ~35-day half-life
+_DECAY_SIGMA = 0.6  # reinforcement magnitude
+_DECAY_MU = 0.04  # reinforcement recency fall-off per day
+#: Per-memory_type half-life map (days). Types absent here fall back to the
+#: scalar _DECAY_LAMBDA_DEFAULT, byte-identical to the single-lambda formula.
+_DECAY_HALF_LIFE_DAYS_BY_TYPE = {
+    'fact': 60.0,
+    'decision': 90.0,
+    'preference': 90.0,
+    'note': 30.0,
+    'observation': 14.0,
+}
+_DECAY_SALIENCE_BY_VERIFICATION = {
+    'user_authoritative': 1.5,
+    'runtime_verified': 1.25,
+    'source_backed': 1.1,
+}
+_DECAY_SALIENCE_BY_LIFECYCLE = {
+    'accepted': 1.0,
+    'conflict': 0.9,
+}
+
+
+def _decay_lambda_sql(alias='m'):
+    """Per-type decay rate: CASE over memory_type, scalar default fallback."""
+    import math as _math
+    whens = ' '.join(
+        "WHEN '%s' THEN %.17g" % (mem_type, _math.log(2) / half_life)
+        for mem_type, half_life in sorted(_DECAY_HALF_LIFE_DAYS_BY_TYPE.items())
+    )
+    return '(CASE %s.type %s ELSE %.17g END)' % (alias, whens, _DECAY_LAMBDA_DEFAULT)
+
+
+def _decay_salience_sql(alias='m'):
+    """Verification/lifecycle weight; unknown values fall back to 1.0/0.8."""
+    ver = ' '.join(
+        "WHEN '%s' THEN %s" % (value, weight)
+        for value, weight in sorted(_DECAY_SALIENCE_BY_VERIFICATION.items())
+    )
+    life = ' '.join(
+        "WHEN '%s' THEN %s" % (value, weight)
+        for value, weight in sorted(_DECAY_SALIENCE_BY_LIFECYCLE.items())
+    )
+    return (
+        '((CASE %s.verification %s ELSE 1.0 END) * '
+        '(CASE %s.lifecycle %s ELSE 0.8 END))' % (alias, ver, alias, life)
+    )
+
+
+def _retention_order(conn, enabled, alias='m'):
+    """ORDER-BY fragment + params for the continuous retention tie-break.
+
+    Returns ('', ()) when disabled (MEMCORE_ABLATE_DECAY=1): the caller then
+    emits the legacy CASE+bm25 ordering byte-identically. Enabled, it returns
+    (fragment, [now_iso, (now_iso when recall columns exist)]) where now_iso
+    comes from the simulated clock (FAKE_NOW else real time). Never raises:
+    unreadable columns degrade to the age-only term.
+    """
+    if not enabled:
+        return '', ()
+    try:
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
+    except Exception:
+        cols = set()
+    now_iso = _eval_now_iso()
+    age = ('max(0.0, COALESCE(julianday(?) - julianday(%s.updated_at), 0.0))'
+           % alias)
+    if 'recall_count' in cols and 'last_recalled' in cols:
+        access = (
+            'CASE WHEN %s.last_recalled IS NULL THEN 0.0 ELSE %.17g * '
+            'ln(1.0 + COALESCE(%s.recall_count, 0)) * exp(-%.17g * '
+            'max(0.0, COALESCE(julianday(?) - julianday(%s.last_recalled), 0.0))) END'
+            % (alias, _DECAY_SIGMA, alias, _DECAY_MU, alias)
+        )
+        params = (now_iso, now_iso)
+    else:
+        access = '0.0'
+        params = (now_iso,)
+    fragment = (
+        'COALESCE(%s * exp(-%s * %s) + %s, 0.0)'
+        % (_decay_salience_sql(alias), _decay_lambda_sql(alias), age, access)
+    )
+    return fragment, params
+
+
 #: Memories recalled within this window resist freshness decay.
 #: A fact the fleet actually uses stays current; a fact nobody recalls fades
 #: on the plain clock. Tuned against the fleet's weekly cadence.
@@ -1524,7 +1653,7 @@ def record_recall(conn, memory_ids) -> int:
         cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
         if 'recall_count' not in cols:
             return 0
-        now = _now()
+        now = _eval_now_iso()
         touched = 0
         for mem_id in ids:
             cur = conn.execute(
@@ -1547,7 +1676,10 @@ def search(conn, project_id, agent_id, query, limit=20,
            scope_detail=None):
     """FTS5 search over memory content, scope-enforced in SQL.
 
-    Deterministic rank: FTS bm25 + pinned + lifecycle/verification/freshness.
+    Deterministic rank: FTS bm25 + pinned + lifecycle/verification/freshness
+    + continuous retention (salience * exp(-lambda*age) + reinforcement),
+    then updated_at/id tie-breaks. MEMCORE_ABLATE_DECAY=1 neutralizes
+    exactly the retention term (legacy CASE+bm25 ordering).
     For non-ASCII queries, try an exact Unicode substring match first because
     SQLite unicode61 does not segment Thai/CJK natural-language words well.
 
@@ -1564,14 +1696,24 @@ def search(conn, project_id, agent_id, query, limit=20,
     user_query = str(query or '').strip()
     if not user_query:
         return []
-    # Eval-only stub: parse DECAY/FAKE_NOW flags so invalid values surface
-    # early in ablation arms; deliberately no ranking effect today.
+    # Retention ranking: MEMCORE_ABLATE_DECAY=1 neutralizes exactly the
+    # retention term (legacy CASE+bm25 ordering). MEMCORE_FAKE_NOW feeds the
+    # simulated clock (fake else real) for age computation only; it never
+    # reorders except through that age term. Junk FAKE_NOW falls back to the
+    # real clock and never raises.
+    decay_ablated = False
     try:
         from . import ablation as _ablation
-        _ablation.is_decay_ablated()
+        decay_ablated = bool(_ablation.is_decay_ablated())
         _ablation.fake_now()
     except Exception:
-        pass
+        decay_ablated = False
+    retention_expr, retention_params = _retention_order(
+        conn, not decay_ablated, alias='m')
+    retention_tail_exact = (
+        (', ' + retention_expr + ' DESC') if retention_expr else '')
+    retention_tail_fts = (
+        (', ' + retention_expr + ' DESC') if retention_expr else '')
     # Lane 3.2: expand fleet aliases before any matching (FTS lane).
     # The exact-fallback below keeps using user_query (pre-expansion) so
     # appended alias values can never break the verbatim substring check.
@@ -1627,9 +1769,11 @@ def search(conn, project_id, agent_id, query, limit=20,
             'ORDER BY m.pinned DESC, ' +
             "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
             "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
-            "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END, " +
+            "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
+            retention_tail_exact + ', ' +
             'm.updated_at DESC, m.id ASC LIMIT ?',
-            (project_id, agent_id) + tuple(substr_terms) + detail_params + (limit,)
+            (project_id, agent_id) + tuple(substr_terms) + detail_params +
+            tuple(retention_params) + (limit,)
         ).fetchall()
         if len(exact_rows) >= limit:
             return exact_rows[:limit]
@@ -1653,9 +1797,11 @@ def search(conn, project_id, agent_id, query, limit=20,
         'ORDER BY m.pinned DESC, ' +
         "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
         "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
-        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END, " +
+        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
+        retention_tail_fts + ', ' +
         'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
-        (match_expr, project_id, agent_id) + detail_params + (fts_limit,)
+        (match_expr, project_id, agent_id) + detail_params +
+        tuple(retention_params) + (fts_limit,)
     )
     fts_rows = cur.fetchall()
     if not exact_rows:

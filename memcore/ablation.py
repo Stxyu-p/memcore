@@ -13,16 +13,15 @@ this module existed.
 Flags (set to '1' or 'true'):
   MEMCORE_ABLATE_ALIAS_EXPANSION  _expand_aliases returns query unchanged.
   MEMCORE_ABLATE_THAI_BIGRAM      _thai_bigrams returns [].
-  MEMCORE_ABLATE_DECAY            reserved for a future decay lane; parsed
-                                  but currently a no-op (must not affect
-                                  ranking today).
-  MEMCORE_FAKE_NOW                timestamp for simulated-time protocols
-                                  (future lanes). Must be the exact
-                                  Date.toISOString() form
+  MEMCORE_ABLATE_DECAY            neutralize the retention term in recall
+                                  ranking (fallback to CASE+bm25 ordering);
+                                  unset production ranks by retention.
+  MEMCORE_FAKE_NOW                simulated now for decay/ranking via
+                                  eval_now() (FAKE_NOW else real clock).
+                                  Must be the exact Date.toISOString() form
                                   (YYYY-MM-DDTHH:mm:ss.sssZ); validated by
                                   round-trip, so junk falls back to None
-                                  (real clock). Parsed but currently unused
-                                  by ranking.
+                                  (real clock). Never raises.
 
 Env-cache pattern: read once per process (ponytail: plain dict, not a
 framework). Tests that mutate these env vars MUST call
@@ -94,21 +93,20 @@ def is_thai_bigram_ablated() -> bool:
 
 
 def is_decay_ablated() -> bool:
-    """Reserved stub: parsed, but no behaviour change yet."""
+    """True when MEMCORE_ABLATE_DECAY=1/true (retention term neutralized)."""
     return bool(_read_flags()['decay'])
 
 
 def fake_now():
     """Parsed MEMCORE_FAKE_NOW datetime (UTC), or None when unset/invalid.
 
-    Parsed but currently unused by ranking (stub for simulated-time
-    protocols). Never raises.
+    Feeds eval_now() for simulated-time decay/ranking. Never raises.
     """
     return _read_flags()['fake_now']
 
 
 def eval_now():
-    """Default now for future lifecycle computations: FAKE_NOW else real clock."""
+    """Simulated now for decay/ranking: FAKE_NOW else real clock."""
     fake = _read_flags()['fake_now']
     if fake is not None:
         return fake

@@ -114,8 +114,14 @@ class TestAblationOffGreen(AblationBase):
         hit, rows = self._search_hit('ระบบควรทำ', 'ระบบ ควร ทำงาน ได้ ทุกวัน')
         self.assertTrue(hit, f'Expected bigram hit with flags unset, got: {rows}')
 
-    def test_fake_now_parse_no_crash_no_ranking_change(self):
-        """MEMCORE_FAKE_NOW parses, never crashes, does not change ranking today."""
+    def test_fake_now_deterministic_ranking_via_age(self):
+        """MEMCORE_FAKE_NOW feeds the simulated clock used for age.
+
+        Same fake twice -> identical order (deterministic). The only way
+        FAKE_NOW may reorder is through age computation: with a far-future
+        fake both rows age together, so both still return without crashing.
+        Junk falls back to None and never raises.
+        """
         before = {
             q: [r[0] for r in core.search(self.conn, 'p-abl', 'a-abl', q, limit=3)]
             for q, _ in ALIAS_TESTS
@@ -123,11 +129,18 @@ class TestAblationOffGreen(AblationBase):
         os.environ['MEMCORE_FAKE_NOW'] = '2026-01-01T00:00:00.000Z'
         ablation._reset_ablation_cache()
         self.assertIsNotNone(ablation.fake_now())
-        after = {
+        first = {
             q: [r[0] for r in core.search(self.conn, 'p-abl', 'a-abl', q, limit=3)]
             for q, _ in ALIAS_TESTS
         }
-        self.assertEqual(before, after, 'FAKE_NOW must not change ranking today')
+        ablation._reset_ablation_cache()
+        second = {
+            q: [r[0] for r in core.search(self.conn, 'p-abl', 'a-abl', q, limit=3)]
+            for q, _ in ALIAS_TESTS
+        }
+        self.assertEqual(first, second,
+                         'same FAKE_NOW must give the same order')
+        self.assertEqual(set(before), set(first))
         # Junk falls back to None, never raises.
         os.environ['MEMCORE_FAKE_NOW'] = 'not-a-date'
         ablation._reset_ablation_cache()
@@ -136,20 +149,22 @@ class TestAblationOffGreen(AblationBase):
                                 ALIAS_TESTS[0][0], limit=3)
         self.assertIsInstance(junk_rows, list)
 
-    def test_decay_flag_no_ranking_change(self):
-        """MEMCORE_ABLATE_DECAY parses today but does not change ranking."""
-        before = {
-            q: [r[0] for r in core.search(self.conn, 'p-abl', 'a-abl', q, limit=3)]
-            for q, _ in ALIAS_TESTS
-        }
+    def test_decay_flag_is_load_bearing(self):
+        """MEMCORE_ABLATE_DECAY=1 neutralizes the retention term.
+
+        Load-bearing proof lives in harness.test_decay_ranking
+        (DECAY=1 flips at least one reinforced-vs-fresh ordering).
+        Here: the flag parses, and on these same-age rows the fallback
+        ordering still returns every expected hit.
+        """
         os.environ['MEMCORE_ABLATE_DECAY'] = '1'
         ablation._reset_ablation_cache()
         self.assertTrue(ablation.is_decay_ablated())
-        after = {
-            q: [r[0] for r in core.search(self.conn, 'p-abl', 'a-abl', q, limit=3)]
-            for q, _ in ALIAS_TESTS
-        }
-        self.assertEqual(before, after, 'DECAY flag must not change ranking today')
+        for query, expected in ALIAS_TESTS:
+            rows = core.search(self.conn, 'p-abl', 'a-abl', query, limit=3)
+            texts = [r[5] for r in rows]
+            self.assertTrue(any(expected in t for t in texts),
+                            f'ablated fallback must still hit {query!r}')
 
 
 if __name__ == '__main__':

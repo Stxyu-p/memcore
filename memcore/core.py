@@ -66,7 +66,7 @@ def fingerprint(content: str) -> str:
     """Deterministic claim fingerprint: sha256 of normalized (whitespace-collapsed,
     lowercased, NFC-normalized) content, truncated to 16 hex chars — matches fixtures._fingerprint."""
     normalized = unicodedata.normalize('NFC', ' '.join(content.lower().strip().split()))
-    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:16]
+    return hashlib.sha256(normalized.encode('utf-8', errors='replace')).hexdigest()[:16]
 
 
 def _new_id(prefix):
@@ -302,6 +302,10 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         raise MemCoreError(f'invalid scope: {scope}')
     if not isinstance(content, str) or not content.strip():
         raise MemCoreError('content must be a non-empty string')
+    try:
+        content.encode('utf-8')
+    except UnicodeEncodeError:
+        raise MemCoreError('content contains unencodable surrogate characters')
     if lifecycle not in ('candidate', 'accepted', 'conflict'):
         raise MemCoreError(
             f'invalid initial lifecycle: {lifecycle}; use an explicit transition'
@@ -436,6 +440,10 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
     """
     if not isinstance(new_content, str) or not new_content.strip():
         raise MemCoreError('new_content must be a non-empty string')
+    try:
+        new_content.encode('utf-8')
+    except UnicodeEncodeError:
+        raise MemCoreError('new_content contains unencodable surrogate characters')
     conn.execute('BEGIN IMMEDIATE')
     try:
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
@@ -762,6 +770,10 @@ def reject_value(conn, project_id, agent_id, content, reason):
     _require_nonempty_reason(reason)
     if not isinstance(content, str):
         raise MemCoreError('reject-value content must be a non-empty string')
+    try:
+        content.encode('utf-8')
+    except UnicodeEncodeError:
+        raise MemCoreError('reject-value content contains unencodable surrogate characters')
     claim_fp = fingerprint(content)
     if not unicodedata.normalize('NFC', ' '.join(content.lower().strip().split())):
         raise MemCoreError('reject-value content must be a non-empty string')
@@ -1253,6 +1265,8 @@ def apply_freshness_decay(conn, aging_days=30, stale_days=90, now=None):
     Z string (simulated-time protocol), or None for the simulated clock
     (FAKE_NOW else real time). CLI behaviour is unchanged when unset.
     """
+    if aging_days < 0:
+        raise MemCoreError('aging_days must be >= 0')
     if stale_days < aging_days:
         raise MemCoreError('stale_days must be >= aging_days')
     now = _coerce_now(now)
@@ -1646,6 +1660,8 @@ def record_recall(conn, memory_ids) -> int:
     writable connection — never inside search() itself, which must stay
     safe on read-only handles. Returns the number of rows touched.
     """
+    if not memory_ids:
+        return 0
     ids = [m for m in dict.fromkeys(memory_ids) if m]
     if not ids:
         return 0

@@ -12,6 +12,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 
 from . import store
+from . import ablation as _ablation
 
 
 class MemCoreError(Exception):
@@ -1460,7 +1461,6 @@ def _thai_bigrams(token: str) -> list[str]:
     Eval-only: MEMCORE_ABLATE_THAI_BIGRAM=1 returns [].
     """
     try:
-        from . import ablation as _ablation
         if _ablation.is_thai_bigram_ablated():
             return []
     except Exception:
@@ -1529,7 +1529,6 @@ def _eval_now_iso() -> str:
     so this never raises.
     """
     try:
-        from . import ablation as _ablation
         now = _ablation.eval_now()
         if isinstance(now, datetime):
             dt = now
@@ -1587,6 +1586,8 @@ _DECAY_SALIENCE_BY_LIFECYCLE = {
 
 def _decay_lambda_sql(alias='m'):
     """Per-type decay rate: CASE over memory_type, scalar default fallback."""
+    if alias == 'm' and '_DECAY_LAMBDA_SQL_M' in globals():
+        return _DECAY_LAMBDA_SQL_M
     import math as _math
     whens = ' '.join(
         "WHEN '%s' THEN %.17g" % (mem_type, _math.log(2) / half_life)
@@ -1597,6 +1598,8 @@ def _decay_lambda_sql(alias='m'):
 
 def _decay_salience_sql(alias='m'):
     """Verification/lifecycle weight; unknown values fall back to 1.0/0.8."""
+    if alias == 'm' and '_DECAY_SALIENCE_SQL_M' in globals():
+        return _DECAY_SALIENCE_SQL_M
     ver = ' '.join(
         "WHEN '%s' THEN %s" % (value, weight)
         for value, weight in sorted(_DECAY_SALIENCE_BY_VERIFICATION.items())
@@ -1611,6 +1614,26 @@ def _decay_salience_sql(alias='m'):
     )
 
 
+_DECAY_LAMBDA_SQL_M = _decay_lambda_sql('m')
+_DECAY_SALIENCE_SQL_M = _decay_salience_sql('m')
+
+# ponytail: cache table column presence per connection id to eliminate PRAGMA table_info on hot searches
+_CONN_RECALL_COLS: dict[int, bool] = {}
+
+
+def _has_recall_cols(conn) -> bool:
+    cid = id(conn)
+    val = _CONN_RECALL_COLS.get(cid)
+    if val is None:
+        try:
+            cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
+            val = ('recall_count' in cols and 'last_recalled' in cols)
+        except Exception:
+            val = False
+        _CONN_RECALL_COLS[cid] = val
+    return val
+
+
 def _retention_order(conn, enabled, alias='m'):
     """ORDER-BY fragment + params for the continuous retention tie-break.
 
@@ -1622,14 +1645,11 @@ def _retention_order(conn, enabled, alias='m'):
     """
     if not enabled:
         return '', ()
-    try:
-        cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
-    except Exception:
-        cols = set()
+    has_recall = _has_recall_cols(conn)
     now_iso = _eval_now_iso()
     age = ('max(0.0, COALESCE(julianday(?) - julianday(%s.updated_at), 0.0))'
            % alias)
-    if 'recall_count' in cols and 'last_recalled' in cols:
+    if has_recall:
         access = (
             'CASE WHEN %s.last_recalled IS NULL THEN 0.0 ELSE %.17g * '
             'ln(1.0 + COALESCE(%s.recall_count, 0)) * exp(-%.17g * '
@@ -1666,8 +1686,7 @@ def record_recall(conn, memory_ids) -> int:
     if not ids:
         return 0
     try:
-        cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
-        if 'recall_count' not in cols:
+        if not _has_recall_cols(conn):
             return 0
         now = _eval_now_iso()
         touched = 0
@@ -1719,7 +1738,6 @@ def search(conn, project_id, agent_id, query, limit=20,
     # real clock and never raises.
     decay_ablated = False
     try:
-        from . import ablation as _ablation
         decay_ablated = bool(_ablation.is_decay_ablated())
         _ablation.fake_now()
     except Exception:

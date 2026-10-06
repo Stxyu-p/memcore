@@ -1136,12 +1136,52 @@ def private_memories(conn, project_id, agent_id):
     return cur.fetchall()
 
 
-def _fts_query(query: str) -> str:
-    """Sanitize a raw Unicode user string into a safe FTS5 expression.
+# —— Lane 3.2: Fleet alias map (static, query-side only).
+# Add entries ONLY from failing baseline paraphrase queries.
+# Substring containment on lowered raw query, so glued Thai matches.
+_FLEET_ALIASES = {
+    'ai gateway': '9router',
+    'ทีม': 'fleet roster',
+    'พี่โชค': 'thai',
+    'สแกน': 'scan pacing',
+}
 
-    Keep Unicode letters/numbers/marks plus underscore, split on punctuation,
-    then quote each token. This preserves Thai and other non-Latin scripts
-    while remaining immune to FTS5 operators/apostrophes/parens.
+
+def _expand_aliases(query: str) -> str:
+    """Expand known fleet aliases in the raw query before tokenization.
+
+    Substring match on lowered query; matched values appended with spaces.
+    """
+    q = str(query).lower()
+    expansions = []
+    for key, val in _FLEET_ALIASES.items():
+        if key in q:
+            expansions.append(val)
+    if expansions:
+        return query + ' ' + ' '.join(expansions)
+    return query
+
+
+def _thai_bigrams(token: str) -> list[str]:
+    """Generate character bigrams from a Thai/Unicode token (ord>127, len>=4).
+
+    Used as extra OR-terms in FTS5 query (as prefix terms) and exact-fallback
+    (as substring ORs) to catch glued-word substrings. Capped by caller
+    (total OR-terms <= 32).
+    """
+    if len(token) < 4:
+        return []
+    # Only emit for tokens containing non-ASCII
+    if all(ord(ch) <= 127 for ch in token):
+        return []
+    return [token[i:i+2] for i in range(len(token) - 1)]
+
+
+def _query_tokens(query: str) -> list[str]:
+    """Split a raw query into word-ish tokens (Unicode L/N/M + underscore).
+
+    Shared by _fts_query and the search exact-fallback so both see the
+    same token stream.
     """
     tokens, buf = [], []
     for ch in str(query):
@@ -1153,9 +1193,37 @@ def _fts_query(query: str) -> str:
             buf = []
     if buf:
         tokens.append(''.join(buf))
+    return tokens
+
+
+def _fts_query(query: str) -> str:
+    """Sanitize a raw Unicode user string into a safe FTS5 expression.
+
+    Keep Unicode letters/numbers/marks plus underscore, split on punctuation,
+    then quote each token. For Thai/Unicode tokens (ord>127, len>=4) also
+    emit character bigrams as extra prefix OR-terms ("bg"*) to catch
+    glued-word substrings — plain "bg" never matches in FTS5 unicode61,
+    only prefix "bg"* matches token starts.
+    Total OR-terms capped at 32 (ponytail: O(query_len) terms; upgrade path
+    is a proper segmenter only if owner approves a dep).
+    """
+    tokens = _query_tokens(query)
     if not tokens:
         return ''
-    return ' OR '.join('"%s"' % token for token in tokens)
+
+    # Build OR-terms: each token + its Thai bigrams as prefix terms (if applicable)
+    terms = []
+    for token in tokens:
+        terms.append('"%s"' % token)
+        # Lane 3.1: add Thai char bigrams as prefix terms for glued words
+        for bg in _thai_bigrams(token):
+            terms.append('"%s"*' % bg)
+            if len(terms) >= 32:
+                break
+        if len(terms) >= 32:
+            break
+
+    return ' OR '.join(terms)
 
 
 #: Memories recalled within this window resist freshness decay.
@@ -1215,9 +1283,13 @@ def search(conn, project_id, agent_id, query, limit=20,
     if limit < 1:
         raise MemCoreError('search limit must be >= 1')
     limit = min(limit, 500)
-    raw_query = str(query or '').strip()
-    if not raw_query:
+    user_query = str(query or '').strip()
+    if not user_query:
         return []
+    # Lane 3.2: expand fleet aliases before any matching (FTS lane).
+    # The exact-fallback below keeps using user_query (pre-expansion) so
+    # appended alias values can never break the verbatim substring check.
+    raw_query = _expand_aliases(user_query)
     if _membership_role(conn, project_id, agent_id) is None:
         return []
     detail_filter = ''
@@ -1229,7 +1301,34 @@ def search(conn, project_id, agent_id, query, limit=20,
         detail_filter = '  AND m.scope_detail = ? '
         detail_params = (str(scope_detail),)
     exact_rows = []
-    if any(ord(ch) > 127 for ch in raw_query):
+    # Lane 3.1: non-ASCII queries try a Unicode substring fallback first
+    # (unicode61 never segments glued Thai). Match terms = NON-ASCII word
+    # tokens of the PRE-expansion query + their char bigrams. ASCII tokens
+    # are deliberately excluded — FTS already handles them, and instr-ORing
+    # them (e.g. 'agent' matching 'agents') flips negation guards.
+    # Alias expansion can never break the verbatim check (pre-expansion
+    # query only) and glued->spaced still bridges via bigrams.
+    substr_terms: list[str] = []
+    if any(ord(ch) > 127 for ch in user_query):
+        seen_terms: set[str] = set()
+        for token in _query_tokens(user_query):
+            if all(ord(ch) <= 127 for ch in token):
+                continue
+            if token in seen_terms:
+                continue
+            seen_terms.add(token)
+            substr_terms.append(token)
+            for bg in _thai_bigrams(token):
+                if bg in seen_terms:
+                    continue
+                seen_terms.add(bg)
+                substr_terms.append(bg)
+                if len(substr_terms) >= 32:
+                    break
+            if len(substr_terms) >= 32:
+                break
+    if substr_terms:
+        or_clauses = ' OR '.join(['instr(v.content, ?) > 0'] * len(substr_terms))
         exact_rows = conn.execute(
             'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, '
             '       v.content, m.owner_agent_id, 0.0 AS rank '
@@ -1238,13 +1337,13 @@ def search(conn, project_id, agent_id, query, limit=20,
             "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
             "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
             '  AND ' + _recall_tombstone_guard('m') + ' '
-            '  AND instr(v.content, ?) > 0 ' + detail_filter +
+            '  AND (' + or_clauses + ') ' + detail_filter +
             'ORDER BY m.pinned DESC, ' +
             "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
             "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
             "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END, " +
             'm.updated_at DESC, m.id ASC LIMIT ?',
-            (project_id, agent_id, raw_query) + detail_params + (limit,)
+            (project_id, agent_id) + tuple(substr_terms) + detail_params + (limit,)
         ).fetchall()
         if len(exact_rows) >= limit:
             return exact_rows[:limit]

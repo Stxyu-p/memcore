@@ -127,6 +127,17 @@ class TestRecallBaseline(RecallBaselineBase):
         # Exact queries must (near-)always hit: this is the lexical floor.
         self.assertGreaterEqual(by_tier.get('exact', 0), 0.8)
 
+    def test_recall_2dot0_floor(self):
+        # Recall 2.0 floor (lanes 3.1 + 3.2; lane 3.3 deferred):
+        # overall>=0.62, exact>=0.80, paraphrase>0.50, negation>=0.20.
+        # NOTE: negation is >= (no-regression guard, NOT >) — 0.20 standing
+        # is accepted with lane 3.3 deferred.
+        overall, by_tier = self.precision_at(k=3)
+        self.assertGreaterEqual(overall, 0.62)
+        self.assertGreaterEqual(by_tier.get('exact', 0), 0.80)
+        self.assertGreater(by_tier.get('paraphrase', 0), 0.50)
+        self.assertGreaterEqual(by_tier.get('negation', 0), 0.20)
+
     def test_baseline_is_measured_not_asserted(self):
         overall, by_tier = self.precision_at(k=3)
         print(f'\nrecall baseline p@3: overall={overall:.2f} ' +

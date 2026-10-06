@@ -6,6 +6,7 @@
 
   <p>
     <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_Start-CLI-0284c7?style=for-the-badge" alt="Quick Start" /></a>
+    <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Changelog-View_Notes-blueviolet?style=for-the-badge" alt="Changelog" /></a>
     <a href="https://github.com/Stxyu-p/memcore/releases"><img src="https://img.shields.io/badge/Release-v0.8.0-10b981?style=for-the-badge" alt="Version 0.8.0" /></a>
     <a href="https://github.com/NousResearch/hermes-agent"><img src="https://img.shields.io/badge/Hermes-Native_Provider-7B61FF?style=for-the-badge" alt="Hermes Provider" /></a>
   </p>
@@ -14,7 +15,8 @@
     <img src="https://img.shields.io/badge/Storage-SQLite_WAL_FTS5-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
     <img src="https://img.shields.io/badge/Dependencies-Stdlib_Only-success?style=flat-square" alt="Stdlib only" />
     <img src="https://img.shields.io/badge/Daemon-None-blue?style=flat-square" alt="Daemonless" />
-    <img src="https://img.shields.io/badge/Tests-327_Gate_OK-brightgreen?style=flat-square" alt="Tests" />
+    <img src="https://img.shields.io/badge/Tests-514_Passing-brightgreen?style=flat-square" alt="Tests" />
+    <img src="https://img.shields.io/badge/Recall_p@3-0.81-0284c7?style=flat-square" alt="Recall Baseline" />
   </p>
 
 </div>
@@ -162,8 +164,10 @@ python -m unittest discover -s integrations/hermes/memcore/tests -v
 Current gate:
 
 ```text
-327 tests           →  OK (expected failures=2)
-98 integration      →  OK
+412 tests           →  OK (expected failures=2)
+102 integration     →  OK
+Total: 514 tests
+Recall baseline     →  p@3 0.81 (floor 0.62)
 ```
 
 The two expected failures are the legacy E12 token-budget evaluations, which join unbounded rows manually instead of calling the recall builder; the production builder is covered by its own regression tests.
@@ -229,7 +233,7 @@ One SQLite database with **WAL** for concurrent readers/writers, **FTS5** for fu
 
 No mandatory vector database. No memory daemon. No hidden background reconciliation service.
 
-Current migration head: `0013_current_version_ownership`
+Current migration head: `0017_bitemporal_valid_until`
 
 ### 🧭 Dataflow Architecture
 
@@ -284,6 +288,12 @@ If an analyzer wants to remember something, MemCore still applies its own govern
 If a claim was rejected, replay alone cannot silently bring it back.
 
 That makes the system more conservative than a typical agent memory store, intentionally.
+
+---
+
+## 📜 Release History & Changelog
+
+All notable changes across versions are documented in the separate [CHANGELOG.md](CHANGELOG.md) following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) standards.
 
 ---
 

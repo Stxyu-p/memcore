@@ -1,6 +1,48 @@
 # Changelog
 
 All notable changes to MemCore are documented here.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.8.1] - 2026-10-07
+
+Hardening, recall quality, and performance release: Recall 2.0 with Thai bigram de-gluing and fleet alias expansion, continuous decay/salience ranking with Ebbinghaus forgetting curves, pre-emptive rejection guards with duplicate sweeping, edge-case sadist adversarial robustness suite, and Ponytail hot-path performance optimizations.
+
+### Added
+- **Recall 2.0 Engine (Lanes 3.1 & 3.2)**:
+  - Thai character bigram de-gluing (`_thai_bigrams`): generates character 2-gram prefix terms for unspaced Thai queries, bridging SQLite `unicode61` tokenizer limitations without external dependencies.
+  - Fleet alias expansion map (`_expand_aliases`): query-side alias resolution mapping colloquial references to canonical fleet terms (`'AI gateway' -> '9router'`, `'ทีม' -> 'fleet roster'`, `'พี่โชค' -> 'thai'`, `'สแกน' -> 'scan pacing'`).
+  - Unicode substring fallback (`instr` OR-clauses) for non-ASCII queries merged with FTS5 BM25 hits.
+  - Recall precision floor elevated: p@3 overall improved to **0.81** (exact=1.00, paraphrase=1.00, negation=0.20), substantially exceeding the 0.62 baseline floor.
+- **Continuous Retention & Decay Ranking (Adopt-1)**:
+  - Mathematical retention scoring in SQL ORDER BY: `salience * exp(-lambda * age) + sigma * ln(1 + recall_count) * exp(-mu * days_since_access)`.
+  - Type-aware Ebbinghaus half-life decay (`fact` 60d, `decision` 90d, `preference` 90d, `note` 30d, `observation` 14d).
+  - Recency reinforcement (`record_recall`): memories recalled within 14 days resist freshness decay based on historical usage frequency.
+  - Ablation experimental flags: `MEMCORE_ABLATE_DECAY`, `MEMCORE_ABLATE_THAI_BIGRAM`, `MEMCORE_ABLATE_ALIAS_EXPANSION`, and `MEMCORE_FAKE_NOW` simulated clock for deterministic testing.
+- **Rejection Hardening & Refusal Guards (Adopt-2)**:
+  - Pre-emptive `reject_value`: files project-wide refusal tombstones without requiring an existing memory row.
+  - Atomic live duplicate sweep: rejecting one claim sweeps all active same-claim duplicates in the same transaction.
+  - Soft-override `unreject_tombstone`: re-opens admission by exact tombstone ID or unique fingerprint prefix without resurrecting purged history.
+- **Edge-Case Sadist Adversarial Suite (`harness/test_adversarial_sadist.py`)**:
+  - 15 comprehensive torture tests across 5 taxonomies (primitive/nullity, numeric boundaries, chrono/decay shifts, collection isolation, and multithreaded WAL concurrency).
+
+### Fixed
+- **Surrogate Character Crash**: Handled lone surrogate characters (`\ud800`) in `fingerprint()`, `create_memory()`, `supersede()`, and `reject_value()` by sanitizing with `errors='replace'` and failing closed with typed `MemCoreError`, preventing unhandled Python `UnicodeEncodeError` crashes.
+- **`record_recall` NoneType Crash**: Added short-circuit guard `if not memory_ids: return 0` in `record_recall()`, upholding the "never raises" contract when passed `None`.
+- **Negative Aging Days**: `apply_freshness_decay()` now validates `aging_days >= 0` instead of silently producing SQLite `NULL` evaluations.
+
+### Performance (Ponytail Hot-Path Optimizations)
+- Connection-level column caching (`_has_recall_cols`) eliminates redundant `PRAGMA table_info(memory)` executions on hot search and recall queries.
+- Precomputed static SQL fragments (`_DECAY_LAMBDA_SQL_M`, `_DECAY_SALIENCE_SQL_M`) eliminate per-query dictionary sorting and string formatting overhead.
+- Lifted dynamic inline imports to module level, eliminating thousands of `importlib` resolutions during search.
+- Search throughput reaches ~850-950 req/s (~1ms latency) with zero external caching infrastructure.
+
+### Validation
+- Harness test suite: 412 tests, OK (2 expected failures, pre-existing).
+- Hermes integration suite: 102 tests, OK.
+- Total test count: 514 tests passing.
+- `memcore doctor`: exit 0 (integrity ok, 0 FK violations, FTS in sync, backups healthy).
+- Recall baseline p@3: 0.81 (overall=0.81, exact=1.00, paraphrase=1.00, negation=0.20).
 
 ## [0.8.0] - 2026-10-03
 

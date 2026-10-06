@@ -11,10 +11,10 @@
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/Storage-SQLite_·_WAL_·_FTS5-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
+    <img src="https://img.shields.io/badge/Storage-SQLite_WAL_FTS5-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
     <img src="https://img.shields.io/badge/Dependencies-Stdlib_Only-success?style=flat-square" alt="Stdlib only" />
     <img src="https://img.shields.io/badge/Daemon-None-blue?style=flat-square" alt="Daemonless" />
-    <img src="https://img.shields.io/badge/Tests-327_·_Gate_OK-brightgreen?style=flat-square" alt="Tests" />
+    <img src="https://img.shields.io/badge/Tests-327_Gate_OK-brightgreen?style=flat-square" alt="Tests" />
   </p>
 
 </div>
@@ -23,15 +23,15 @@
 
 ## 🌟 Why MemCore?
 
-Most agent memory stores record everything and trust everything. Raw chat history, tool output, and delegated results become "memory" that resurfaces later with the same authority as a user's explicit decision — and a wrong memory is worse than no memory.
+Most agent memory stores record everything and trust everything. Raw chat history, tool output, and delegated results become "memory" that resurfaces later with the same authority as a user's explicit decision, and a wrong memory is worse than no memory.
 
 **MemCore is built completely different:**
 
-- 🗄️ **Two lanes, different trust** — raw activity enters an append-only journal; only governed canonical memory is eligible for recall. Raw rows are never injected into prompts.
-- 🛡️ **Governance lives in the engine** — scope, lifecycle, verification, and tombstones are enforced in SQL, not delegated to a model's good intentions.
-- 🧬 **Corrections never rewrite history** — supersede creates an immutable new version; rejected claims leave tombstones that block silent resurrection.
-- ⚡ **Daemonless & local-first** — one SQLite file with WAL + FTS5. No background service, no vector database, no hidden reconciliation worker.
-- 🧪 **Fail closed** — ambiguous mutations stay pending; unmatched replace/remove targets are never guessed.
+- 🗄️ **Two lanes, different trust**: raw activity enters an append-only journal; only governed canonical memory is eligible for recall. Raw rows are never injected into prompts.
+- 🛡️ **Governance lives in the engine**: scope, lifecycle, verification, and tombstones are enforced in SQL, not delegated to a model's good intentions.
+- 🧬 **Corrections never rewrite history**: supersede creates an immutable new version; rejected claims leave tombstones that block silent resurrection.
+- ⚡ **Daemonless and local-first**: one SQLite file with WAL + FTS5. No background service, no vector database, no hidden reconciliation worker.
+- 🧪 **Fail closed**: ambiguous mutations stay pending; unmatched replace/remove targets are never guessed.
 
 ## 📊 Feature Comparison
 
@@ -42,15 +42,15 @@ Most agent memory stores record everything and trust everything. Raw chat histor
 | **Deleted facts returning** | ❌ Common | ❌ No resurrection guard | ✅ **Scope-aware tombstones** |
 | **Corrections destroying history** | ❌ Overwrite in place | ⚠️ Versioned, untrusted | ✅ **Immutable versions + supersede** |
 | **LLM self-promotion** | ❌ Analyzer picks scope/lifecycle | ❌ N/A | ✅ **remember → private candidate only** |
-| **Trust labels on recall** | ❌ None | ⚠️ Partial | ✅ **scope · lifecycle · verification · freshness per item** |
+| **Trust labels on recall** | ❌ None | ⚠️ Partial | ✅ **scope | lifecycle | verification | freshness per item** |
 | **Recall relevance** | ⚠️ Recency-first | ❌ Pin stuffing | ✅ **Critical pins only + ranked hits** |
-| **External services** | ❌ Vector DB + daemon | ⚠️ Varies | ✅ **Zero — SQLite + stdlib** |
+| **External services** | ❌ Vector DB + daemon | ⚠️ Varies | ✅ **Zero: SQLite + stdlib** |
 
 ## 🚀 Key Modules & Architecture
 
 ```mermaid
 graph TD
-    H[Hermes Agent] -->|turn · memory write · delegation| J[(Raw Ingest Journal)]
+    H[Hermes Agent] -->|turn, memory write, delegation| J[(Raw Ingest Journal)]
     J --> D{Deterministic Gate}
     D -->|explicit durable signal| PC[Private Candidate]
     D -->|trivial / failed upstream| I[Ignored]
@@ -62,29 +62,29 @@ graph TD
     G --> T{Tombstone / Duplicate Checks}
     T -->|allowed| M[(Canonical Memory)]
     T -->|blocked| B[Admission Blocked]
-    M --> R[Safe Recall · critical pins + ranked hits]
+    M --> R[Safe Recall, critical pins + ranked hits]
 ```
 
 ### 1. 🗄️ Governed canonical memory
 * **Project / private scope** with membership checks at every read and write boundary.
-* **Immutable version chain** — supersede appends history instead of rewriting truth.
-* **Tombstone guards** — rejected or corrected claims cannot resurface, even by replay.
+* **Immutable version chain**: supersede appends history instead of rewriting truth.
+* **Tombstone guards**: rejected or corrected claims cannot resurface, even by replay.
 * **Trust labels on every recalled line**: `[project | accepted | source_backed | current]`.
 
 ### 2. 📥 Raw ingest journal
 * Every turn, built-in memory write, and delegation is journaled **before** any analysis.
 * Deterministic gate admits explicit durable signals, ignores greetings/acks/probe text, and queues the ambiguous rest.
-* Raw rows are never recalled directly — the journal is a source of record, not a prompt.
+* Raw rows are never recalled directly, the journal is a source of record, not a prompt.
 
 ### 3. 🔬 Governed semantic review
 * Optional host-LLM side call (`ctx.llm.complete_structured`) with a strict verdict schema: `remember / ignore / defer` only.
-* Analyzers **cannot** choose scope, lifecycle, or verification — attempts are rejected and the event stays pending.
+* Analyzers **cannot** choose scope, lifecycle, or verification, attempts are rejected and the event stays pending.
 * Bounded batches with a failure circuit breaker; provider outages never become memory-provider failures.
 * Trivial turns (greetings, standalone `test`, acknowledgements) never reach the LLM at all.
 
 ### 4. 🛡️ Recall that respects the budget
 * Only **critical** pins bypass query relevance; ordinary pins compete in ranked hits.
-* Oversized facts are skipped whole — never clipped mid-negation.
+* Oversized facts are skipped whole, never clipped mid-negation.
 * The rendered block is hard-capped at the configured character budget, header included.
 
 ---
@@ -112,7 +112,7 @@ accepted/conflict/candidate ──► superseded ──► new immutable version
 - **Supersede preserves history** instead of rewriting old truth in place.
 - **Search returns only current versions** while historical versions remain queryable.
 - **Semantic analyzers do not control trust**: `remember` can create only a private `candidate`.
-- **Ambiguous Hermes replace/remove operations never use fuzzy matching** — unresolved mutations stay pending instead of risking the wrong target.
+- **Ambiguous Hermes replace/remove operations never use fuzzy matching**, unresolved mutations stay pending instead of risking the wrong target.
 
 ---
 
@@ -182,7 +182,7 @@ python -m memcore journal-stats
 python -m memcore journal-review-list --project shared-platform --agent mika
 python -m memcore journal-review-decide <event_id> --agent mika --verdict defer --rationale "need more context"
 
-# Garbage collection — dry-run by default
+# Garbage collection: dry-run by default
 python -m memcore gc
 python -m memcore gc --apply
 
@@ -190,7 +190,7 @@ python -m memcore gc --apply
 python -m memcore import --file batch.json --agent mika --project shared-platform --dry-run
 ```
 
-`journal-stats` aggregates metadata only — no raw prompt or candidate content. `journal-review-list` keeps raw text redacted unless `--show-content` is explicit, and revealed text is untrusted historical data.
+`journal-stats` aggregates metadata only, no raw prompt or candidate content. `journal-review-list` keeps raw text redacted unless `--show-content` is explicit, and revealed text is untrusted historical data.
 
 ### Hermes plugin deployment
 
@@ -262,7 +262,7 @@ flowchart TD
 
 | Area | Status |
 |---|---|
-| Core memory engine · migrations · FTS recall | ✅ Implemented |
+| Core memory engine, migrations, FTS recall | ✅ Implemented |
 | Private/project isolation + tombstone guards | ✅ Implemented |
 | Immutable correction history | ✅ Implemented |
 | GC / import / doctor CLI | ✅ Implemented |
@@ -283,7 +283,7 @@ If a mutation target cannot be proven exactly, it is not guessed.
 If an analyzer wants to remember something, MemCore still applies its own governance.
 If a claim was rejected, replay alone cannot silently bring it back.
 
-That makes the system more conservative than a typical agent memory store — intentionally.
+That makes the system more conservative than a typical agent memory store, intentionally.
 
 ---
 
@@ -291,7 +291,7 @@ That makes the system more conservative than a typical agent memory store — in
 
 ### Built for agents that need memory **and** boundaries.
 
-**Local-first · Auditable · Versioned · Governed**
+**Local-first, Auditable, Versioned, Governed**
 
 [Back to top](#-memcore)
 </div>

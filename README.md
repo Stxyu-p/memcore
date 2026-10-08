@@ -8,7 +8,7 @@
     <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_Start-CLI-0284c7?style=for-the-badge" alt="Quick Start" /></a>
     <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Changelog-View_Notes-blueviolet?style=for-the-badge" alt="Changelog" /></a>
     <a href="https://github.com/Stxyu-p/memcore/releases"><img src="https://img.shields.io/badge/Release-v0.8.6-10b981?style=for-the-badge" alt="Version 0.8.6" /></a>
-    <a href="#-serving-any-coding-agent"><img src="https://img.shields.io/badge/Any_Agent-One_Command-7B61FF?style=for-the-badge" alt="Export" /></a>
+    <a href="#-serving-coding-agents"><img src="https://img.shields.io/badge/Any_Agent-One_Command-7B61FF?style=for-the-badge" alt="Export" /></a>
   </p>
 
   <p>
@@ -29,7 +29,7 @@
 
 Most agent memory stores record everything and trust everything. Raw chat history, tool output, and delegated results become "memory" that resurfaces later with the same authority as a user's explicit decision. A wrong memory is worse than no memory.
 
-MemCore separates them structurally: raw activity goes to an append-only journal that is **never** injected into a prompt, and only governed canonical memory is recallable — always carrying its trust labels.
+MemCore separates them structurally: raw activity goes to an append-only journal that is **never** injected into a prompt, and only governed canonical memory is recallable: always carrying its trust labels.
 
 | Capability | Typical agent memory | "Just dump it in the DB" stores | 🧠 **MemCore** |
 | :--- | :---: | :---: | :---: |
@@ -47,7 +47,7 @@ MemCore separates them structurally: raw activity goes to an append-only journal
 
 ## 📐 Architecture
 
-![MemCore trust architecture — raw journal is never recalled directly; governed admission feeds scope-aware recall behind an enforcement boundary in SQL](docs/architecture.svg)
+![MemCore trust architecture: raw journal is never recalled directly; governed admission feeds scope-aware recall behind an enforcement boundary in SQL](docs/architecture.svg)
 
 <sub>Two lanes with different trust, and the enforcement boundary between them. Plain SVG, no external dependency.</sub>
 
@@ -60,7 +60,7 @@ MemCore separates them structurally: raw activity goes to an append-only journal
 
 | Subsystem | Primary function | Core mechanical guarantees | Trust level on recall |
 | :--- | :--- | :--- | :--- |
-| **🗄️ Canonical store** | Long-term governed knowledge | Scoped project/private access in SQL · immutable version chain · scope-aware tombstones block resurrection | Evaluated & verified — 4 labels per row |
+| **🗄️ Canonical store** | Long-term governed knowledge | Scoped project/private access in SQL; immutable version chain; scope-aware tombstones block resurrection | Evaluated and verified: 4 labels per row |
 | **📥 Ingest journal** | Append-only raw execution ledger | Captures turns, writes and delegations pre-analysis · deterministic triage · never recalled directly | Raw audit trail (untrusted) |
 | **🔬 Semantic review** | Host-LLM triage for ambiguous events | Strict verdict contract (`remember` \| `ignore` \| `defer`) · analyzer cannot pick scope, lifecycle or verification · bounded circuit breaker | Candidate admission (private proposals only) |
 | **🛡️ Budgeted recall** | Query-time context injection | Ranked FTS lane before the substring lane · pins bounded to half the budget so they cannot starve hits · oversized facts skipped whole, never clipped | Prompt context deliverable |
@@ -84,7 +84,7 @@ Every recalled row carries four labels, so a reader never has to guess how much 
 | :--- | :--- | :--- | :--- |
 | `candidate` | governed accept | `accepted` | Eligible for full recall |
 | `candidate` · `accepted` | contradiction with live memory | `conflict` | Both sides audited; nothing auto-resolves |
-| `accepted` | contradicted by a **refused** new write | stays `accepted` | Only the refused row is demoted — a bad write cannot destroy a good fact |
+| `accepted` | contradicted by a **refused** new write | stays `accepted` | Only the refused row is demoted: a bad write cannot destroy a good fact |
 | `candidate` · `accepted` · `conflict` | disable | `disabled` | Reversible, restores the previous lifecycle |
 | `candidate` · `accepted` · `conflict` | reject | `rejected` | Writes a tombstone for the claim fingerprint |
 | `accepted` · `conflict` · `candidate` | supersede | `superseded` | New immutable version; the old one stays queryable |
@@ -92,7 +92,7 @@ Every recalled row carries four labels, so a reader never has to guess how much 
 
 ### Invariants
 
-- **Membership is mandatory** at read and write boundaries — including export.
+- **Membership is mandatory** at read and write boundaries: including export.
 - **Private memory stays private** to its owner.
 - **Cross-project mutation is blocked**, even when the memory ID is known.
 - **Rejected and corrected claims create tombstones** that prevent silent resurrection.
@@ -101,7 +101,7 @@ Every recalled row carries four labels, so a reader never has to guess how much 
 - **Semantic analyzers do not control trust**: `remember` can create only a private `candidate`.
 - **Ambiguous replace/remove operations never use fuzzy matching**; unresolved mutations stay pending instead of risking the wrong target.
 - **A real decay sweep is never second-guessed** by the read-time projection.
-- **A refused write cannot demote an established fact** — otherwise one bad agent write would poison the fleet's memory unrecoverably.
+- **A refused write cannot demote an established fact**: otherwise one bad agent write would poison the fleet's memory unrecoverably.
 
 ---
 
@@ -137,38 +137,74 @@ The 2 expected failures are the legacy E12 token-budget evaluations: they join u
 
 ---
 
-## 📤 Serving any coding agent
+## 📤 Serving coding agents
 
-Every major coding agent already reads a plain convention file from the working tree. `export` writes governed memory into the file that agent family is verified to read — so MemCore reaches **Codex, Antigravity, Claude Code and Freebuff** with no daemon, no port, no MCP and no new dependency.
+MemCore exports governed project memory into shared agent instructions, so coding agents working side by side can read the same source of truth. The default target is `AGENTS.md`. Select a host when its native convention is different. Export is on demand and local, with no daemon, port, MCP server, or new dependency.
+
+<table>
+  <tr>
+    <td align="center" width="25%"><img src="assets/agents/antigravity.svg" width="48" height="48" alt="Antigravity logo" /><br /><sub>Antigravity</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/codex.svg" width="48" height="48" alt="Codex logo" /><br /><sub>Codex</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/claude-code.svg" width="48" height="48" alt="Claude Code logo" /><br /><sub>Claude Code</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/cursor.svg" width="48" height="48" alt="Cursor logo" /><br /><sub>Cursor</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="25%"><img src="assets/agents/deepseek-harness.svg" width="48" height="48" alt="DeepSeek logo" /><br /><sub>DeepSeek Harness</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/zcode.png" width="48" height="48" alt="ZCode logo" /><br /><sub>ZCode</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/hermes.svg" width="48" height="48" alt="Hermes logo" /><br /><sub>Hermes</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/opencode.svg" width="48" height="48" alt="OpenCode logo" /><br /><sub>OpenCode</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="25%"><img src="assets/agents/gemini.svg" width="48" height="48" alt="Gemini logo" /><br /><sub>Gemini CLI</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/windsurf.svg" width="48" height="48" alt="Windsurf logo" /><br /><sub>Windsurf</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/cline.svg" width="48" height="48" alt="Cline logo" /><br /><sub>Cline</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/github-copilot.svg" width="48" height="48" alt="GitHub Copilot logo" /><br /><sub>GitHub Copilot</sub></td>
+  </tr>
+</table>
+
+<sub>Selected agent instruction-file targets. Brand marks are credited in <code>assets/agents/README.txt</code>. This grid identifies supported targets, not an endorsement by the listed vendors.</sub>
 
 ```bash
-# Default: MEMORY.md for Codex
+# Shared instructions for agents that read AGENTS.md
 python -m memcore export
 
-# The file each agent family is verified to read
-python -m memcore export --host claude      # CLAUDE.md
-python -m memcore export --host agy         # GEMINI.md
-python -m memcore export --host freebuff    # .agents/memory.md
-python -m memcore export --host all         # every target
+# Native instruction files
+python -m memcore export --host claude-code  # CLAUDE.md
+python -m memcore export --host gemini-cli   # GEMINI.md
+python -m memcore export --host copilot      # .github/copilot-instructions.md
 
-# Write into any repo, from anywhere
+# One copy at each distinct supported target
+python -m memcore export --host all
+
+# Write into another repo, or preview without touching files
 python -m memcore export --out-dir ../other-repo --host codex
-
-# Preview without touching the working tree
 python -m memcore export --stdout
 ```
 
-| Host | Target file | Evidence |
+| Agent | Export target | Host selector |
 | :--- | :--- | :--- |
-| `codex` | `MEMORY.md` | Installed binary references `MEMORY.md` and `AGENTS.md` |
-| `agy` | `GEMINI.md` | Installed binary references `GEMINI.md` and `AGENTS.md` |
-| `claude` | `CLAUDE.md` | Host convention |
-| `freebuff` | `.agents/memory.md` | Its own `--help`: *"Load this repository's `.agents` files and `mcp.json`"* |
-| `all` | every one of the above | For repos where several agents work side by side |
+| Antigravity | `AGENTS.md` | `antigravity` |
+| Codex | `AGENTS.md` | `codex` |
+| Claude Code | `CLAUDE.md` | `claude-code` |
+| Cursor | `AGENTS.md` | `cursor` |
+| DeepSeek Harness | `AGENTS.md` | `deepseek-harness` |
+| ZCode | `AGENTS.md` | `zcode` |
+| Hermes | `AGENTS.md` | `hermes` |
+| OpenCode | `AGENTS.md` | `opencode` |
+| Gemini CLI | `GEMINI.md` | `gemini-cli` |
+| Windsurf | `AGENTS.md` | `windsurf` |
+| Cline | `AGENTS.md` | `cline` |
+| GitHub Copilot | `.github/copilot-instructions.md` | `copilot` |
+
+Other supported aliases include `agy`, `claude`, `gemini`, `harness`, `dsh`, `deepseek`, `github-copilot`, `kilocode`, `roo`, `memory`, and `generic`. Harness refers to **DeepSeek Harness**. Less-used Freebuff is intentionally omitted.
+
+First-party instruction-file documentation: [Codex](https://developers.openai.com/codex/agent-configuration/agents-md), [Cursor](https://cursor.com/docs/rules), [Antigravity](https://antigravity.google/docs/rules/), [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/context/agent-instructions), [ZCode](https://zcode.z.ai/en/docs/agents), [Hermes](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files), [GitHub Copilot](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-custom-instructions), [Gemini CLI](https://geminicli.com/docs/cli/gemini-md/), [Windsurf](https://docs.devin.ai/desktop/cascade/agents-md), [Cline](https://docs.cline.bot/customization/cline-rules), and [OpenCode](https://opencode.ai/docs/rules/). See also [MemCore host targets](memcore/export.py).
+
+**Codex, Cursor, Antigravity, DeepSeek Harness, ZCode, Hermes, Windsurf, Cline, and OpenCode** read `AGENTS.md`. Gemini CLI defaults to `GEMINI.md`. Claude Code reads `CLAUDE.md`. GitHub Copilot supports both `AGENTS.md` and `.github/copilot-instructions.md`; this export uses the native repository-wide `.github/copilot-instructions.md` target.
 
 | Flag | Effect |
 | :--- | :--- |
-| `--host` | Target selection above. Default is `MEMORY.md` |
+| `--host` | Select an agent target or `all`. Default is `AGENTS.md` |
 | `--out` | Explicit output file; overrides the host convention |
 | `--out-dir` | Directory to write the target(s) into (default: current directory) |
 | `--limit` | Max memories to export (default: 40) |
@@ -193,13 +229,13 @@ Two properties worth knowing before pointing it at a repo:
 | `stats` | Operational statistics (counts only, no content) |
 | `backup` · `backup-status` | Create a verified recovery snapshot; report readiness (no writes) |
 | `restore-from-snapshot` | Restore the store from a snapshot |
-| `decay` | Freshness decay sweep — dry-run by default |
-| `gc` | Retention sweep — dry-run by default, reversible for memories |
+| `decay` | Freshness decay sweep: dry-run by default |
+| `gc` | Retention sweep: dry-run by default, reversible for memories |
 | `contradictions` | Scan for disagreeing claim pairs (read-only) |
 | `mark-conflict` | Mark two memories as conflict (governed) |
 | `corroborate` · `golden-list` | Scan/apply corroboration promotion; list the Golden set |
 | `history` | Show the version valid at a timestamp |
-| `import` | Import memories from JSON — supports `--dry-run` with zero domain writes |
+| `import` | Import memories from JSON: supports `--dry-run` with zero domain writes |
 | `export` | Write governed memory to an agent-readable file |
 | `journal-stats` | Content-free ingest journal health |
 | `journal-review-list` | List pending semantic review events (raw text redacted unless `--show-content`) |
@@ -224,7 +260,7 @@ memory:
 
 | Capability | Behaviour |
 | :--- | :--- |
-| Prefetch | Recalls only canonical governed memory — critical pins plus ranked hits, inside a hard character budget |
+| Prefetch | Recalls only canonical governed memory: critical pins plus ranked hits, inside a hard character budget |
 | Turn sync | Journals the raw turn before analysis |
 | Built-in add / replace / remove | Mirrors, exact-origin supersede, reject + tombstone |
 | Delegation | Captures raw context without automatic recall |
@@ -267,15 +303,15 @@ Deployment uses an explicit runtime allowlist with SHA-256 verification, so test
 | `memcore/ingest.py` | Raw journal, mutation bridge, semantic review |
 | `memcore/store.py` | SQLite/WAL configuration and the 17-step migration chain |
 | `memcore/contradiction.py` | Subject keys, polarity and numeric comparison |
-| `memcore/export.py` | Agent-facing export — ranking, rendering, target conventions |
+| `memcore/export.py` | Agent-facing export: ranking, rendering, target conventions |
 | `memcore/semantic.py` · `ablation.py` | Analyzer adapter and the recall-ablation hooks |
 | `memcore/__main__.py` | Operational CLI, doctor, config binding |
 | `schema/schema.sql` | Frozen initial schema contract |
-| `integrations/hermes/memcore/` | Native provider — Git is the source of truth, deploy copies it |
+| `integrations/hermes/memcore/` | Native provider: Git is the source of truth, deploy copies it |
 | `harness/` | Engine, CLI and evaluation suites plus the recall baseline |
 | `fixtures/` | Deterministic evaluation data |
 | `scripts/` | Deployer and benchmarks |
-| `docs/adr/` | Architecture decision records (0013–0020) |
+| `docs/adr/` | Architecture decision records (0013 to 0020) |
 
 ---
 

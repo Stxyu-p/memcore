@@ -216,13 +216,11 @@ class ExportCliTests(unittest.TestCase):
 
 
 class ExportHostTargetTests(ExportBase):
-    """--host must write the file each agent family actually reads.
+    """Popular coding agents map to verified native instruction files."""
 
-    Evidence recorded in export.HOST_TARGETS: codex and agy binaries were
-    scanned for convention filenames, and freebuff's own --help names `.agents`
-    files. Content must be byte-identical across targets — divergent per-host
-    files are how two agents end up with two different truths.
-    """
+    def test_default_target_is_agents_md(self):
+        self.assertEqual(export_mod.DEFAULT_OUT.as_posix(), 'AGENTS.md')
+        self.assertEqual(export_mod.targets_for(None), (export_mod.DEFAULT_OUT,))
 
     def setUp(self):
         super().setUp()
@@ -231,24 +229,45 @@ class ExportHostTargetTests(ExportBase):
             'shared gateway port is 20128 for every call',
             scope='project', lifecycle='accepted')
 
-    def test_every_host_has_exactly_one_primary_target(self):
-        for host in ('codex', 'agy', 'freebuff', 'claude'):
+    def test_every_host_has_exactly_one_markdown_target(self):
+        for host in export_mod.HOST_TARGETS:
             targets = export_mod.targets_for(host)
             self.assertEqual(len(targets), 1, host)
-            self.assertTrue(targets[0].endswith('.md'), host)
+            self.assertTrue(str(targets[0]).endswith('.md'), host)
 
-    def test_targets_are_the_verified_conventions(self):
-        self.assertEqual(export_mod.targets_for('codex')[0], 'MEMORY.md')
-        self.assertEqual(export_mod.targets_for('agy')[0], 'GEMINI.md')
-        self.assertEqual(export_mod.targets_for('claude')[0], 'CLAUDE.md')
-        self.assertTrue(
-            export_mod.targets_for('freebuff')[0].startswith('.agents/'),
-            'freebuff loads `.agents` files per its own --help')
+    def test_popular_agents_use_native_instruction_files(self):
+        expected = {
+            'codex': ('AGENTS.md',),
+            'claude-code': ('CLAUDE.md',),
+            'cursor': ('AGENTS.md',),
+            'antigravity': ('AGENTS.md',),
+            'deepseek-harness': ('AGENTS.md',),
+            'zcode': ('AGENTS.md',),
+            'hermes': ('AGENTS.md',),
+            'opencode': ('AGENTS.md',),
+            'copilot': ('.github/copilot-instructions.md',),
+            'github-copilot': ('.github/copilot-instructions.md',),
+            'memory': ('MEMORY.md',),
+            'generic': ('MEMORY.md',),
+            'gemini-cli': ('GEMINI.md',),
+            'windsurf': ('AGENTS.md',),
+            'cline': ('AGENTS.md',),
+            'kilocode': ('AGENTS.md',),
+            'roo': ('AGENTS.md',),
+        }
+        for host, target in expected.items():
+            self.assertEqual(export_mod.targets_for(host), target, host)
 
-    def test_host_all_covers_every_known_host(self):
+    def test_low_demand_host_is_not_advertised(self):
+        self.assertNotIn('freebuff', export_mod.HOST_TARGETS)
+
+    def test_host_all_covers_every_distinct_known_target(self):
         everything = set(export_mod.HOST_ALL_TARGETS)
-        for host in ('codex', 'agy', 'claude', 'freebuff'):
-            self.assertTrue(set(export_mod.targets_for(host)) <= everything, host)
+        expected = {
+            target for host in export_mod.HOST_TARGETS
+            for target in export_mod.targets_for(host)
+        }
+        self.assertEqual(everything, expected)
 
     def test_unknown_host_falls_back_to_the_default_file(self):
         self.assertEqual(export_mod.targets_for('nonsense'),
@@ -269,12 +288,18 @@ class ExportHostTargetTests(ExportBase):
             len(set(bodies.values())), 1,
             'every host must read the same content')
 
-    def test_out_dir_creates_nested_paths(self):
+    def test_out_dir_writes_the_shared_agents_file(self):
         out_dir = os.path.join(self.tmpdir, 'fresh', 'repo')
         export_mod.export(
-            self.conn, 'proj-e', 'agent-mika', host='freebuff', out_dir=out_dir)
-        self.assertTrue(os.path.isfile(
-            os.path.join(out_dir, '.agents', 'memory.md')))
+            self.conn, 'proj-e', 'agent-harness', host='harness', out_dir=out_dir)
+        self.assertTrue(os.path.isfile(os.path.join(out_dir, 'AGENTS.md')))
+
+    def test_out_dir_creates_the_copilot_instructions_directory(self):
+        out_dir = os.path.join(self.tmpdir, 'fresh', 'copilot-repo')
+        export_mod.export(
+            self.conn, 'proj-e', 'agent-harness', host='copilot', out_dir=out_dir)
+        self.assertTrue(os.path.isfile(os.path.join(
+            out_dir, '.github', 'copilot-instructions.md')))
 
     def test_explicit_out_wins_over_host(self):
         target = os.path.join(self.tmpdir, 'custom.md')
@@ -282,7 +307,7 @@ class ExportHostTargetTests(ExportBase):
             self.conn, 'proj-e', 'agent-mika', out_path=target, host='codex')
         self.assertTrue(os.path.isfile(target))
         self.assertFalse(os.path.exists(
-            os.path.join(self.tmpdir, 'MEMORY.md')))
+            os.path.join(self.tmpdir, 'AGENTS.md')))
 
 
 

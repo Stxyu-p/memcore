@@ -1684,9 +1684,8 @@ def main(argv=None):
                         "(default: current directory)")
     p.add_argument('--host', default=None,
                    choices=sorted(export_mod.HOST_TARGETS) + ['all'],
-                   help="write the file(s) this agent family reads: "
-                        "codex=MEMORY.md, agy=GEMINI.md, freebuff=.agents/memory.md, "
-                        "claude=CLAUDE.md, all=every one (default: MEMORY.md)")
+                   help="write the instruction file this agent reads; "
+                        "use 'all' for every distinct supported target")
     p.add_argument('--limit', type=int, default=40,
                    help='max memories to export (default: 40)')
     p.add_argument('--title', default='Shared project memory',

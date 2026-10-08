@@ -141,7 +141,7 @@ The 2 expected failures are the legacy E12 token-budget evaluations: they join u
 
 MemCore exports governed project memory into shared agent instructions, so coding agents working side by side can read the same source of truth. The default target is `AGENTS.md`. Select a host when its native convention is different. Export is on demand and local, with no daemon, port, MCP server, or new dependency.
 
-<table>
+<table width="100%">
   <tr>
     <td align="center" width="25%"><img src="assets/agents/antigravity.svg" width="48" height="48" alt="Antigravity logo" /><br /><sub>Antigravity</sub></td>
     <td align="center" width="25%"><img src="assets/agents/codex.svg" width="48" height="48" alt="Codex logo" /><br /><sub>Codex</sub></td>

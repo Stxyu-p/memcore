@@ -8,16 +8,14 @@ and zero storage corruption under pathological conditions.
 from __future__ import annotations
 
 import concurrent.futures
-import math
 import os
-import sqlite3
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from memcore import store, core
-from memcore.core import MemCoreError, PermissionDenied, NotFound, TombstoneBlocked
+from memcore.core import MemCoreError, PermissionDenied, NotFound
 
 
 class SadistTestBase(unittest.TestCase):

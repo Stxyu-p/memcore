@@ -9,7 +9,7 @@ import sqlite3
 import uuid
 import json
 import unicodedata
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from . import store
 from . import ablation as _ablation
@@ -25,6 +25,24 @@ class TombstoneBlocked(MemCoreError):
         self.reason = reason
         super().__init__(
             f'claim blocked by active tombstone ({fingerprint[:8]}...): {reason}'
+        )
+
+
+class ContradictionHold(MemCoreError):
+    """An auto-accept was refused because the claim contradicts live memory.
+
+    The row IS created — as ``conflict``, paired with the memory it disagrees
+    with, and audited as ``contradiction-hold``. Nothing is resolved here:
+    supersede or reject by an owner decides. Carries the new memory id so the
+    caller can report it instead of losing the write silently.
+    """
+    def __init__(self, hits, memory_id=None):
+        self.hits = list(hits)
+        self.memory_id = memory_id
+        first = self.hits[0] if self.hits else ('', 'unknown')
+        super().__init__(
+            'auto-accept held: claim contradicts live memory '
+            f'{first[0]} ({first[1]})'
         )
 
 
@@ -359,6 +377,17 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
                 )
                 if blocked:
                     raise TombstoneBlocked(original_fp, blocked[0])
+                if existing_lifecycle == 'conflict':
+                    # A replay must not launder the refusal into a success. The
+                    # first attempt committed the conflict row and this key
+                    # before raising, so the retry took the replay path and
+                    # returned OK for a row that can never be recalled as
+                    # accepted. Re-raise so the caller keeps seeing the refusal;
+                    # supersede/reject is the documented way to resolve it.
+                    if _manage_transaction:
+                        conn.execute('ROLLBACK')
+                    raise ContradictionHold(
+                        [(existing_memory, 'replay_of_conflict')], existing_memory)
                 if existing_lifecycle in ('disabled', 'rejected', 'superseded'):
                     raise MemCoreError(
                         f'idempotent target is terminal (lifecycle={existing_lifecycle})'
@@ -375,6 +404,17 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             if _manage_transaction:
                 conn.execute('ROLLBACK')
             raise TombstoneBlocked(claim_fp, blocked[0])
+
+        # Gate every auto-accept at the single choke point. Previously only the
+        # ingest and semantic lanes called pre_accept_conflict_check, so the
+        # explicit memory_remember lane created 'accepted' rows that could
+        # silently disagree with live memory and were never marked conflict.
+        # Candidates keep the old behaviour (a later accept runs the gate).
+        conflict_hits = []
+        if lifecycle == 'accepted':
+            conflict_hits = pre_accept_conflict_check(conn, project_id, content)
+            if conflict_hits:
+                lifecycle = 'conflict'
 
         mem_id = _new_id('mem')
         ver_id = _new_id('ver')
@@ -412,7 +452,8 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         )
         _audit(conn, 'create', agent_id, mem_id, project_id,
                {'memory_id': mem_id, 'version_id': ver_id,
-                'scope': scope, 'content': content},
+                'scope': scope, 'content': content,
+                'contradiction_hold': [list(h) for h in conflict_hits]},
                write_key=idempotency_key)
         if idempotency_key:
             conn.execute(
@@ -420,8 +461,22 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
                 'VALUES (?, ?, ?, ?, ?)',
                 (idempotency_key, project_id, mem_id, ver_id, now)
             )
+        if conflict_hits:
+            # Both sides surface as conflict; nothing resolves automatically.
+            _audit(conn, 'contradiction-hold', agent_id, mem_id, project_id,
+                   {'hits': [list(h) for h in conflict_hits]})
+            try:
+                mark_contradiction(
+                    conn, mem_id, conflict_hits[0][0], agent_id,
+                    conflict_hits[0][1], _manage_transaction=False)
+            except (PermissionDenied, MemCoreError):
+                # The other side may not be writable by this agent. The new row
+                # is already 'conflict' and audited, so the hold still stands.
+                pass
         if _manage_transaction:
             conn.execute('COMMIT')
+        if conflict_hits:
+            raise ContradictionHold(conflict_hits, mem_id)
         return mem_id, ver_id
     except Exception:
         if _manage_transaction:
@@ -1028,15 +1083,33 @@ def pre_accept_conflict_check(conn, project_id, content, exclude_memory_id=None)
 
     key = _cd.subject_key(content)
     if not key:
-        return [('__empty_subject__', 'empty_subject_hold')]
+        # No extractable subject (emoji-only, punctuation-only, bare digits,
+        # stopwords) means there is nothing to contradict anything about. The
+        # synthetic hold this replaced turned every such write into a permanent
+        # conflict, changing behaviour for content the caller never asked to gate
+        # -- measured: emoji, "12345" and "!!!" were all refused. Fail open: an
+        # un-gated write is recoverable, a silently held one is not visible.
+        return []
 
+    # SQL prefilter on the first subject token before the Python pair test.
+    # Every live row must be Python-tested for equivalence, but only rows that
+    # literally contain that token can share a subject key (the key is built
+    # from the content's own words), so this is a strict narrowing.
+    #
+    # Case folding is REQUIRED for that to hold: subject_key() lowercases and
+    # NFC-normalises, so a stored row that capitalises the token ('Gateway
+    # daemon port ...') shares the subject key but was invisible to a
+    # case-sensitive instr() — the Python pair test then never ran and the
+    # contradicting claim was admitted as 'accepted'.
+    token = key.split(' ', 1)[0]
     rows = conn.execute(
         'SELECT m.id, v.content FROM memory m '
         'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
         'WHERE m.project_id = ? '
         "AND m.lifecycle IN ('candidate','accepted','conflict') "
-        'AND (m.id != ? OR ? IS NULL)',
-        (project_id, exclude_memory_id, exclude_memory_id),
+        'AND (m.id != ? OR ? IS NULL) '
+        'AND instr(lower(v.content), lower(?)) > 0',
+        (project_id, exclude_memory_id, exclude_memory_id, token),
     ).fetchall()
 
     hits = []
@@ -1052,6 +1125,12 @@ def pre_accept_conflict_check(conn, project_id, content, exclude_memory_id=None)
 #: Distinct corroborating agents required to auto-accept a claim.
 CORROBORATE_ACCEPT_N = 3
 #: Distinct corroborating agents required to crown a claim a Golden Rule.
+#: ponytail: unreachable on a 4-agent fleet — the owner (pchoke) is a human and
+#: only wrote 2 memories, so no claim can ever reach 5 distinct writers.
+#: Measured 2026-10-07: dropping this to 4 changes recall output by ZERO bytes
+#: (build_recall_block's PINNED_MAX_SHARE already caps how much of the block
+#: pinned rows may use). Leave it at 5 unless the fleet grows; if a sixth
+#: independent agent joins, 5 becomes meaningful again.
 GOLDEN_N = 5
 #: Semantic confidence at or above which a `remember` verdict self-accepts.
 HIGH_CONFIDENCE_ACCEPT = 0.95
@@ -1707,6 +1786,47 @@ def record_recall(conn, memory_ids) -> int:
         return 0
 
 
+#: Freshness label projected at read time (never written). Mirrors
+#: apply_freshness_decay: a stored non-'current' value always wins, a row
+#: recalled within REINFORCEMENT_WINDOW_DAYS stays current, otherwise age decides.
+_FRESHNESS_PROJECTION_SQL = "(CASE WHEN m.freshness <> 'current' THEN m.freshness WHEN m.last_recalled IS NOT NULL AND julianday(?) - julianday(m.last_recalled) < ? THEN 'current' WHEN julianday(?) - julianday(m.updated_at) >= ? THEN 'stale' WHEN julianday(?) - julianday(m.updated_at) >= ? THEN 'aging' ELSE 'current' END)"
+
+
+def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
+                        detail_params, retention_tail, retention_params, now_iso,
+                        limit):
+    """Unicode substring lane: unranked ``instr(content, term)`` OR-terms.
+
+    unicode61 never segments glued Thai, so this exists purely to bridge that.
+    It carries NO bm25 rank, which is why search() runs it only as a fallback and
+    never lets it lead the result.
+    """
+    or_clauses = ' OR '.join(['instr(v.content, ?) > 0'] * len(substr_terms))
+    return conn.execute(
+        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
+        '       v.content, m.owner_agent_id, 0.0 AS rank, '
+        '       m.claim_fingerprint '
+        'FROM memory m JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+        'WHERE m.project_id = ? '
+        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
+        '  AND ' + _recall_tombstone_guard('m') + ' '
+        '  AND (' + or_clauses + ') ' + detail_filter +
+        'ORDER BY m.pinned DESC, '
+        "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, "
+        "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 "
+        "WHEN 'source_backed' THEN 2 ELSE 3 END, "
+        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
+        retention_tail + ', '
+        'm.updated_at DESC, m.id ASC LIMIT ?',
+        (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso,
+         FRESHNESS_STALE_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
+        (project_id, agent_id) + tuple(substr_terms) + detail_params +
+        tuple(retention_params) + (min(500, limit * DISTINCT_OVERFETCH),)
+    ).fetchall()
+
+
 def search(conn, project_id, agent_id, query, limit=20,
            scope_detail=None):
     """FTS5 search over memory content, scope-enforced in SQL.
@@ -1742,6 +1862,7 @@ def search(conn, project_id, agent_id, query, limit=20,
         _ablation.fake_now()
     except Exception:
         decay_ablated = False
+    now_iso = _eval_now_iso()
     retention_expr, retention_params = _retention_order(
         conn, not decay_ablated, alias='m')
     retention_tail_exact = (
@@ -1785,40 +1906,19 @@ def search(conn, project_id, agent_id, query, limit=20,
                     continue
                 seen_terms.add(bg)
                 substr_terms.append(bg)
-                if len(substr_terms) >= 32:
+                if len(substr_terms) >= MAX_SUBSTR_TERMS:
                     break
-            if len(substr_terms) >= 32:
+            if len(substr_terms) >= MAX_SUBSTR_TERMS:
                 break
-    if substr_terms:
-        or_clauses = ' OR '.join(['instr(v.content, ?) > 0'] * len(substr_terms))
-        exact_rows = conn.execute(
-            'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, '
-            '       v.content, m.owner_agent_id, 0.0 AS rank '
-            'FROM memory m JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
-            'WHERE m.project_id = ? '
-            "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-            "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-            '  AND ' + _recall_tombstone_guard('m') + ' '
-            '  AND (' + or_clauses + ') ' + detail_filter +
-            'ORDER BY m.pinned DESC, ' +
-            "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
-            "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
-            "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
-            retention_tail_exact + ', ' +
-            'm.updated_at DESC, m.id ASC LIMIT ?',
-            (project_id, agent_id) + tuple(substr_terms) + detail_params +
-            tuple(retention_params) + (limit,)
-        ).fetchall()
-        if len(exact_rows) >= limit:
-            return exact_rows[:limit]
     match_expr = _fts_query(raw_query)
     if not match_expr:
         return exact_rows
-    fts_limit = min(500, limit + len(exact_rows))
+    fts_limit = min(500, (limit + len(exact_rows)) * DISTINCT_OVERFETCH)
     cur = conn.execute(
-        'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, '
+        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
         '       v.content, m.owner_agent_id, '
-        '       bm25(memory_version_fts) AS rank '
+        '       bm25(memory_version_fts) AS rank, m.claim_fingerprint '
         'FROM memory_version_fts fts '
         'JOIN memory_version v ON v.rowid = fts.rowid '
         'JOIN memory m ON m.id = v.memory_id '
@@ -1834,21 +1934,134 @@ def search(conn, project_id, agent_id, query, limit=20,
         "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
         retention_tail_fts + ', ' +
         'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
+        (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso,
+         FRESHNESS_STALE_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
         (match_expr, project_id, agent_id) + detail_params +
         tuple(retention_params) + (fts_limit,)
     )
     fts_rows = cur.fetchall()
+    # Substring lane runs ONLY as a fallback, and only when the ranked lane did
+    # not already supply enough DISTINCT claims. It is unranked (no bm25) and
+    # costs a full scan per OR-term, so running it unconditionally doubled Thai
+    # latency and, worse, could never be ranked against real hits.
+    #
+    # Count CLAIMS, not rows: the fleet corroborates by re-writing one claim
+    # from several agents, so a row count hits `limit` while carrying a single
+    # fact — the collapse would then have a freed slot with nothing to put in
+    # it, and the one substring-only claim was dropped. Measured: 6 copies of
+    # one claim + 1 distinct Thai claim filled a 5-slot window with 5 copies
+    # and lost the distinct one.
+    if substr_terms and len({row[8] for row in fts_rows}) < limit:
+        exact_rows = _run_substring_lane(
+            conn, project_id, agent_id, substr_terms, detail_filter,
+            detail_params, retention_tail_exact, retention_params, now_iso, limit)
     if not exact_rows:
-        return fts_rows[:limit]
-    seen = {row[0] for row in exact_rows}
-    merged = list(exact_rows)
-    for row in fts_rows:
+        return _demote_numeric_mismatch(
+            user_query, _collapse_duplicate_claims(fts_rows, limit))
+    # bm25-ranked hits come FIRST; the substring lane only tops up the remainder.
+    # The substring lane is unranked (rank 0.0), so leading with it buried every
+    # ranked hit — measured: "โทเคน Discord เก็บไว้ที่ไหน" returned 13 weak
+    # substring matches while the DISCORD_BOT_TOKEN fact stayed in the store,
+    # unfound. Merging to the over-fetch depth gives the collapse below spare
+    # rows to swap copies of one claim for a different claim.
+    seen = {row[0] for row in fts_rows}
+    merged = list(fts_rows)
+    merge_cap = min(500, limit * DISTINCT_OVERFETCH)
+    for row in exact_rows:
         if row[0] not in seen:
             merged.append(row)
             seen.add(row[0])
-            if len(merged) >= limit:
+            if len(merged) >= merge_cap:
                 break
-    return merged[:limit]
+    return _demote_numeric_mismatch(
+        user_query, _collapse_duplicate_claims(merged, limit))
+
+
+#: How much deeper than ``limit`` search() reads before collapsing duplicate
+#: claim copies. The fleet corroborates by re-writing one claim from several
+#: agents, so a shallow window can be entirely copies of a single fact; reading
+#: a few times deeper lets distinct claims fill the freed slots.
+#: Measured sweep on the live-store copy: 1 -> mean result overlap 0.86 and
+#: SLOWER (fewer distinct rows to sort); 2 -> identical results on every probe;
+#: 3 -> no gain over 2. So 2 is the value: same recall, less work.
+DISTINCT_OVERFETCH = 2
+
+#: Cap on `instr(v.content, ?)` OR-terms in the Thai substring lane. Each term
+#: is a full table scan of the joined version rows, so this is the single
+#: biggest lever on Thai-query latency (measured: a 32-term glued Thai query
+#: costs ~5ms, ASCII ~1ms). Lower it if recall ever degrades for long queries.
+MAX_SUBSTR_TERMS = 32
+
+
+def _collapse_duplicate_claims(rows, limit=None):
+    """Keep the first (best-ranked) copy of each claim; fold the rest behind it.
+
+    The fleet corroborates by re-writing the same claim from several agents, so
+    one true fact arrives as N identical rows. Without this the result window
+    fills with copies of a single fact and the remaining slots carry nothing new
+    — measured on the live store, ``HERMES_PROFILE`` returned 4 rows carrying 1
+    distinct claim. Folding is stable: the canonical (best-ranked) copy keeps
+    its position and every duplicate moves behind all distinct claims, so no
+    claim is ever lost and ranking order is preserved.
+    """
+    rows = list(rows or [])
+    if len(rows) < 2:
+        return rows[:limit] if limit else rows
+    keep = []
+    folded = []
+    seen = set()
+    for row in rows:
+        fp = row[8] if len(row) > 8 else None
+        if not fp:
+            try:
+                fp = fingerprint(
+                    ' '.join(str(row[5] if len(row) > 5 else row).split()))
+            except Exception:
+                fp = None
+        if fp is not None:
+            if fp in seen:
+                folded.append(row)
+                continue
+            seen.add(fp)
+        keep.append(row)
+    out = keep + folded
+    return out[:limit] if limit else out
+
+
+#: Age thresholds mirroring apply_freshness_decay's defaults, applied when
+#: projecting the freshness label at read time.
+FRESHNESS_AGING_DAYS = 30
+FRESHNESS_STALE_DAYS = 90
+
+
+def _demote_numeric_mismatch(query, rows):
+    """Stable-partition hits whose standalone numbers contradict the query.
+
+    A query naming a concrete value ("port 8080", "page size 100") should not
+    lead with a memory stating a different value for the same subject. Lexical
+    recall has no polarity, so this is the one negation signal available
+    without a semantic model: both sides carry numbers and they are disjoint.
+
+    Only reorders rows it actually demotes; ties keep their original order, so
+    an unrelated hit can never be pushed above a row that merely mentions a
+    number by accident (e.g. "9router", "v1") — those share no standalone
+    digits with the query and stay put.
+    """
+    rows = list(rows or [])
+    if len(rows) < 2:
+        return rows
+    from memcore import contradiction as _cd
+    query_numbers = _cd.numbers(query)
+    if not query_numbers:
+        return rows
+    keep, demoted = [], []
+    for row in rows:
+        row_numbers = _cd.numbers(row[5] if len(row) > 5 else row)
+        if row_numbers and not (row_numbers & query_numbers):
+            demoted.append(row)
+        else:
+            keep.append(row)
+    return keep + demoted
 
 
 def conflict_memories(conn, project_id, agent_id):

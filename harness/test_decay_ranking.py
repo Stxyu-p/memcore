@@ -199,5 +199,118 @@ class TestDecayAblation(DecayRankingBase):
             self.assertEqual(len(rows), 2)
 
 
+
+class FreshnessLabelProjectionTests(unittest.TestCase):
+    """The freshness label shown in a recall line must not lie.
+
+    ``apply_freshness_decay`` is a manual sweep (no cron by owner decision), so
+    every stored label can sit at 'current' while the row is weeks old and the
+    recall line would claim 'current' for something decay would have aged. The
+    label is therefore projected at read time, inside the same SQL pass — never
+    written, and a real sweep's stored value still wins.
+    """
+
+    def setUp(self):
+        from memcore import ablation as _ablation
+        _ablation._reset_ablation_cache()
+        self.tmpdir = tempfile.mkdtemp(prefix='memcore_freshlabel_')
+        self.db_path = os.path.join(self.tmpdir, 'fresh.db')
+        self.conn = store.open_store(self.db_path)
+        self.conn.execute("INSERT INTO project (id, name) VALUES ('p-f', 'f')")
+        self.conn.execute(
+            "INSERT INTO agent (id, name, profile_key) "
+            "VALUES ('agent-f', 'f', 'f')")
+        self.conn.execute(
+            "INSERT INTO project_membership (project_id, agent_id, role) "
+            "VALUES ('p-f', 'agent-f', 'owner')")
+        self.conn.commit()
+
+    def tearDown(self):
+        from memcore import ablation as _ablation
+        _ablation._reset_ablation_cache()
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def _aged(self, content, days):
+        mem_id, _ = core.create_memory(
+            self.conn, 'p-f', 'agent-f', content,
+            scope='project', lifecycle='accepted')
+        self.conn.execute(
+            "UPDATE memory SET updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now',?) "
+            'WHERE id=?', (f'-{days} days', mem_id))
+        self.conn.commit()
+        return mem_id
+
+    def _label(self, mem_id, content):
+        rows = core.search(self.conn, 'p-f', 'agent-f', content, limit=5)
+        for row in rows:
+            if row[0] == mem_id:
+                return row[4]
+        return None
+
+    def test_fresh_row_reads_current(self):
+        mem_id = self._aged('freshness label probe current', 2)
+        self.assertEqual(self._label(mem_id, 'freshness label probe current'),
+                         'current')
+
+    def test_thirty_day_row_reads_aging(self):
+        mem_id = self._aged('freshness label probe aging', 45)
+        self.assertEqual(self._label(mem_id, 'freshness label probe aging'),
+                         'aging')
+
+    def test_ninety_day_row_reads_stale(self):
+        mem_id = self._aged('freshness label probe stale', 120)
+        self.assertEqual(self._label(mem_id, 'freshness label probe stale'),
+                         'stale')
+
+    def test_recent_recall_rescues_an_old_row(self):
+        """Same reinforcement rule the durable sweep uses: a fact the fleet
+        actually still recalls stays current."""
+        mem_id = self._aged('freshness label probe reinforced', 60)
+        core.record_recall(self.conn, [mem_id])
+        self.assertEqual(
+            self._label(mem_id, 'freshness label probe reinforced'), 'current')
+
+    def test_stored_label_wins_over_projection(self):
+        """A real sweep's durable value must not be second-guessed."""
+        mem_id = self._aged('freshness label probe stored wins', 60)
+        self.conn.execute(
+            "UPDATE memory SET freshness='stale' WHERE id=?", (mem_id,))
+        self.conn.commit()
+        self.assertEqual(
+            self._label(mem_id, 'freshness label probe stored wins'), 'stale')
+
+    def test_projection_never_writes(self):
+        self._aged('freshness label probe no write', 60)
+        before = dict(self.conn.execute(
+            'SELECT freshness, COUNT(*) FROM memory GROUP BY 1'))
+        core.search(
+            self.conn, 'p-f', 'agent-f', 'freshness label probe', limit=10)
+        after = dict(self.conn.execute(
+            'SELECT freshness, COUNT(*) FROM memory GROUP BY 1'))
+        self.assertEqual(before, after)
+        self.assertEqual(list(before), ['current'])
+
+    def test_fake_now_drives_the_projection(self):
+        mem_id = self._aged('freshness label probe fake clock', 5)
+        os.environ['MEMCORE_FAKE_NOW'] = '2030-01-01T00:00:00.000Z'
+        from memcore import ablation as _ablation
+        _ablation._reset_ablation_cache()
+        try:
+            self.assertEqual(
+                self._label(mem_id, 'freshness label probe fake clock'), 'stale')
+        finally:
+            os.environ.pop('MEMCORE_FAKE_NOW', None)
+            _ablation._reset_ablation_cache()
+
+
+
 if __name__ == '__main__':
     unittest.main()

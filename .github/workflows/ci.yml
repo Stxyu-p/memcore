@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Engine suite (harness)
+        # The engine is stdlib-only. PyYAML is optional at runtime
+        # (memcore/__main__.py imports it inside a try, so a bare CPython still
+        # works) but four doctor tests assert on Hermes-config bindings, so CI
+        # installs it rather than teaching the engine to parse YAML itself.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyyaml
+          python -m harness
+
+      - name: Host-independent integration tests
+        # tests.test_native_provider and tests.test_plugin exercise the Hermes
+        # adapter and import agent.* (the Hermes host runtime) at module load.
+        # That runtime lives in a separate repo and is not published in a form
+        # exposing the RecallStatus API this adapter subclasses, so those two
+        # modules cannot run on a bare runner. test_seed_canon_roundtrip needs
+        # neither and is the one that covers the deployed seed.
+        run: |
+          cd integrations/hermes/memcore
+          python -m unittest tests.test_seed_canon_roundtrip

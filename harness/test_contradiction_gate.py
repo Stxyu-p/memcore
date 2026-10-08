@@ -113,16 +113,30 @@ class ContradictionGateTests(unittest.TestCase):
         )
         self.assertEqual(hits, [])
 
-    def test_precheck_empty_key_holds(self):
-        """Content whose subject_key is empty → non-empty hold (fails closed)."""
-        # Pure numbers/particles - subject_key returns ''
-        hits = core.pre_accept_conflict_check(
-            self.conn, 'proj-test', '20128 8080 443',
-            exclude_memory_id=None,
+    def test_precheck_empty_key_fails_open(self):
+        """Content with no extractable subject is NOT held.
+
+        ALTIMA review 2026-10-08 (minor): the synthetic
+        ``('__empty_subject__', 'empty_subject_hold')`` hit made every
+        subject-less write — emoji, bare digits, punctuation, stopwords — a
+        permanent conflict. There is nothing to contradict, and a silently held
+        write is invisible to the caller, so the gate now fails open.
+        """
+        for content in ('20128 8080 443', '\U0001f600\U0001f680', '!!! ???', 'the'):
+            hits = core.pre_accept_conflict_check(
+                self.conn, 'proj-test', content, exclude_memory_id=None)
+            self.assertEqual(hits, [], content)
+
+    def test_empty_key_write_is_not_held(self):
+        """End to end: a subject-less accepted write lands as accepted."""
+        mem_id, _ = core.create_memory(
+            self.conn, 'proj-test', 'agent-alice',
+            '20128 8080 443',
+            scope='project', lifecycle='accepted',
         )
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0][0], '__empty_subject__')
-        self.assertEqual(hits[0][1], 'empty_subject_hold')
+        row = self.conn.execute(
+            'SELECT lifecycle FROM memory WHERE id=?', (mem_id,)).fetchone()
+        self.assertEqual(row[0], 'accepted')
 
     def test_precheck_excludes_given_id(self):
         """exclude_memory_id excludes that row from the check."""
@@ -262,11 +276,14 @@ class ContradictionGateTests(unittest.TestCase):
             'ใช้ gateway 9router',
             scope='project', lifecycle='accepted',
         )
-        # Add a contradictory accepted memory
+        # Add a contradictory memory. A candidate so the fixture keeps control
+        # of the lifecycle: an 'accepted' contradicting claim is held as
+        # conflict by create_memory now, which would change what this test
+        # is actually measuring (the corroboration gate, not create).
         core.create_memory(
             self.conn, 'proj-test', 'agent-carol',
             'ห้ามใช้ gateway 9router',
-            scope='project', lifecycle='accepted',
+            scope='project', lifecycle='candidate',
         )
 
         # Now third writer of the original claim tries to trigger corroboration
@@ -320,3 +337,126 @@ class ContradictionGateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AcceptedCreateChokePointTests(unittest.TestCase):
+    """B: every auto-accept runs the contradiction gate at the shared
+    create_memory choke point, not only in the ingest/semantic lanes."""
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp(prefix='memcore_acceptgate_')
+        self.db_path = os.path.join(self.tmpdir, 'acceptgate.db')
+        self.conn = store.open_store(self.db_path)
+        self.project = 'proj-accept'
+        self.a = 'agent-alice'
+        self.b = 'agent-bob'
+        self.conn.execute(
+            "INSERT INTO project (id, name) VALUES (?, 'accept')", (self.project,))
+        for aid in (self.a, self.b):
+            self.conn.execute(
+                'INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)',
+                (aid, aid.removeprefix('agent-'), aid.removeprefix('agent-')))
+            self.conn.execute(
+                'INSERT INTO project_membership (project_id, agent_id, role) '
+                'VALUES (?, ?, ?)', (self.project, aid, 'member'))
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def test_agreeing_accepted_create_still_works(self):
+        from memcore import core
+        mem_id, _ = core.create_memory(
+            self.conn, self.project, self.a,
+            '9router gateway runs on port 20128',
+            scope='project', lifecycle='accepted')
+        row = self.conn.execute(
+            'SELECT lifecycle FROM memory WHERE id=?', (mem_id,)).fetchone()
+        self.assertEqual(row[0], 'accepted')
+
+    def test_contradicting_accepted_create_is_held_as_conflict(self):
+        from memcore import core
+        first, _ = core.create_memory(
+            self.conn, self.project, self.a,
+            '9router gateway runs on port 20128',
+            scope='project', lifecycle='accepted')
+        with self.assertRaises(core.ContradictionHold) as ctx:
+            core.create_memory(
+                self.conn, self.project, self.b,
+                '9router gateway runs on port 8080',
+                scope='project', lifecycle='accepted')
+        second = ctx.exception.memory_id
+        self.assertIsNotNone(second)
+        lifecycles = dict(self.conn.execute(
+            'SELECT id, lifecycle FROM memory WHERE id IN (?, ?)',
+            (first, second)))
+        self.assertEqual(lifecycles[first], 'conflict')
+        self.assertEqual(lifecycles[second], 'conflict')
+        actions = [r[0] for r in self.conn.execute(
+            'SELECT action FROM audit_event WHERE memory_id=? ORDER BY id',
+            (second,))]
+        self.assertIn('contradiction-hold', actions)
+        self.assertIn('mark_conflict', actions)
+
+    def test_candidate_create_is_never_gated(self):
+        from memcore import core
+        core.create_memory(
+            self.conn, self.project, self.a,
+            '9router gateway runs on port 20128',
+            scope='project', lifecycle='accepted')
+        mem_id, _ = core.create_memory(
+            self.conn, self.project, self.b,
+            '9router gateway runs on port 9090',
+            scope='project', lifecycle='candidate')
+        row = self.conn.execute(
+            'SELECT lifecycle FROM memory WHERE id=?', (mem_id,)).fetchone()
+        self.assertEqual(row[0], 'candidate')
+
+    def test_unrelated_accepted_create_is_untouched(self):
+        from memcore import core
+        core.create_memory(
+            self.conn, self.project, self.a,
+            '9router gateway runs on port 20128',
+            scope='project', lifecycle='accepted')
+        mem_id, _ = core.create_memory(
+            self.conn, self.project, self.b,
+            'kubernetes ingress uses nginx ingress controller',
+            scope='project', lifecycle='accepted')
+        row = self.conn.execute(
+            'SELECT lifecycle FROM memory WHERE id=?', (mem_id,)).fetchone()
+        self.assertEqual(row[0], 'accepted')
+
+    def test_prefilter_matches_full_scan_on_live_store(self):
+        """The SQL token prefilter must not lose a real pair."""
+        from memcore import core, contradiction as cd
+        core.create_memory(
+            self.conn, self.project, self.a,
+            'gateway port is 20128', scope='project', lifecycle='candidate')
+        core.create_memory(
+            self.conn, self.project, self.b,
+            'gateway port is 8080', scope='project', lifecycle='candidate')
+        content = 'gateway port is 443'
+        key = cd.subject_key(content)
+        token = key.split(' ', 1)[0]
+        narrowed = self.conn.execute(
+            'SELECT m.id, v.content FROM memory m '
+            'JOIN memory_version v ON v.id = m.current_version_id '
+            'AND v.memory_id = m.id '
+            "WHERE m.project_id = ? "
+            "AND m.lifecycle IN ('candidate','accepted','conflict') "
+            'AND instr(v.content, ?) > 0',
+            (self.project, token)).fetchall()
+        by_prefilter = sorted(
+            mem_id for mem_id, mem_content in narrowed
+            if cd.is_contradiction_pair(content, mem_content)[0])
+        by_scan = sorted(
+            mem_id for mem_id, _reason in
+            core.pre_accept_conflict_check(self.conn, self.project, content))
+        self.assertEqual(by_prefilter, by_scan)
+        self.assertTrue(by_scan)

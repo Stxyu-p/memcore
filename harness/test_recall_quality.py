@@ -131,6 +131,157 @@ class TestThaiRecallQuality(AutonomyBase):
         return (i, scope, 'accepted', 'source_backed', 'current', content)
 
 
+class TestNumericNegationOrdering(AutonomyBase):
+    """F: a query naming a concrete value must not lead with a rival value.
+
+    Lexical recall has no polarity, but both sides carry standalone numbers, so
+    disjoint number sets are the one usable negation signal without a model.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.right, _ = core.create_memory(
+            self.conn, self.project, self.agents[0],
+            '9router gateway runs on port 20128',
+            scope='project', lifecycle='accepted')
+        self.wrong, _ = core.create_memory(
+            self.conn, self.project, self.agents[1],
+            '9router gateway runs on port 8080',
+            scope='project', lifecycle='candidate')
+        core.create_memory(
+            self.conn, self.project, self.agents[2],
+            'memcore uses sqlite with wal journalling',
+            scope='project', lifecycle='accepted')
+
+    def test_query_naming_a_value_ranks_that_value_first(self):
+        rows = core.search(self.conn, self.project, self.agents[0],
+                           '9router gateway port 20128', limit=3)
+        self.assertTrue(rows)
+        self.assertEqual(rows[0][0], self.right)
+
+    def test_rival_value_is_not_removed_only_demoted(self):
+        rows = core.search(self.conn, self.project, self.agents[0],
+                           '9router gateway port 20128', limit=3)
+        self.assertIn(self.wrong, [r[0] for r in rows])
+
+    def test_query_without_numbers_keeps_original_order(self):
+        rows = core.search(self.conn, self.project, self.agents[0],
+                           'gateway port', limit=3)
+        self.assertTrue(rows)
+
+    def test_ordering_is_deterministic(self):
+        first = [r[0] for r in core.search(
+            self.conn, self.project, self.agents[0],
+            '9router gateway port 20128', limit=3)]
+        second = [r[0] for r in core.search(
+            self.conn, self.project, self.agents[0],
+            '9router gateway port 20128', limit=3)]
+        self.assertEqual(first, second)
+
+    def test_purely_numeric_and_empty_queries_never_raise(self):
+        for query in ('', '   ', '12345', 'no numbers at all here'):
+            self.assertIsInstance(
+                core.search(self.conn, self.project, self.agents[0],
+                            query, limit=3), list)
+
+
+class TestDistinctClaimWindow(AutonomyBase):
+    """The result window must carry distinct claims, not copies of one fact.
+
+    The fleet corroborates by re-writing one claim from several agents, so the
+    same fact arrives as N identical rows. Before, a shallow window could be
+    entirely copies of a single fact and every remaining slot carried nothing
+    new. search() now reads DISTINCT_OVERFETCH times deeper and folds copies
+    behind the canonical one.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.canonical = {}
+        for text in ('gateway profile switch uses hermes profile use',
+                     'discord token lives in DISCORD_BOT_TOKEN',
+                     'scan pacing runs at 250-500ms per page'):
+            ids = []
+            for i, agent in enumerate(self.agents):
+                mid, _ = core.create_memory(
+                    self.conn, self.project, agent, text,
+                    scope='project', lifecycle='accepted')
+                ids.append(mid)
+            self.canonical[text] = ids
+
+    def _rows(self, query, limit=8):
+        return core.search(self.conn, self.project, self.agents[0],
+                           query, limit=limit)
+
+    def test_distinct_claims_are_never_pushed_out_by_copies(self):
+        """Copies rank behind distinct claims, so a full window spends its
+        slots on new facts first."""
+        rows = self._rows('gateway', limit=4)
+        fps = [r[8] for r in rows]
+        first_repeat = next(
+            (i for i in range(1, len(fps)) if fps[i] in fps[:i]), len(fps))
+        distinct_before_repeat = len(set(fps[:first_repeat]))
+        self.assertEqual(distinct_before_repeat, first_repeat,
+                         'a duplicate claim ranked ahead of a distinct one')
+
+    def test_window_spends_its_slots_on_distinct_claims_first(self):
+        """Every distinct claim reachable for the query must occupy the front
+        of the window; copies only follow once nothing new is left."""
+        rows = self._rows('gateway discord scan', limit=8)
+        fps = [r[8] for r in rows]
+        total_distinct = self.conn.execute(
+            'SELECT COUNT(DISTINCT claim_fingerprint) FROM memory '
+            "WHERE lifecycle IN ('candidate','accepted','conflict')"
+        ).fetchone()[0]
+        self.assertLessEqual(len(set(fps)), total_distinct)
+        # Distinct claims must be contiguous at the front of the window.
+        first_repeat = next(
+            (i for i in range(1, len(fps)) if fps[i] in fps[:i]), len(fps))
+        self.assertEqual(len(set(fps[:first_repeat])), first_repeat)
+
+    def test_canonical_copy_keeps_its_rank(self):
+        rows = self._rows('hermes profile use')
+        kept = [r[0] for r in rows]
+        self.assertIn(self.canonical[
+            'gateway profile switch uses hermes profile use'][0], kept)
+
+    def test_no_claim_is_ever_lost(self):
+        for text, ids in self.canonical.items():
+            query = text.split()[0]
+            rows = self._rows(query, limit=13)
+            found = {r[8] for r in rows}
+            live = {self.conn.execute(
+                'SELECT claim_fingerprint FROM memory WHERE id=?',
+                (i,)).fetchone()[0] for i in ids}
+            self.assertTrue(live & found,
+                            f'claim dropped entirely for query {query!r}')
+
+    def test_limit_is_still_respected(self):
+        for limit in (1, 3, 8, 13):
+            self.assertLessEqual(len(self._rows('gateway', limit=limit)), limit)
+
+    def test_single_row_and_empty_inputs_pass_through(self):
+        self.assertEqual(core._collapse_duplicate_claims([], 8), [])
+        one = ('mem-1', 'project', 'accepted', 'unverified', 'current', 'x', 'a', 0.0)
+        self.assertEqual(core._collapse_duplicate_claims([one], 8), [one])
+
+    def test_order_is_stable_across_repeated_calls(self):
+        first = [r[0] for r in self._rows('gateway')]
+        second = [r[0] for r in self._rows('gateway')]
+        self.assertEqual(first, second)
+
+    def test_rows_without_fingerprint_column_still_dedupe(self):
+        """Legacy 8-tuple rows fall back to hashing the content."""
+        row = ('mem-1', 'project', 'accepted', 'unverified', 'current',
+               'same text here', 'a', 0.0)
+        dup = ('mem-2', 'project', 'accepted', 'unverified', 'current',
+               'same text here', 'b', 0.0)
+        kept = core._collapse_duplicate_claims([row, dup], 1)
+        self.assertEqual([r[0] for r in kept], ['mem-1'])
+        # Nothing is discarded: the copy is still reachable without a limit.
+        self.assertEqual(len(core._collapse_duplicate_claims([row, dup], 8)), 2)
+
+
 class TestJournalSweeps(AutonomyBase):
     def _builtin_unresolved(self, age_days=10):
         event_id, _ = ingest.append_event(

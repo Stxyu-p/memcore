@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/badge/Storage-SQLite_WAL_FTS5-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
     <img src="https://img.shields.io/badge/Dependencies-Stdlib_Only-success?style=flat-square" alt="Stdlib only" />
     <img src="https://img.shields.io/badge/Daemon-None-blue?style=flat-square" alt="Daemonless" />
-    <img src="https://img.shields.io/badge/Tests-514_Passing-brightgreen?style=flat-square" alt="Tests" />
+    <img src="https://img.shields.io/badge/Tests-564_Passing-brightgreen?style=flat-square" alt="Tests" />
     <img src="https://img.shields.io/badge/Recall_p@3-0.81-0284c7?style=flat-square" alt="Recall Baseline" />
   </p>
 
@@ -144,13 +144,15 @@ python -m unittest discover -s integrations/hermes/memcore/tests -v
 Current gate:
 
 ```text
-412 tests           →  OK (expected failures=2)
-102 integration     →  OK
-Total: 514 tests
+470 tests           →  OK (expected failures=2)
+ 94 integration    →  OK
+Total: 564 tests
 Recall baseline     →  p@3 0.81 (floor 0.62)
 ```
 
 The two expected failures are the legacy E12 token-budget evaluations, which join unbounded rows manually instead of calling the recall builder; the production builder is covered by its own regression tests.
+
+Counts are what `python -m harness` and `python -m unittest discover -s integrations/hermes/memcore/tests` actually report today, not a running total.
 
 ---
 
@@ -175,6 +177,41 @@ python -m memcore import --file batch.json --agent mika --project shared-platfor
 ```
 
 `journal-stats` aggregates metadata only, no raw prompt or candidate content. `journal-review-list` keeps raw text redacted unless `--show-content` is explicit, and revealed text is untrusted historical data.
+
+### 📤 Serving coding agents (export)
+
+Every major coding agent already reads a plain convention file from the working tree. `export` writes governed memory into the file that agent family already reads, so MemCore reaches Codex, Antigravity, Claude Code and Freebuff with no daemon, no port, no MCP and no dependency.
+
+```powershell
+# Write MEMORY.md for Codex (the default target)
+python -m memcore export
+
+# Pick the file each agent family is verified to read
+python -m memcore export --host claude      # CLAUDE.md
+python -m memcore export --host agy         # GEMINI.md
+python -m memcore export --host freebuff    # .agents/memory.md
+python -m memcore export --host all         # every target
+
+# Write into any repo from anywhere
+python -m memcore export --out-dir ../other-repo --host codex
+
+# Preview without touching the working tree
+python -m memcore export --stdout
+```
+
+| Flag | Effect |
+|---|---|
+| `--host` | `codex`→`MEMORY.md`, `agy`→`GEMINI.md`, `freebuff`→`.agents/memory.md`, `claude`→`CLAUDE.md`, `all`→every one, `generic`→`MEMORY.md` (default) |
+| `--out` | Explicit output file; overrides the host convention |
+| `--out-dir` | Directory to write the target(s) into (default: current directory) |
+| `--limit` | Max memories to export (default: 40) |
+| `--title` | Heading for the exported file |
+| `--project` / `--agent` | Project id/name and agent name; default to the configured binding |
+| `--include-private` | Include this agent's private memories (off by default) |
+| `--stdout` | Print instead of writing a file |
+| `--force` | Rewrite even when the content is unchanged |
+
+Two properties worth knowing before you point it at a repo. The content is identical across every `--host` target — two agents reading two different truths is the worst failure mode — and the generated marker carries a digest of the content rather than a timestamp, so a re-run that changes nothing writes nothing and leaves `git status` clean.
 
 ### Hermes plugin deployment
 

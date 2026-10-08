@@ -8,7 +8,7 @@ import sys
 import time
 import pathlib
 
-from . import store, core, ingest
+from . import store, core, ingest, export as export_mod
 
 
 DEFAULT_DB = str(pathlib.Path.home() / '.memcore' / 'memory.db')
@@ -548,6 +548,85 @@ def cmd_gc(args):
                 conn.close()
             except Exception:
                 pass
+
+
+def _default_export_binding():
+    """Best-effort (project, agent) for an export with no flags.
+
+    Reads the memcore plugin settings straight out of config.yaml with the stdlib
+    yaml-free reader the rest of the CLI already uses, and never imports
+    hermes_cli. Measured: `from hermes_cli.config import load_config` costs
+    3.7 seconds on this machine because it drags in httpx, rich and asyncio —
+    which would make a 17ms command take four seconds and would put an HTTP
+    client on the import path of a daemonless, offline engine.
+    """
+    project = agent = None
+    # The active profile is a HERMES_HOME concern, not a hermes_cli import:
+    # pulling hermes_cli.profiles in cost another 82ms and its own http.client.
+    hermes_home = pathlib.Path(
+        os.environ.get('HERMES_HOME') or (pathlib.Path.home() / '.hermes'))
+    profile = os.environ.get('HERMES_PROFILE_NAME') or ''
+    candidates = [hermes_home / "config.yaml"]
+    if profile:
+        candidates.append(
+            pathlib.Path.home() / ".hermes" / "profiles" / profile / "config.yaml")
+    candidates.append(pathlib.Path.home() / ".hermes" / "config.yaml")
+    for path in candidates:
+        if path is None or not path.is_file():
+            continue
+        try:
+            import yaml  # optional; falls back to the explicit flags
+            cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        settings = (((cfg.get("plugins") or {}).get("entries") or {})
+                    .get("memcore", {}).get("settings") or {})
+        project = settings.get("default_project") or project
+        agent = settings.get("agent_name") or agent
+        if project and agent:
+            break
+    return project, agent
+
+
+def cmd_export(args):
+    """Write governed memory to a file every coding agent already reads."""
+    conn = None
+    try:
+        project = args.project
+        agent = args.agent
+        if project is None or agent is None:
+            bound_project, bound_agent = _default_export_binding()
+            project = project or bound_project
+            agent = agent or bound_agent
+        conn = _open_readonly(args)
+        project_id = _project_or_exit(conn, project)
+        if args.stdout:
+            rows = export_mod.rank_for_export(
+                conn, project_id, 'agent-' + agent, args.limit, args.include_private)
+            sys.stdout.write(export_mod.render(rows, args.title, project))
+            return
+        # An explicit --out wins; --host picks the conventional filename(s),
+        # written under --out-dir so a user can target a repo from anywhere.
+        out_path = args.out
+        results = export_mod.export(
+            conn, project_id, 'agent-' + agent, out_path,
+            limit=args.limit, include_private=args.include_private,
+            title=args.title, force=args.force, host=args.host,
+            out_dir=args.out_dir)
+        if not isinstance(results, list):
+            results = [results]
+        for result in results:
+            if result['wrote']:
+                print(f"wrote {result['path']} "
+                      f"({result['rows']} rows, {result['bytes']} chars)")
+            else:
+                print(f"{result['path']} already up to date "
+                      f"({result['rows']} rows); use --force to rewrite")
+    except (core.MemCoreError, store.StoreError) as e:
+        sys.exit(f'error: {e}')
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def cmd_stats(args):
@@ -1582,6 +1661,34 @@ def main(argv=None):
     p.set_defaults(func=cmd_gc)
 
     sub.add_parser('stats', help='operational statistics', parents=[common]).set_defaults(func=cmd_stats)
+
+    p = sub.add_parser('export', help='write governed memory to an agent-readable file',
+                       parents=[common])
+    p.add_argument('--project', default=None,
+                   help='project id/UUID or unique name (default: configured project)')
+    p.add_argument('--agent', default=None,
+                   help='agent name for private-scope visibility (default: configured agent)')
+    p.add_argument('--out', default=None,
+                   help='explicit output file (default: the --host convention)')
+    p.add_argument('--out-dir', default='.',
+                   help="directory to write the --host target(s) into "
+                        "(default: current directory)")
+    p.add_argument('--host', default=None,
+                   choices=sorted(export_mod.HOST_TARGETS) + ['all'],
+                   help="write the file(s) this agent family reads: "
+                        "codex=MEMORY.md, agy=GEMINI.md, freebuff=.agents/memory.md, "
+                        "claude=CLAUDE.md, all=every one (default: MEMORY.md)")
+    p.add_argument('--limit', type=int, default=40,
+                   help='max memories to export (default: 40)')
+    p.add_argument('--title', default='Shared project memory',
+                   help='heading for the exported file')
+    p.add_argument('--include-private', action='store_true',
+                   help="include this agent's private memories")
+    p.add_argument('--stdout', action='store_true',
+                   help='print instead of writing a file')
+    p.add_argument('--force', action='store_true',
+                   help='rewrite even when the content is unchanged')
+    p.set_defaults(func=cmd_export)
 
     p = sub.add_parser('journal-stats', help='content-free ingest journal health', parents=[common])
     p.add_argument('--project', default=None,

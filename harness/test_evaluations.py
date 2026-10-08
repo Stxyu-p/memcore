@@ -8,7 +8,6 @@ All others are EXPECTED FAILURE until the core engine lands in Phase 1+.
 Run:  python -m unittest discover   (from project root)
       python -m harness              (alternative)
 """
-import hashlib
 import os
 import sqlite3
 import sys
@@ -529,7 +528,7 @@ class TestE11_Daemonless(EvalTestBase):
 class TestE12_TokenBudget(unittest.TestCase):
     """E12 — Core recall + header must stay under a defined prompt budget."""
 
-    TOKEN_BUDGET = 800  # hard ceiling for pre_llm_call recall block
+    TOKEN_BUDGET = 800  # hard ceiling for the recall block
 
     def setUp(self):
         self.conn = fixtures.seed()
@@ -537,7 +536,7 @@ class TestE12_TokenBudget(unittest.TestCase):
     def test_core_recall_within_budget(self):
         """Total token count for a bounded recall block must stay under TOKEN_BUDGET.
         1 token ≈ 4 chars (conservative English estimate).
-        Phase 2: pre_llm_call must enforce this ceiling before injection.
+        Phase 2: the recall block must enforce this ceiling before injection.
 
         Seeds 15 extra memories so the unbounded stub returns more than the budget.
         The core engine must truncate/rank to fit.

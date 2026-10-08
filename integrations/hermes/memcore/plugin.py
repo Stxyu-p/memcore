@@ -160,6 +160,12 @@ def default_store_path(config):
 #: can reverse a memory's meaning, so truncation only ever drops the TAIL.
 MAX_ROW_CHARS = 220
 
+#: Share of the budget pinned rows may consume when the turn's query also
+#: produced search hits. Without a reserve, a handful of long Golden pins eats
+#: the whole block and query-relevant hits never render — the ranking engine
+#: then has no effect on what the model actually reads.
+PINNED_MAX_SHARE = 0.5
+
 
 def _truncate_row_content(content, max_chars):
     """Collapse whitespace, cap at max_chars on a word boundary + ellipsis.
@@ -178,7 +184,8 @@ def _truncate_row_content(content, max_chars):
     return cut.rstrip() + '…'
 
 
-def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8):
+def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8,
+                       pinned_max_share=PINNED_MAX_SHARE):
     """Deterministic, budget-capped recall block. Empty rows -> ''.
 
     Pinned/critical rows first, then search hits — deduped by memory id AND
@@ -189,57 +196,86 @@ def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8)
     not fit the remaining budget is skipped so a shorter later row can use
     the space — but when nothing fits, the first row is rendered truncated
     instead of returning an empty block for a non-empty match set.
+
+    pinned_max_share caps how much of the budget the pinned tier may use once
+    search hits exist, so query-relevant hits always get rendered space. With
+    no hits there is nothing to reserve for and the cap does not apply.
     """
     seen_ids = set()
     seen_fps = set()
-    rows = []
-    for r in list(pinned_rows or []) + list(search_rows or []):
-        if r[0] in seen_ids:
-            continue
-        seen_ids.add(r[0])
-        try:
-            from memcore import core as _core
-            fp = _core.fingerprint(
-                ' '.join(str(r[5] if len(r) > 5 else r).split()))
-        except Exception:
-            fp = None
-        if fp is not None:
-            if fp in seen_fps:
+    pinned_set = []
+    hit_set = []
+    for tier_rows, tier in ((pinned_rows, pinned_set), (search_rows, hit_set)):
+        for r in list(tier_rows or []):
+            if r[0] in seen_ids:
                 continue
-            seen_fps.add(fp)
-        rows.append(r)
+            seen_ids.add(r[0])
+            try:
+                from memcore import core as _core
+                fp = _core.fingerprint(
+                    ' '.join(str(r[5] if len(r) > 5 else r).split()))
+            except Exception:
+                fp = None
+            if fp is not None:
+                if fp in seen_fps:
+                    continue
+                seen_fps.add(fp)
+            tier.append(r)
     lines = []
     header = 'Shared project memory (memcore):'
     budget_chars = max(0, int(budget_chars))
     prefix_len = len(header) + 1  # header + first newline
     if budget_chars <= prefix_len:
         return ''
+    # Reserve budget for hits whenever the query produced any, so a handful of
+    # long Golden pins cannot starve the rows that actually match the turn.
+    pinned_cap = budget_chars
+    if hit_set and pinned_max_share is not None:
+        try:
+            share = float(pinned_max_share)
+        except (TypeError, ValueError):
+            share = PINNED_MAX_SHARE
+        share = min(max(share, 0.0), 1.0)
+        if share > 0:
+            pinned_cap = min(budget_chars,
+                             prefix_len + int((budget_chars - prefix_len) * share))
     used = prefix_len
-    for r in rows:
-        if len(lines) >= max_items:
-            break
+
+    def _fit(r, cap):
         content = ' '.join(str(r[5] if len(r) > 5 else r).split())
-        scope = r[1] if len(r) > 1 else '?'
-        lifecycle = r[2] if len(r) > 2 else '?'
-        verification = r[3] if len(r) > 3 else '?'
-        freshness = r[4] if len(r) > 4 else '?'
         label = '- [%s | %s | %s | %s] ' % (
-            scope, lifecycle, verification, freshness
-        )
+            r[1] if len(r) > 1 else '?', r[2] if len(r) > 2 else '?',
+            r[3] if len(r) > 3 else '?', r[4] if len(r) > 4 else '?')
         separator = 1 if lines else 0
-        remaining = budget_chars - used - separator
+        remaining = min(cap, budget_chars) - used - separator
         if remaining <= len(label) + 40:
-            continue
+            return None
         line = label + _truncate_row_content(content, MAX_ROW_CHARS)
         if len(line) > remaining:
             # Too long even capped — let a shorter later row use the space.
-            continue
-        lines.append(line)
-        used += separator + len(line)
-    if not lines and rows:
+            return None
+        return line, separator
+
+    for r in pinned_set:
+        if len(lines) >= max_items:
+            break
+        fit = _fit(r, pinned_cap)
+        if fit is not None:
+            line, separator = fit
+            lines.append(line)
+            used += separator + len(line)
+    for r in hit_set:
+        if len(lines) >= max_items:
+            break
+        fit = _fit(r, budget_chars)
+        if fit is not None:
+            line, separator = fit
+            lines.append(line)
+            used += separator + len(line)
+    if not lines and (pinned_set or hit_set):
         # Fallback: a non-empty match set never renders empty. Truncate the
         # first (highest-priority) row to whatever budget remains.
-        r = rows[0]
+        r = (pinned_set or hit_set)[0]
         content = ' '.join(str(r[5] if len(r) > 5 else r).split())
         label = '- [%s | %s | %s | %s] ' % (
             r[1] if len(r) > 1 else '?', r[2] if len(r) > 2 else '?',
@@ -296,6 +332,19 @@ def _get_conn(store_path):
         if entry is not None:
             owner, current_path, conn = entry
             if owner is thread and current_path == path:
+                # The handle is cached for the life of the thread, so a write
+                # interrupted by something `except Exception` cannot catch
+                # (SIGINT, worker kill, plugin reload) would leave an open
+                # transaction behind — and the next turn would fail with
+                # "cannot start a transaction within a transaction". The old
+                # per-turn close() discarded it for free. Roll back here
+                # instead: one guard at the choke point every caller routes
+                # through, cheaper and safer than a try/finally per hook.
+                if conn.in_transaction:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                 return conn
             # A recycled thread id or path change must never inherit another
             # worker's SQLite handle/transaction state.
@@ -419,7 +468,7 @@ def tool_memory_remember(args, ctx=None):
         return _tool_error('content is required')
     # ADR-0003: explicit tool writes are always shared project memory.
     # The model never chooses scope; private observations are created only by
-    # post_llm_call() and can later be promoted explicitly.
+    # the semantic review lane and can later be promoted explicitly.
     scope = 'project'
     conn, store_error = _tool_store_or_error(_ctx_cfg(ctx))
     if store_error:
@@ -627,14 +676,13 @@ def store_audit(conn, action, actor, memory_id=None, project_id=None, detail=Non
         (action, actor, memory_id, project_id, json.dumps(detail or {}), core._now()))
 
 
-# -- Hooks -------------------------------------------------------------------
+# -- Config resolution -----------------------------------------------------
 
 def _load_live_config():
-    """Authoritative config + profile when the hook payload doesn't carry them.
+    """Authoritative config + profile when a tool payload omits them.
 
-    pre_llm_call/post_llm_call payloads contain session metadata only â€” no
-    `config` and no `profile_name` â€” so hooks must read them from the live
-    Hermes config (profile-aware via HERMES_HOME).
+    Some hosts call the tools without a config/profile payload; those must
+    read the live Hermes config (profile-aware via HERMES_HOME).
     """
     try:
         from hermes_cli.config import load_config
@@ -666,109 +714,6 @@ def _ctx_profile(ctx):
         return get_active_profile_name() or ''
     except Exception:
         return ''
-
-
-def pre_llm_call(ctx=None, user_message='', **_):
-    """Bounded recall block injected into the user message. Fail-closed.
-
-    Two calling shapes: Hermes lifecycle payload (user_message kwarg â€” the
-    hook registry filters payload kwargs to the declared signature) and the
-    test harness shape (a single dict ctx).
-    """
-    if isinstance(ctx, dict):
-        query = (ctx.get('user_message') or user_message or '')
-    else:
-        query = user_message or ''
-    config = _ctx_cfg(ctx)
-    try:
-        agent_name, project = require_binding(config, _ctx_profile(ctx))
-    except ConfigError:
-        return None
-    if not pathlib.Path(default_store_path(config)).expanduser().exists():
-        return None
-    cfg = _memcore_cfg(config)
-    inject_cfg = cfg.get('inject') or {}
-    try:
-        budget = max(0, int(inject_cfg.get('budget_chars', 1200)))
-        max_items = max(0, int(inject_cfg.get('max_items', 8)))
-    except (TypeError, ValueError):
-        budget, max_items = 1200, 8
-    if budget == 0 or max_items == 0:
-        return None
-    if _is_trivial_query(query):
-        # Greeting/ack turns carry no durable intent (same definition the
-        # ingest journal uses to ignore them). Skip pinned injection too:
-        # ~500 chars saved per trivial turn, zero recall value lost.
-        return None
-    try:
-        conn = _open_tool_store(config)
-    except Exception:
-        return None
-    if conn is None:
-        return None
-    try:
-        pid, aid = _require_bound_membership(conn, project, agent_name)
-        pinned = conn.execute(
-            'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, v.content '
-            'FROM memory m JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
-            'WHERE m.project_id = ? AND m.pinned = 1 AND m.critical = 1 '
-            "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-            "  AND m.lifecycle IN ('candidate','accepted','conflict') "
-            '  AND ' + core._recall_tombstone_guard('m') + ' '
-            'ORDER BY m.critical DESC, datetime(m.updated_at) DESC, m.id ASC '
-            'LIMIT ?',
-            (pid, aid, max_items)).fetchall()
-        pinned_ids = {r[0] for r in pinned}
-        hits = []
-        if query.strip():
-            hits = [h for h in core.search(conn, pid, aid, query,
-                                         limit=min(500, max_items + len(pinned)))
-                    if h[0] not in pinned_ids]
-        block = build_recall_block(pinned, hits, budget, max_items)
-        if not block:
-            return None
-        # Lifecycle contract: dict with 'context' is injected into the turn's
-        # user message (see agent/turn_context.py pre_llm_call handling).
-        return {'context': block}
-    except Exception:
-        return None
-
-
-def post_llm_call(ctx=None, assistant_message='', **_):
-    """Conservative observation recording. Candidate-only, never auto-accept."""
-    if isinstance(ctx, dict):
-        observation = (ctx.get('assistant_message') or assistant_message or '')
-    else:
-        observation = assistant_message or ''
-    observation = observation.strip()
-    if len(observation) < 80:
-        return None
-    config = _ctx_cfg(ctx)
-    try:
-        agent_name, project = require_binding(config, _ctx_profile(ctx))
-    except ConfigError:
-        return None
-    if not pathlib.Path(default_store_path(config)).expanduser().exists():
-        return None
-    try:
-        conn = _open_tool_store(config)
-    except Exception:
-        return None
-    if conn is None:
-        return None
-    try:
-        pid, aid = _require_bound_membership(conn, project, agent_name)
-        content = observation[:2000]
-        core.create_memory(
-            conn, pid, aid, content,
-            scope='private', memory_type='observation',
-            reason='post_llm_call observation',
-            idempotency_key=f'observe:{pid}:{aid}:{core.fingerprint(content)}'
-        )
-        conn.commit()
-    except Exception:
-        return None
-    return None
 
 
 def auto_join(ctx):

@@ -4,7 +4,6 @@ Activation is exclusive through ``memory.provider: memcore``. The native
 adapter owns Hermes lifecycle ingress/prefetch/tools; canonical governance
 remains in the MemCore engine and Dashboard remains a separate UI extension.
 """
-from .native_provider import MemCoreMemoryProvider
 
 
 def _host_llm_facade(ctx):
@@ -34,4 +33,8 @@ def _host_llm_facade(ctx):
 
 
 def register(ctx) -> None:
+    # Imported here, not at module level: native_provider needs the Hermes host
+    # runtime, and this package must stay importable without it (engine tests and
+    # CI read plugin.py directly).
+    from .native_provider import MemCoreMemoryProvider
     ctx.register_memory_provider(MemCoreMemoryProvider(plugin_llm=_host_llm_facade(ctx)))

@@ -223,6 +223,41 @@ class TestRecallBlock(unittest.TestCase):
         block = plugin.build_recall_block([], [self.row(1, 'line1\n  line2\t tab')])
         self.assertIn('line1 line2 tab', block)
 
+    def test_pinned_cannot_starve_query_hits(self):
+        """A: pinned rows must not eat the whole budget when hits exist.
+
+        Before the share cap, 5 long Golden pins filled a 1200-char block and
+        zero search hits rendered, so query ranking had no effect on what the
+        model actually read.
+        """
+        pinned = [self.row(i, 'pinned rule %d ' % i + 'w' * 200) for i in range(5)]
+        hits = [self.row(100 + i, 'query match %d ' % i + 'w' * 200)
+                for i in range(5)]
+        block = plugin.build_recall_block(pinned, hits, budget_chars=1200, max_items=8)
+        lines = [l for l in block.splitlines() if l.startswith('- [')]
+        from_pinned = [l for l in lines if 'pinned rule' in l]
+        from_hits = [l for l in lines if 'query match' in l]
+        self.assertTrue(from_hits, 'search hits got no render space at all')
+        self.assertLess(len(from_pinned), len(pinned))
+        self.assertLessEqual(len(block), 1200)
+
+    def test_pinned_cap_off_when_no_hits(self):
+        """No hits -> nothing to reserve for; pinned may use the full budget."""
+        pinned = [self.row(i, 'pinned rule %d ' % i + 'w' * 200) for i in range(5)]
+        capped = plugin.build_recall_block(pinned, [], budget_chars=1200, max_items=8)
+        uncapped = plugin.build_recall_block(pinned, [], budget_chars=1200,
+                                             max_items=8, pinned_max_share=0.1)
+        self.assertEqual(capped.count('- ['), uncapped.count('- ['))
+
+    def test_pinned_max_share_is_clamped(self):
+        """Hostile config values must not crash or invert the cap."""
+        pinned = [self.row(1, 'pinned rule ' + 'w' * 200)]
+        hits = [self.row(2, 'query match ' + 'w' * 200)]
+        for share in (0, 1, -5, 99, None, 'bad'):
+            block = plugin.build_recall_block(pinned, hits, budget_chars=1200,
+                                              max_items=8, pinned_max_share=share)
+            self.assertLessEqual(len(block), 1200, share)
+
     def test_recall_block_exposes_trust_state(self):
         row = ('mem-candidate', 'project', 'candidate', 'unverified', 'current', 'pending claim')
         block = plugin.build_recall_block([], [row])
@@ -662,138 +697,6 @@ class TestToolsAgainstRealStore(ToolTestBase):
         self.assertNotIn('run: python -m memcore', out['error'])
 
 
-class TestHooks(ToolTestBase):
-
-    def test_pre_llm_call_injects_shared_memory(self):
-        plugin.tool_memory_remember(
-            {'content': 'novelclaw runs on port 4890'},
-            self.ctx('sora'))
-        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
-                                     'profile_name': 'mika',
-                                     'user_message': 'what port does novelclaw use?'})
-        self.assertIsNotNone(block)
-        self.assertIn('4890', block['context'])
-
-    def test_pre_llm_call_empty_store_returns_none(self):
-        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
-                                     'profile_name': 'mika',
-                                     'user_message': 'anything'})
-        self.assertIsNone(block)
-
-    def test_pre_llm_call_fail_closed_without_binding(self):
-        block = plugin.pre_llm_call({'config': {'plugins': {}},
-                                     'profile_name': 'mika',
-                                     'user_message': 'hello'})
-        self.assertIsNone(block)
-
-    def test_pre_llm_call_pinned_rows_are_bounded_and_ordered(self):
-        ids = []
-        for text in ('pin oldest', 'pin newest', 'pin critical', 'pin overflow'):
-            out = json.loads(plugin.tool_memory_remember({'content': text}, self.ctx('sora')))
-            ids.append(out['memory_id'])
-        conn = plugin._get_conn(self.store)
-        conn.execute("UPDATE memory SET pinned=1, updated_at='2026-01-01T00:00:00Z' WHERE id=?", (ids[0],))
-        conn.execute("UPDATE memory SET pinned=1, critical=1, updated_at='2026-01-01T12:00:00Z' WHERE id=?", (ids[1],))
-        conn.execute("UPDATE memory SET pinned=1, critical=1, updated_at='2026-01-02T00:00:00Z' WHERE id=?", (ids[2],))
-        conn.execute("UPDATE memory SET pinned=1, updated_at='2026-01-03T00:00:00Z' WHERE id=?", (ids[3],))
-        block = plugin.pre_llm_call({
-            'config': make_config(store_path=self.store, max_items=2),
-            'profile_name': 'mika', 'user_message': ''
-        })
-        self.assertIsNotNone(block)
-        self.assertEqual(block['context'].count('- ['), 2)
-        self.assertIn('pin critical', block['context'])
-        self.assertIn('pin newest', block['context'])
-        self.assertNotIn('pin overflow', block['context'])
-        self.assertNotIn('pin oldest', block['context'])
-
-    def test_pre_llm_call_negative_limits_fail_closed(self):
-        block = plugin.pre_llm_call({
-            'config': make_config(store_path=self.store, budget=-1, max_items=-1),
-            'profile_name': 'mika', 'user_message': 'anything'
-        })
-        self.assertIsNone(block)
-
-    def test_is_trivial_query_matches_journal_definition(self):
-        for q in ('สวัสดีค่ะ', 'ดี', 'ok', 'ขอบคุณครับ'):
-            self.assertTrue(plugin._is_trivial_query(q), q)
-        for q in ('มาดู memcore หน่อย', 'what port does novelclaw use?',
-                  '', 'ok, deploy this now'):
-            self.assertFalse(plugin._is_trivial_query(q), q)
-
-    def test_hook_excludes_unrelated_noncritical_pins(self):
-        plugin.tool_memory_remember({'content': 'unrelated pinned fact'}, self.ctx('sora'))
-        conn = plugin._get_conn(self.store)
-        conn.execute('UPDATE memory SET pinned=1')
-        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
-                                     'profile_name': 'mika',
-                                     'user_message': 'absentquery'})
-        self.assertIsNone(block)
-        conn.execute('UPDATE memory SET critical=1')
-        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
-                                     'profile_name': 'mika',
-                                     'user_message': 'absentquery'})
-        self.assertIn('unrelated pinned fact', block['context'])
-
-    def test_pre_llm_call_skips_trivial_greeting(self):
-        plugin.tool_memory_remember(
-            {'content': 'novelclaw runs on port 4890'},
-            self.ctx('sora'))
-        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
-                                     'profile_name': 'mika',
-                                     'user_message': 'สวัสดีค่ะ'})
-        self.assertIsNone(block)
-
-    def test_pre_llm_call_keeps_substantive_thai_query(self):
-        plugin.tool_memory_remember(
-            {'content': 'memcore test marker runs on port 4890'},
-            self.ctx('sora'))
-        block = plugin.pre_llm_call({'config': make_config(store_path=self.store),
-                                     'profile_name': 'mika',
-                                     'user_message': 'มาดู memcore หน่อย'})
-        self.assertIsNotNone(block)
-        self.assertIn('4890', block['context'])
-
-    def test_post_llm_call_records_candidate_private(self):
-        long_note = ('Observed that the deploy pipeline retried twice before '
-                     'succeeding and the second attempt used the cached layer.')
-        out = plugin.post_llm_call({'config': make_config(store_path=self.store),
-                                    'profile_name': 'mika',
-                                    'assistant_message': long_note})
-        self.assertIsNone(out)  # hooks return None; effect is in the store
-        seen = json.loads(plugin.tool_memory_search(
-            {'query': 'deploy pipeline retried'}, self.ctx('mika')))
-        self.assertEqual(len(seen['results']), 1)
-        self.assertEqual(seen['results'][0]['scope'], 'private')
-        self.assertEqual(seen['results'][0]['lifecycle'], 'candidate')
-
-    def test_post_llm_call_replay_is_idempotent(self):
-        long_note = (
-            'Observed that the deploy pipeline retried twice before succeeding '
-            'and the second attempt used the cached layer for repeat-hook proof.'
-        )
-        ctx = {'config': make_config(store_path=self.store),
-               'profile_name': 'mika', 'assistant_message': long_note}
-        plugin.post_llm_call(ctx)
-        plugin.post_llm_call(ctx)
-        conn = plugin._get_conn(self.store)
-        rows = conn.execute(
-            'SELECT COUNT(*) FROM memory m JOIN memory_version v '
-            'ON v.id=m.current_version_id WHERE m.owner_agent_id=? '
-            "AND m.scope='private' AND v.content=?",
-            ('agent-mika', long_note)
-        ).fetchone()[0]
-        self.assertEqual(rows, 1)
-        keys = conn.execute(
-            "SELECT COUNT(*) FROM idempotency_key WHERE key LIKE 'observe:%'"
-        ).fetchone()[0]
-        self.assertEqual(keys, 1)
-
-    def test_post_llm_call_ignores_short_messages(self):
-        out = plugin.post_llm_call({'config': make_config(store_path=self.store),
-                                    'profile_name': 'mika',
-                                    'assistant_message': 'too short'})
-        self.assertIsNone(out)
 
 
 if __name__ == '__main__':

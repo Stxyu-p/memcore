@@ -216,6 +216,41 @@ class NativeProviderTest(unittest.TestCase):
         self.assertEqual(p.prefetch('pinned duplicate claim'), '')
         self.assertIsNone(p.recall_status())
 
+    def test_prefetch_bounds_and_orders_pinned_rows(self):
+        """Ported from the removed pre_llm_call test: the provider, not a
+        module-level hook, is the live recall path — keep the coverage there."""
+        conn = store.open_store(self.db)
+        try:
+            ids = []
+            for text in ('pin oldest', 'pin newest', 'pin critical', 'pin overflow'):
+                mem_id, _ = core.create_memory(
+                    conn, 'proj-demo', 'agent-alice', text, scope='project')
+                ids.append(mem_id)
+            conn.execute(
+                "UPDATE memory SET pinned=1, lifecycle='accepted', "
+                "updated_at='2026-01-01T00:00:00Z' WHERE id=?", (ids[0],))
+            conn.execute(
+                "UPDATE memory SET pinned=1, critical=1, lifecycle='accepted', "
+                "updated_at='2026-01-01T12:00:00Z' WHERE id=?", (ids[1],))
+            conn.execute(
+                "UPDATE memory SET pinned=1, critical=1, lifecycle='accepted', "
+                "updated_at='2026-01-02T00:00:00Z' WHERE id=?", (ids[2],))
+            conn.execute(
+                "UPDATE memory SET pinned=1, lifecycle='accepted', "
+                "updated_at='2026-01-03T00:00:00Z' WHERE id=?", (ids[3],))
+        finally:
+            conn.close()
+        p = self.provider()
+        p._max_items = 2
+        # Non-empty, non-trivial query: the provider's prefetch contract drops
+        # an empty query, which is why the old hook could never have worked here.
+        out = p.prefetch('absentquery')
+        self.assertEqual(out.count('- ['), 2)
+        self.assertIn('pin critical', out)
+        self.assertIn('pin newest', out)
+        self.assertNotIn('pin overflow', out)
+        self.assertNotIn('pin oldest', out)
+
     def test_prefetch_skips_trivial_greeting(self):
         conn = store.open_store(self.db)
         core.create_memory(conn, 'proj-demo', 'agent-alice',

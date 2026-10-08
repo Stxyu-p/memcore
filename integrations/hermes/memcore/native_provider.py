@@ -287,18 +287,18 @@ class MemCoreMemoryProvider(MemoryProvider):
                     return ''
             except Exception:
                 pass
-        conn = store.open_runtime_store_readonly(self._store_path)
-        try:
-            pinned, hits = self._recall_rows(conn, query)
-            block = agent_plugin.build_recall_block(
-                pinned, hits, self._budget, self._max_items
-            )
-            # Content is whitespace-collapsed by the builder, one complete row
-            # per line. Count rendered facts, not search hits dropped by budget.
-            self._last_recall_count = sum(line.startswith('- [') for line in block.splitlines())
-            return block
-        finally:
-            conn.close()
+        # One cached connection per worker thread (agent_plugin._get_conn).
+        # Opening a WAL store costs ~4.6ms, dominated by PRAGMA synchronous,
+        # so a fresh handle per turn dominated the recall path.
+        conn = agent_plugin._get_conn(self._store_path)
+        pinned, hits = self._recall_rows(conn, query)
+        block = agent_plugin.build_recall_block(
+            pinned, hits, self._budget, self._max_items
+        )
+        # Content is whitespace-collapsed by the builder, one complete row
+        # per line. Count rendered facts, not search hits dropped by budget.
+        self._last_recall_count = sum(line.startswith('- [') for line in block.splitlines())
+        return block
 
     def recall_status(self):
         if not self._last_recall_count:
@@ -312,21 +312,22 @@ class MemCoreMemoryProvider(MemoryProvider):
         data.update({k: v for k, v in extra.items() if v is not None})
         return data
 
+    def _write_conn(self):
+        """Cached writable handle for this thread (see prefetch for the cost)."""
+        return agent_plugin._get_conn(self._store_path)
+
     def sync_turn(self, user_content: str, assistant_content: str, *,
                   session_id: str = '', messages=None) -> None:
-        conn = store.open_runtime_store(self._store_path)
-        try:
-            event_id, _created = ingest.append_event(
-                conn, self._project_id, self._agent_id, 'turn',
-                session_id=session_id or self._session_id,
-                user_content=user_content or '',
-                assistant_content=assistant_content or '',
-                metadata=self._event_metadata(messages)
-            )
-            ingest.process_event(conn, event_id)
-            self._run_auto_semantic_review(conn)
-        finally:
-            conn.close()
+        conn = self._write_conn()
+        event_id, _created = ingest.append_event(
+            conn, self._project_id, self._agent_id, 'turn',
+            session_id=session_id or self._session_id,
+            user_content=user_content or '',
+            assistant_content=assistant_content or '',
+            metadata=self._event_metadata(messages)
+        )
+        ingest.process_event(conn, event_id)
+        self._run_auto_semantic_review(conn)
 
     def on_memory_write(self, action: str, target: str, content: str,
                         metadata=None) -> None:
@@ -336,34 +337,28 @@ class MemCoreMemoryProvider(MemoryProvider):
         # identify the deleted entry via metadata.old_text.
         if not content and action != 'remove':
             return
-        conn = store.open_runtime_store(self._store_path)
-        try:
-            event_id, _created = ingest.append_event(
-                conn, self._project_id, self._agent_id, 'memory_write',
-                session_id=self._session_id, user_content=content or '',
-                metadata=self._event_metadata(
-                    action=action, target=target, success=True,
-                    builtin_metadata=builtin_metadata
-                )
+        conn = self._write_conn()
+        event_id, _created = ingest.append_event(
+            conn, self._project_id, self._agent_id, 'memory_write',
+            session_id=self._session_id, user_content=content or '',
+            metadata=self._event_metadata(
+                action=action, target=target, success=True,
+                builtin_metadata=builtin_metadata
             )
-            ingest.process_event(conn, event_id)
-        finally:
-            conn.close()
+        )
+        ingest.process_event(conn, event_id)
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = '', **kwargs):
         if not task and not result:
             return
-        conn = store.open_runtime_store(self._store_path)
-        try:
-            event_id, _created = ingest.append_event(
-                conn, self._project_id, self._agent_id, 'delegation',
-                session_id=self._session_id,
-                user_content=task or '', assistant_content=result or '',
-                metadata=self._event_metadata(child_session_id=child_session_id)
-            )
-            ingest.process_event(conn, event_id)
-        finally:
-            conn.close()
+        conn = self._write_conn()
+        event_id, _created = ingest.append_event(
+            conn, self._project_id, self._agent_id, 'delegation',
+            session_id=self._session_id,
+            user_content=task or '', assistant_content=result or '',
+            metadata=self._event_metadata(child_session_id=child_session_id)
+        )
+        ingest.process_event(conn, event_id)
 
     @staticmethod
     def _semantic_tool_schemas() -> List[Dict[str, Any]]:

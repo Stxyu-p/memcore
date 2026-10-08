@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
-"""Create a scratch copy with some old candidate memories for gc --apply testing."""
+"""Create a scratch copy with some old candidate memories for gc --apply testing.
+
+The source store is read, never written, but it is named by a required --src
+with no default on purpose: a hardcoded store path is how a scratch setup
+quietly turns into an operation on the live store.
+"""
+import argparse
 import shutil
 import os
-import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memcore import store, core
 
-src = 'C:/Users/BlankScreen/.memcore/memory.db'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--src', required=True, help='store file to copy (read-only)')
+args = parser.parse_args()
+
+src = os.path.abspath(os.path.expanduser(args.src))
+if not os.path.isfile(src):
+    sys.exit('no such store: %s' % src)
+
 local_app = os.environ.get('LOCALAPPDATA', '/tmp')
 dst = os.path.join(local_app, 'memcore_gc_test.db')
 

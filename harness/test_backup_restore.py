@@ -510,24 +510,26 @@ class TestContradictionSweep(unittest.TestCase):
 
     def test_polarity_pair_is_found(self):
         from memcore import core as _core
-        a = self._add('scan pacing uses 250ms per page')
-        b = self._add('scan pacing does not use 250ms per page')
+        # Candidates: an 'accepted' claim that contradicts live memory is now
+        # held as conflict at create time (ADR: single accept choke point).
+        a = self._add('scan pacing uses 250ms per page', 'candidate')
+        b = self._add('scan pacing does not use 250ms per page', 'candidate')
         pairs = _core.scan_contradictions(self.conn, self.project)
         found = {(x, y) for x, y, _ in pairs} | {(y, x) for x, y, _ in pairs}
         self.assertIn((a, b), found)
 
     def test_thai_negation_pair_is_found(self):
         from memcore import core as _core
-        a = self._add('ต่อไปนี้ใช้ B.AI สำหรับงานนี้')
-        b = self._add('ห้ามใช้ B.AI สำหรับงานนี้')
+        a = self._add('ต่อไปนี้ใช้ B.AI สำหรับงานนี้', 'candidate')
+        b = self._add('ห้ามใช้ B.AI สำหรับงานนี้', 'candidate')
         pairs = _core.scan_contradictions(self.conn, self.project)
         found = {(x, y) for x, y, _ in pairs} | {(y, x) for x, y, _ in pairs}
         self.assertIn((a, b), found)
 
     def test_numeric_disagreement_is_found(self):
         from memcore import core as _core
-        a = self._add('gateway port is 20128')
-        b = self._add('gateway port is 8080')
+        a = self._add('gateway port is 20128', 'candidate')
+        b = self._add('gateway port is 8080', 'candidate')
         pairs = _core.scan_contradictions(self.conn, self.project)
         found = {(x, y) for x, y, _ in pairs} | {(y, x) for x, y, _ in pairs}
         self.assertIn((a, b), found)
@@ -541,8 +543,8 @@ class TestContradictionSweep(unittest.TestCase):
 
     def test_marking_requires_confirm_and_is_reversible(self):
         from memcore import core as _core
-        a = self._add('scan pacing uses 250ms per page')
-        b = self._add('scan pacing does not use 250ms per page')
+        a = self._add('scan pacing uses 250ms per page', 'candidate')
+        b = self._add('scan pacing does not use 250ms per page', 'candidate')
         _core.mark_contradiction(
             self.conn, a, b, self.agent, reason='test pair')
         for mem_id in (a, b):

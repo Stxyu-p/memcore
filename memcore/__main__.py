@@ -615,14 +615,23 @@ def cmd_export(args):
             out_dir=args.out_dir)
         if not isinstance(results, list):
             results = [results]
+        refused = 0
         for result in results:
-            if result['wrote']:
+            if result.get('refused'):
+                refused += 1
+                print(f"refused {result['path']}: {result['refused']}")
+            elif result['wrote']:
                 print(f"wrote {result['path']} "
                       f"({result['rows']} rows, {result['bytes']} chars)")
             else:
                 print(f"{result['path']} already up to date "
                       f"({result['rows']} rows); use --force to rewrite")
-    except (core.MemCoreError, store.StoreError) as e:
+        if refused:
+            sys.exit(1)
+    except (core.MemCoreError, store.StoreError, ValueError) as e:
+        sys.exit(f'error: {e}')
+    except OSError as e:
+        # Unwritable target, missing parent, permissions: report, never traceback.
         sys.exit(f'error: {e}')
     finally:
         if conn is not None:

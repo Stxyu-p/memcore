@@ -462,17 +462,14 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
                 (idempotency_key, project_id, mem_id, ver_id, now)
             )
         if conflict_hits:
-            # Both sides surface as conflict; nothing resolves automatically.
+            # Demote ONLY the refused row. Touching the other side would let any
+            # agent demote an established fact by writing something wrong: the
+            # good row goes to 'conflict', and re-stating the truth then
+            # contradicts the refused row and is held too, with no way back.
+            # The ingest lane still marks both sides (both rows are its own
+            # auto-accepts); this lane refused the write, so it owes nothing.
             _audit(conn, 'contradiction-hold', agent_id, mem_id, project_id,
                    {'hits': [list(h) for h in conflict_hits]})
-            try:
-                mark_contradiction(
-                    conn, mem_id, conflict_hits[0][0], agent_id,
-                    conflict_hits[0][1], _manage_transaction=False)
-            except (PermissionDenied, MemCoreError):
-                # The other side may not be writable by this agent. The new row
-                # is already 'conflict' and audited, so the hold still stands.
-                pass
         if _manage_transaction:
             conn.execute('COMMIT')
         if conflict_hits:
@@ -1786,10 +1783,24 @@ def record_recall(conn, memory_ids) -> int:
         return 0
 
 
-#: Freshness label projected at read time (never written). Mirrors
-#: apply_freshness_decay: a stored non-'current' value always wins, a row
-#: recalled within REINFORCEMENT_WINDOW_DAYS stays current, otherwise age decides.
-_FRESHNESS_PROJECTION_SQL = "(CASE WHEN m.freshness <> 'current' THEN m.freshness WHEN m.last_recalled IS NOT NULL AND julianday(?) - julianday(m.last_recalled) < ? THEN 'current' WHEN julianday(?) - julianday(m.updated_at) >= ? THEN 'stale' WHEN julianday(?) - julianday(m.updated_at) >= ? THEN 'aging' ELSE 'current' END)"
+#: Freshness label projected at read time (never written). Must agree with the
+#: SEQUENTIAL sweep in apply_freshness_decay, which advances a row at most ONE
+#: step per run: 'current' -> 'aging', and only a row already stored 'aging' can
+#: reach 'stale'. Two errors came from projecting 'current' -> 'stale' in a single
+#: hop (overstating decay: a 95-day row read 'stale' while the sweep writes
+#: 'aging') and from stopping there (understating it: a row the sweep had already
+#: aged kept reading 'aging' past the stale threshold). Both directions now
+#: mirror the sweep. A stored 'stale' is terminal and always wins.
+_FRESHNESS_PROJECTION_SQL = (
+    "(CASE WHEN m.freshness = 'stale' THEN 'stale' "
+    "WHEN m.freshness = 'aging' "
+    "  AND NOT (m.last_recalled IS NOT NULL AND julianday(?) - julianday(m.last_recalled) < ?) "
+    "  AND julianday(?) - julianday(m.updated_at) >= ? THEN 'stale' "
+    "WHEN m.freshness = 'aging' THEN 'aging' "
+    "WHEN m.last_recalled IS NOT NULL AND julianday(?) - julianday(m.last_recalled) < ? THEN 'current' "
+    "WHEN julianday(?) - julianday(m.updated_at) >= ? THEN 'aging' "
+    "ELSE 'current' END)"
+)
 
 
 def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
@@ -1820,8 +1831,8 @@ def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
         "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
         retention_tail + ', '
         'm.updated_at DESC, m.id ASC LIMIT ?',
-        (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso,
-         FRESHNESS_STALE_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
+        (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
+         now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
         (project_id, agent_id) + tuple(substr_terms) + detail_params +
         tuple(retention_params) + (min(500, limit * DISTINCT_OVERFETCH),)
     ).fetchall()
@@ -1934,8 +1945,8 @@ def search(conn, project_id, agent_id, query, limit=20,
         "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
         retention_tail_fts + ', ' +
         'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
-        (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso,
-         FRESHNESS_STALE_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
+        (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
+         now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
         (match_expr, project_id, agent_id) + detail_params +
         tuple(retention_params) + (fts_limit,)
     )

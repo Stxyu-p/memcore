@@ -265,10 +265,26 @@ class FreshnessLabelProjectionTests(unittest.TestCase):
         self.assertEqual(self._label(mem_id, 'freshness label probe aging'),
                          'aging')
 
-    def test_ninety_day_row_reads_stale(self):
+    def test_ninety_day_row_reads_aging_like_the_sweep_writes(self):
+        """The projection must never overstate decay.
+
+        It advances at most ONE step, exactly as the sequential sweep in
+        apply_freshness_decay does: 'current' -> 'aging'. Reading a 120-day row as
+        'stale' was wrong — the sweep writes 'aging' for it, and only a row
+        already stored 'aging' can reach 'stale'.
+        """
         mem_id = self._aged('freshness label probe stale', 120)
         self.assertEqual(self._label(mem_id, 'freshness label probe stale'),
-                         'stale')
+                         'aging')
+
+    def test_stored_aging_row_reads_stale(self):
+        """The second step needs the row to already be stored 'aging'."""
+        mem_id = self._aged('freshness label probe two steps', 120)
+        self.conn.execute(
+            "UPDATE memory SET freshness='aging' WHERE id=?", (mem_id,))
+        self.conn.commit()
+        self.assertEqual(
+            self._label(mem_id, 'freshness label probe two steps'), 'stale')
 
     def test_recent_recall_rescues_an_old_row(self):
         """Same reinforcement rule the durable sweep uses: a fact the fleet
@@ -305,7 +321,7 @@ class FreshnessLabelProjectionTests(unittest.TestCase):
         _ablation._reset_ablation_cache()
         try:
             self.assertEqual(
-                self._label(mem_id, 'freshness label probe fake clock'), 'stale')
+                self._label(mem_id, 'freshness label probe fake clock'), 'aging')
         finally:
             os.environ.pop('MEMCORE_FAKE_NOW', None)
             _ablation._reset_ablation_cache()

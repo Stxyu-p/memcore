@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/badge/Storage-SQLite_WAL_FTS5-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
     <img src="https://img.shields.io/badge/Dependencies-Stdlib_Only-success?style=flat-square" alt="Stdlib only" />
     <img src="https://img.shields.io/badge/Daemon-None-blue?style=flat-square" alt="Daemonless" />
-    <img src="https://img.shields.io/badge/Tests-564_Passing-brightgreen?style=flat-square" alt="Tests" />
+    <img src="https://img.shields.io/badge/Tests-573_Passing-brightgreen?style=flat-square" alt="Tests" />
     <img src="https://img.shields.io/badge/Recall_p@3-0.81-0284c7?style=flat-square" alt="Recall Baseline" />
   </p>
 
@@ -144,9 +144,9 @@ python -m unittest discover -s integrations/hermes/memcore/tests -v
 Current gate:
 
 ```text
-470 tests           →  OK (expected failures=2)
+479 tests           →  OK (expected failures=2)
  94 integration    →  OK
-Total: 564 tests
+Total: 573 tests
 Recall baseline     →  p@3 0.81 (floor 0.62)
 ```
 

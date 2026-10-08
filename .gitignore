@@ -7,3 +7,8 @@ __pycache__/
 dist/
 build/
 scratch/
+
+# MemCore's own export output: generated files, never committed here.
+MEMORY.md
+GEMINI.md
+.agents/

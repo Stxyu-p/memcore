@@ -381,6 +381,13 @@ class AcceptedCreateChokePointTests(unittest.TestCase):
         self.assertEqual(row[0], 'accepted')
 
     def test_contradicting_accepted_create_is_held_as_conflict(self):
+        """The refused write must NOT demote the established fact.
+
+        A rejected auto-accept used to mark BOTH rows conflict. That let any
+        agent destroy a good fact by writing something wrong: the truth went to
+        'conflict', and re-stating it then contradicted the refused row and was
+        held too, with no recovery route. Only the new row is demoted.
+        """
         from memcore import core
         first, _ = core.create_memory(
             self.conn, self.project, self.a,
@@ -396,13 +403,50 @@ class AcceptedCreateChokePointTests(unittest.TestCase):
         lifecycles = dict(self.conn.execute(
             'SELECT id, lifecycle FROM memory WHERE id IN (?, ?)',
             (first, second)))
-        self.assertEqual(lifecycles[first], 'conflict')
+        self.assertEqual(lifecycles[first], 'accepted',
+                         'the established fact must survive a refused write')
         self.assertEqual(lifecycles[second], 'conflict')
         actions = [r[0] for r in self.conn.execute(
             'SELECT action FROM audit_event WHERE memory_id=? ORDER BY id',
             (second,))]
         self.assertIn('contradiction-hold', actions)
-        self.assertIn('mark_conflict', actions)
+        # mark_conflict no longer fires on this path: nothing was demoted.
+        self.assertNotIn('mark_conflict', actions)
+
+    def test_refused_write_cannot_poison_the_truth(self):
+        """The established fact survives the hold, without any repair step.
+
+        Before the fix both rows went to 'conflict', so the fact was demoted,
+        re-stating it contradicted the refused row and was held as well, and each
+        attempt minted another conflict row: one bad write cost the fleet the
+        fact with no way back. The invariant now is that the good row is
+        untouched, so recall keeps returning it and nothing has to be repaired.
+        """
+        from memcore import core
+        truth, _ = core.create_memory(
+            self.conn, self.project, self.a,
+            '9router gateway runs on port 20128',
+            scope='project', lifecycle='accepted')
+        with self.assertRaises(core.ContradictionHold):
+            core.create_memory(
+                self.conn, self.project, self.b,
+                '9router gateway runs on port 8080',
+                scope='project', lifecycle='accepted')
+        self.assertEqual(
+            self.conn.execute('SELECT lifecycle FROM memory WHERE id=?',
+                              (truth,)).fetchone()[0],
+            'accepted')
+        hits = core.search(self.conn, self.project, self.a,
+                           '9router gateway port', limit=5)
+        self.assertTrue(
+            any(h[0] == truth and h[2] == 'accepted' for h in hits),
+            'the established fact must still be recallable as accepted')
+        # and no repair write was needed to get there
+        self.assertEqual(
+            self.conn.execute(
+                'SELECT COUNT(*) FROM memory WHERE project_id=?',
+                (self.project,)).fetchone()[0],
+            2, 'the hold must not mint rows beyond the refused one')
 
     def test_candidate_create_is_never_gated(self):
         from memcore import core

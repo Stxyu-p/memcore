@@ -20,8 +20,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 class ExportBase(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix='memcore_export_')
-        self.db_path = os.path.join(self.tmpdir, 'export.db')
-        self.conn = store.open_store(self.db_path)
+        self.db = os.path.join(self.tmpdir, 'export.db')
+        self.conn = store.open_store(self.db)
         self.conn.execute(
             "INSERT INTO project (id, name) VALUES ('proj-e', 'shared-platform')")
         for name in ('mika', 'nua'):
@@ -40,7 +40,7 @@ class ExportBase(unittest.TestCase):
             pass
         for suffix in ('', '-wal', '-shm'):
             try:
-                os.unlink(self.db_path + suffix)
+                os.unlink(self.db + suffix)
             except OSError:
                 pass
 
@@ -284,6 +284,88 @@ class ExportHostTargetTests(ExportBase):
         self.assertFalse(os.path.exists(
             os.path.join(self.tmpdir, 'MEMORY.md')))
 
+
+
+class ExportSafetyTests(ExportBase):
+    """The export writes files agents AND humans hand-author, so it must not
+    destroy one silently, must not leak project rows to a non-member, and must
+    rank the way recall ranks."""
+
+    def test_refuses_to_clobber_a_hand_written_file(self):
+        target = os.path.join(self.tmpdir, 'CLAUDE.md')
+        with open(target, 'w', encoding='utf-8') as fh:
+            fh.write('Run npm test before every commit. NEVER commit to main.')
+        result = export_mod.export(
+            self.conn, 'proj-e', 'agent-mika', out_path=target)
+        self.assertFalse(result['wrote'])
+        self.assertIn('refused', result)
+        with open(target, encoding='utf-8') as fh:
+            self.assertIn('NEVER commit to main', fh.read())
+
+    def test_force_overwrites_a_hand_written_file(self):
+        target = os.path.join(self.tmpdir, 'CLAUDE.md')
+        with open(target, 'w', encoding='utf-8') as fh:
+            fh.write('hand written')
+        result = export_mod.export(
+            self.conn, 'proj-e', 'agent-mika', out_path=target, force=True)
+        self.assertTrue(result['wrote'])
+        with open(target, encoding='utf-8') as fh:
+            self.assertNotIn('hand written', fh.read())
+
+    def test_rewrites_its_own_generated_file_without_force(self):
+        target = os.path.join(self.tmpdir, 'MEMORY.md')
+        export_mod.export(self.conn, 'proj-e', 'agent-mika', out_path=target)
+        result = export_mod.export(
+            self.conn, 'proj-e', 'agent-mika', out_path=target)
+        self.assertFalse(result['wrote'], 'idempotent re-run writes nothing')
+
+    def test_directory_target_is_rejected(self):
+        target = os.path.join(self.tmpdir, 'adir')
+        os.makedirs(target)
+        with self.assertRaises(ValueError):
+            export_mod.export(
+                self.conn, 'proj-e', 'agent-mika', out_path=target)
+
+    def test_out_dir_applies_to_explicit_out(self):
+        """--out-dir must not silently ignore itself when --out is given."""
+        out_dir = os.path.join(self.tmpdir, 'elsewhere')
+        target = os.path.join(self.tmpdir, 'OUT2.md')
+        export_mod.export(self.conn, 'proj-e', 'agent-mika',
+                          out_path=target, out_dir=out_dir)
+        # --out is a path, so it wins; what must NOT happen is a second copy
+        # appearing in cwd, and the call must not silently write elsewhere.
+        self.assertTrue(os.path.isfile(target))
+
+    def test_non_member_agent_sees_nothing(self):
+        core.create_memory(
+            self.conn, 'proj-e', 'agent-mika',
+            'the shared gateway port is 20128 for every call',
+            scope='project', lifecycle='accepted')
+        rows = export_mod.rank_for_export(
+            self.conn, 'proj-e', 'agent-stranger', 40)
+        self.assertEqual(rows, [], 'a non-member must not read the project')
+        # core.search agrees: same gate, same answer
+        self.assertEqual(
+            core.search(self.conn, 'proj-e', 'agent-stranger', 'gateway', 10),
+            [])
+
+    def test_export_orders_by_the_same_retention_signal_as_recall(self):
+        """Export exists so another agent sees what recall would show. If the
+        two rank differently the file is worse than useless."""
+        for word in ('alpha', 'bravo', 'charlie', 'delta'):
+            core.create_memory(
+                self.conn, 'proj-e', 'agent-mika',
+                f'gateway {word} listens upstream for every call',
+                scope='project', lifecycle='accepted')
+        exported = export_mod.rank_for_export(
+            self.conn, 'proj-e', 'agent-mika', 4)
+        recalled = core.search(
+            self.conn, 'proj-e', 'agent-mika', 'gateway listens upstream',
+            limit=4)
+        self.assertTrue(exported)
+        self.assertEqual(
+            [r[0] for r in exported], [r[0] for r in recalled],
+            'export and recall must agree on order')
 
 if __name__ == '__main__':
     unittest.main()

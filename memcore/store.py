@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import sqlite3
+import struct
 import time
 import unicodedata
 
@@ -323,6 +324,22 @@ CREATE INDEX IF NOT EXISTS idx_memory_version_validity
     ON memory_version(memory_id, valid_from, valid_until);
 """
 
+_MEMORY_EMBEDDING = """
+-- 0018: local vector embedding storage for semantic hybrid recall.
+CREATE TABLE IF NOT EXISTS memory_embedding (
+    memory_id   TEXT NOT NULL,
+    version_id  TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (memory_id, version_id),
+    FOREIGN KEY (memory_id) REFERENCES memory(id) ON DELETE CASCADE,
+    FOREIGN KEY (version_id) REFERENCES memory_version(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_embedding_version ON memory_embedding(version_id);
+"""
+
 
 MIGRATIONS = [
     ('0001_initial_contract', None),  # None = apply schema.sql verbatim
@@ -355,6 +372,7 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0015_reinforcement_decay', _REINFORCEMENT_DECAY),
     ('0016_scope_detail', _SCOPE_DETAIL),
     ('0017_bitemporal_valid_until', _BITEMPORAL_VALID_UNTIL),
+    ('0018_memory_embedding', _MEMORY_EMBEDDING),
 ]
 
 
@@ -823,6 +841,43 @@ def verify_all_seals(conn, limit: int = 10000) -> dict:
             if len(report['invalid_ids']) < 10:
                 report['invalid_ids'].append(event_id)
     return report
+
+
+def pack_vector(floats: list[float]) -> bytes:
+    """Pack a list of float numbers into an IEEE 754 float32 little-endian binary BLOB."""
+    return struct.pack(f'<{len(floats)}f', *floats)
+
+
+def unpack_vector(blob: bytes) -> list[float]:
+    """Unpack an IEEE 754 float32 little-endian binary BLOB into a list of floats."""
+    count = len(blob) // 4
+    return list(struct.unpack(f'<{count}f', blob))
+
+
+def store_embedding(conn: sqlite3.Connection, memory_id: str, version_id: str,
+                    model: str, vector: list[float]) -> None:
+    """Persist an embedding vector for a specific memory version."""
+    blob = pack_vector(vector)
+    dim = len(vector)
+    conn.execute(
+        'INSERT OR REPLACE INTO memory_embedding '
+        '(memory_id, version_id, model, dim, vector) '
+        'VALUES (?, ?, ?, ?, ?)',
+        (memory_id, version_id, model, dim, blob)
+    )
+
+
+def get_embedding(conn: sqlite3.Connection, memory_id: str,
+                  version_id: str) -> list[float] | None:
+    """Retrieve and unpack the embedding vector for a memory version, or None if absent."""
+    cur = conn.execute(
+        'SELECT vector FROM memory_embedding WHERE memory_id=? AND version_id=?',
+        (memory_id, version_id)
+    )
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    return unpack_vector(row[0])
 
 
 def open_store_readonly(db_path: str) -> sqlite3.Connection:

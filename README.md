@@ -16,7 +16,7 @@
     <img src="https://img.shields.io/badge/Dependencies-Stdlib_Only-success?style=flat-square" alt="Stdlib only" />
     <img src="https://img.shields.io/badge/Daemon-None-blue?style=flat-square" alt="Daemonless" />
     <img src="https://img.shields.io/badge/Ports-None-blue?style=flat-square" alt="No ports" />
-    <img src="https://img.shields.io/badge/Migrations-17-0284c7?style=flat-square" alt="Migrations" />
+    <img src="https://img.shields.io/badge/Migrations-18-0284c7?style=flat-square" alt="Migrations" />
     <img src="https://img.shields.io/badge/Tests-573_Passing-brightgreen?style=flat-square" alt="Tests" />
     <img src="https://img.shields.io/badge/Recall_p@3-0.81-0284c7?style=flat-square" alt="Recall Baseline" />
   </p>

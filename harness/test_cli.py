@@ -124,9 +124,10 @@ class CliImportTests(unittest.TestCase):
         repo_root = pathlib.Path(cli.__file__).resolve().parents[1]
         return cli._load_deploy_module(repo_root / 'scripts' / 'deploy_hermes_plugin.py')
 
-    def _stage_plugin_deployment(self, mutate=None):
+    def _stage_plugin_deployment(self, mutate=None, target=None):
         deploy = self._deploy_module()
-        target = pathlib.Path(self.tmp.name) / 'plugins' / 'memcore'
+        if target is None:
+            target = pathlib.Path(self.tmp.name) / 'plugins' / 'memcore'
         target.mkdir(parents=True, exist_ok=True)
         for relative in deploy.RUNTIME_FILES:
             destination = target / pathlib.PurePosixPath(relative)
@@ -502,6 +503,7 @@ class CliImportTests(unittest.TestCase):
                 f'        default_project: {project}\n'
                 f'        store_path: {json.dumps(self.db)}\n'
             )
+        self._stage_plugin_deployment(target=pathlib.Path(home) / 'plugins' / 'memcore')
         return home
 
     def test_doctor_accepts_matching_enabled_profile_binding(self):

@@ -1119,6 +1119,23 @@ def cmd_restore_backup(args):
 
     stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
     if db_path.is_file():
+        # Check whether another live connection holds an exclusive/shared lock
+        # or WAL index on the target database (portable across Windows & POSIX).
+        try:
+            target_check = sqlite3.connect(str(db_path), timeout=0.1)
+            try:
+                target_check.execute('PRAGMA busy_timeout = 100')
+                target_check.execute('PRAGMA locking_mode = EXCLUSIVE')
+                target_check.execute('BEGIN EXCLUSIVE')
+                target_check.execute('COMMIT')
+            finally:
+                target_check.close()
+        except sqlite3.OperationalError:
+            sys.exit(
+                f'error: cannot restore — store at {db_path} is in use by a live connection. '
+                f'Close every process using this store, then retry.'
+            )
+
         preserved = db_path.with_name(f'{db_path.name}.pre-restore-{stamp}.bak')
         shutil.copy2(db_path, preserved)
         print(f'preserved current store: {preserved}')

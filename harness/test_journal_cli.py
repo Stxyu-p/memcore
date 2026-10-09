@@ -3,6 +3,8 @@ import contextlib
 import io
 import json
 import os
+import pathlib
+import shutil
 import tempfile
 import unittest
 
@@ -182,6 +184,14 @@ class JournalCliTests(unittest.TestCase):
         os.makedirs(hermes_home, exist_ok=True)
         with open(os.path.join(hermes_home, 'config.yaml'), 'w', encoding='utf-8') as f:
             f.write('plugins:\n  enabled: []\n')
+        repo_root = pathlib.Path(cli.__file__).resolve().parents[1]
+        deploy = cli._load_deploy_module(repo_root / 'scripts' / 'deploy_hermes_plugin.py')
+        target = pathlib.Path(hermes_home) / 'plugins' / 'memcore'
+        target.mkdir(parents=True, exist_ok=True)
+        for relative in deploy.RUNTIME_FILES:
+            dest = target / pathlib.PurePosixPath(relative)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(deploy.SOURCE_ROOT / pathlib.PurePosixPath(relative), dest)
         old_home = os.environ.get('HERMES_HOME')
         os.environ['HERMES_HOME'] = hermes_home
         # doctor gates on recovery readiness; this test is about journal health

@@ -31,12 +31,12 @@ def default_target() -> pathlib.Path:
     explicit = os.environ.get('MEMCORE_HERMES_PLUGIN_DIR')
     if explicit:
         return pathlib.Path(explicit).expanduser()
-    local = os.environ.get('LOCALAPPDATA')
-    if local:
-        return pathlib.Path(local) / 'hermes' / 'plugins' / 'memcore'
     hermes_home = os.environ.get('HERMES_HOME')
     if hermes_home:
         return pathlib.Path(hermes_home).expanduser() / 'plugins' / 'memcore'
+    local = os.environ.get('LOCALAPPDATA')
+    if local:
+        return pathlib.Path(local) / 'hermes' / 'plugins' / 'memcore'
     return pathlib.Path.home() / '.hermes' / 'plugins' / 'memcore'
 
 

@@ -105,6 +105,39 @@ Every recalled row carries four labels, so a reader never has to guess how much 
 
 ---
 
+## 🐍 Python SDK
+
+MemCore can be embedded directly into any agent framework (LangChain, LlamaIndex, CrewAI, AutoGen, or custom agents) with zero boilerplate:
+
+```python
+from memcore.client import MemCore
+
+# Connect with automatic WAL & governance initialization
+with MemCore(project="fleet", agent="researcher") as mc:
+    # 1. Store a governed memory
+    mid = mc.remember("PostgreSQL is used for analytics", memory_type="fact")
+
+    # 2. Hybrid search (FTS5 BM25 + Thai Bigram + Semantic Vector via RRF)
+    results = mc.search("database stack")
+    for hit in results:
+        print(f"[{hit['scope']} | {hit['lifecycle']}] {hit['content']}")
+
+    # 3. Update with immutable bitemporal history
+    mc.supersede(mid, "ClickHouse is now used for analytics", reason="migrated stack")
+```
+
+### 📦 Installation
+
+```bash
+# Core engine: 100% Python stdlib + SQLite (Zero external dependencies)
+pip install .
+
+# Optional: in-process zero-daemon local embeddings (FastEmbed)
+pip install ".[local-embed]"
+```
+
+---
+
 ## 🚀 Quick Start
 
 ```bash

@@ -12,6 +12,8 @@ class EmbedCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='memcore_embed_cli_')
         self.db = os.path.join(self.tmp.name, 'memory.db')
+        self.patch_embed = mock.patch('memcore.embedding.get_embedding', return_value=None)
+        self.patch_embed.start()
         self.conn = store.open_store(self.db)
         self.conn.execute("INSERT INTO project (id,name) VALUES ('p1','test-proj')")
         self.conn.execute(
@@ -25,6 +27,7 @@ class EmbedCliTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
+        self.patch_embed.stop()
         self.tmp.cleanup()
 
     def test_cmd_embed_backfills_unembedded_memories(self):

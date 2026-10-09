@@ -24,7 +24,8 @@ import unittest
 from memcore import ablation, core, store
 
 _FLAGS = ('MEMCORE_ABLATE_ALIAS_EXPANSION', 'MEMCORE_ABLATE_THAI_BIGRAM',
-          'MEMCORE_ABLATE_DECAY', 'MEMCORE_FAKE_NOW')
+          'MEMCORE_ABLATE_DECAY', 'MEMCORE_FAKE_NOW',
+          'MEMCORE_EMBEDDING_PROVIDER')
 
 MARKER = 'decayrank salience retention marker'
 

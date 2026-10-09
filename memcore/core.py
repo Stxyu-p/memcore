@@ -312,6 +312,17 @@ def _validate_scope_detail(scope, scope_detail):
     return detail
 
 
+def _maybe_embed_version(conn, memory_id: str, version_id: str, content: str) -> None:
+    """Best-effort embedding persistence on version creation/supersede."""
+    if store._table_exists(conn, 'memory_embedding'):
+        try:
+            vec = embedding.get_embedding(content, timeout=0.1)
+            if vec:
+                store.store_embedding(conn, memory_id, version_id, embedding.DEFAULT_MODEL, vec)
+        except Exception:
+            pass
+
+
 def create_memory(conn, project_id, agent_id, content, scope='private',
                   memory_type='fact', lifecycle='candidate', idempotency_key=None,
                   reason=None, scope_detail=None, _manage_transaction=True):
@@ -422,7 +433,7 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         ver_id = _new_id('ver')
         now = _now()
         detail = _validate_scope_detail(scope, scope_detail)
-        mem_cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
+        mem_cols = _table_cols(conn, 'memory')
         if detail is not None and 'scope_detail' not in mem_cols:
             raise MemCoreError(
                 'scope_detail requires migration 0016; open the store normally first')
@@ -436,9 +447,6 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
                  lifecycle, ver_id, claim_fp, now, now, detail)
             )
         else:
-            if detail is not None:
-                raise MemCoreError(
-                    'scope_detail requires migration 0016; open the store normally first')
             conn.execute(
                 'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
                 '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
@@ -452,13 +460,7 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             '  created_by_agent_id, created_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?)',
             (ver_id, mem_id, content, reason, agent_id, now, now)
         )
-        if store._table_exists(conn, 'memory_embedding'):
-            try:
-                vec = embedding.get_embedding(content, timeout=0.1)
-                if vec:
-                    store.store_embedding(conn, mem_id, ver_id, embedding.DEFAULT_MODEL, vec)
-            except Exception:
-                pass
+        _maybe_embed_version(conn, mem_id, ver_id, content)
         _audit(conn, 'create', agent_id, mem_id, project_id,
                {'memory_id': mem_id, 'version_id': ver_id,
                 'scope': scope, 'content': content,
@@ -543,13 +545,7 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
             'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             (new_ver, memory_id, new_content, reason, agent_id, old_ver, now, now)
         )
-        if store._table_exists(conn, 'memory_embedding'):
-            try:
-                vec = embedding.get_embedding(new_content, timeout=0.1)
-                if vec:
-                    store.store_embedding(conn, memory_id, new_ver, embedding.DEFAULT_MODEL, vec)
-            except Exception:
-                pass
+        _maybe_embed_version(conn, memory_id, new_ver, new_content)
 
         # A changed claim does not inherit acceptance/verification from the old
         # version. It must earn trust again through feedback/evidence.
@@ -1709,21 +1705,25 @@ def _decay_salience_sql(alias='m'):
 _DECAY_LAMBDA_SQL_M = _decay_lambda_sql('m')
 _DECAY_SALIENCE_SQL_M = _decay_salience_sql('m')
 
-# ponytail: cache table column presence per connection id to eliminate PRAGMA table_info on hot searches
-_CONN_RECALL_COLS: dict[int, bool] = {}
+_CONN_TABLE_COLS: dict[tuple[int, str], set[str]] = {}
+
+
+def _table_cols(conn, table: str = 'memory') -> set[str]:
+    cid = id(conn)
+    key = (cid, table)
+    cols = _CONN_TABLE_COLS.get(key)
+    if cols is None:
+        try:
+            cols = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+        except Exception:
+            cols = set()
+        _CONN_TABLE_COLS[key] = cols
+    return cols
 
 
 def _has_recall_cols(conn) -> bool:
-    cid = id(conn)
-    val = _CONN_RECALL_COLS.get(cid)
-    if val is None:
-        try:
-            cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
-            val = ('recall_count' in cols and 'last_recalled' in cols)
-        except Exception:
-            val = False
-        _CONN_RECALL_COLS[cid] = val
-    return val
+    cols = _table_cols(conn, 'memory')
+    return 'recall_count' in cols and 'last_recalled' in cols
 
 
 def _retention_order(conn, enabled, alias='m'):
@@ -1819,6 +1819,17 @@ _FRESHNESS_PROJECTION_SQL = (
 )
 
 
+def _freshness_params(now_iso: str) -> tuple:
+    return (
+        now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
+        now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS
+    )
+
+
+_LIFECYCLE_ORDER = {'accepted': 0, 'conflict': 1}
+_VERIF_ORDER = {'user_authoritative': 0, 'runtime_verified': 1, 'source_backed': 2}
+
+
 def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
                         detail_params, retention_tail, retention_params, now_iso,
                         limit):
@@ -1847,8 +1858,7 @@ def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
         "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
         retention_tail + ', '
         'm.updated_at DESC, m.id ASC LIMIT ?',
-        (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
-         now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
+        _freshness_params(now_iso) +
         (project_id, agent_id) + tuple(substr_terms) + detail_params +
         tuple(retention_params) + (min(500, limit * DISTINCT_OVERFETCH),)
     ).fetchall()
@@ -1870,7 +1880,7 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
         norm_b += b * b
     if norm_a <= 0.0 or norm_b <= 0.0:
         return 0.0
-    return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
+    return dot / math.sqrt(norm_a * norm_b)
 
 
 def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
@@ -1886,6 +1896,11 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
     if not store._table_exists(conn, 'memory_embedding'):
         return []
 
+    query_norm_sq = sum(x * x for x in query_vec)
+    if query_norm_sq <= 0.0:
+        return []
+    query_norm = math.sqrt(query_norm_sq)
+
     now_iso = _eval_now_iso()
     sql = (
         'SELECT m.id, m.scope, m.lifecycle, m.verification, '
@@ -1900,30 +1915,54 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
         "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
         '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter
     )
-    params = (
-        now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
-        now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS,
-        project_id, agent_id
-    ) + detail_params
+    params = _freshness_params(now_iso) + (project_id, agent_id) + detail_params
 
     cur = conn.execute(sql, params)
     candidates = []
     for row in cur.fetchall():
         mid, scope, lifecycle, verif, freshness, content, owner, blob, fp, pinned = row
         doc_vec = store.unpack_vector(blob)
-        sim = cosine_similarity(query_vec, doc_vec)
+        if len(doc_vec) != len(query_vec):
+            continue
+        dot = 0.0
+        doc_norm_sq = 0.0
+        for q, d in zip(query_vec, doc_vec):
+            dot += q * d
+            doc_norm_sq += d * d
+        if doc_norm_sq <= 0.0:
+            sim = 0.0
+        else:
+            sim = dot / (query_norm * math.sqrt(doc_norm_sq))
         # rank: lower is better to match bm25 convention (e.g. -sim)
         rank = -sim
         candidates.append((mid, scope, lifecycle, verif, freshness, content, owner, rank, fp, pinned))
 
     def _cand_sort_key(c):
         pinned_order = 0 if c[9] else 1
-        lifecycle_order = {'accepted': 0, 'conflict': 1}.get(c[2], 2)
-        verif_order = {'user_authoritative': 0, 'runtime_verified': 1, 'source_backed': 2}.get(c[3], 3)
+        lifecycle_order = _LIFECYCLE_ORDER.get(c[2], 2)
+        verif_order = _VERIF_ORDER.get(c[3], 3)
         return (pinned_order, lifecycle_order, verif_order, c[7])
 
     candidates.sort(key=_cand_sort_key)
     return [c[:9] for c in candidates[:limit]]
+
+
+def _merge_exact_fallback(base_rows, exact_rows, limit, user_query):
+    """Merge ranked primary candidates with exact substring fallback rows."""
+    if not exact_rows:
+        return _demote_numeric_mismatch(
+            user_query, _collapse_duplicate_claims(base_rows, limit))
+    seen = {row[0] for row in base_rows}
+    merged = list(base_rows)
+    merge_cap = min(500, limit * DISTINCT_OVERFETCH)
+    for row in exact_rows:
+        if row[0] not in seen:
+            merged.append(row)
+            seen.add(row[0])
+            if len(merged) >= merge_cap:
+                break
+    return _demote_numeric_mismatch(
+        user_query, _collapse_duplicate_claims(merged, limit))
 
 
 def search(conn, project_id, agent_id, query, limit=20,
@@ -1978,7 +2017,7 @@ def search(conn, project_id, agent_id, query, limit=20,
     detail_filter = ''
     detail_params: tuple = ()
     if scope_detail is not None:
-        cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
+        cols = _table_cols(conn, 'memory')
         if 'scope_detail' not in cols:
             return []
         detail_filter = '  AND m.scope_detail = ? '
@@ -2053,8 +2092,7 @@ def search(conn, project_id, agent_id, query, limit=20,
             "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
             retention_tail_fts + ', ' +
             'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
-            (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
-             now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
+            _freshness_params(now_iso) +
             (match_expr, project_id, agent_id) + detail_params +
             tuple(retention_params) + (fts_limit,)
         )
@@ -2070,20 +2108,7 @@ def search(conn, project_id, agent_id, query, limit=20,
     if not vec_rows:
         if not fts_rows and not exact_rows:
             return []
-        if not exact_rows:
-            return _demote_numeric_mismatch(
-                user_query, _collapse_duplicate_claims(fts_rows, limit))
-        seen = {row[0] for row in fts_rows}
-        merged = list(fts_rows)
-        merge_cap = min(500, limit * DISTINCT_OVERFETCH)
-        for row in exact_rows:
-            if row[0] not in seen:
-                merged.append(row)
-                seen.add(row[0])
-                if len(merged) >= merge_cap:
-                    break
-        return _demote_numeric_mismatch(
-            user_query, _collapse_duplicate_claims(merged, limit))
+        return _merge_exact_fallback(fts_rows, exact_rows, limit, user_query)
 
     # Reciprocal Rank Fusion (RRF, k=60)
     k_rrf = 60
@@ -2112,23 +2137,12 @@ def search(conn, project_id, agent_id, query, limit=20,
         )
 
     def _fused_sort_key(c):
-        lifecycle_order = {'accepted': 0, 'conflict': 1}.get(c[2], 2)
-        verif_order = {'user_authoritative': 0, 'runtime_verified': 1, 'source_backed': 2}.get(c[3], 3)
+        lifecycle_order = _LIFECYCLE_ORDER.get(c[2], 2)
+        verif_order = _VERIF_ORDER.get(c[3], 3)
         return (lifecycle_order, verif_order, c[7])
 
     fused_candidates.sort(key=_fused_sort_key)
-
-    seen = {row[0] for row in fused_candidates}
-    merged = list(fused_candidates)
-    merge_cap = min(500, limit * DISTINCT_OVERFETCH)
-    for row in exact_rows:
-        if row[0] not in seen:
-            merged.append(row)
-            seen.add(row[0])
-            if len(merged) >= merge_cap:
-                break
-    return _demote_numeric_mismatch(
-        user_query, _collapse_duplicate_claims(merged, limit))
+    return _merge_exact_fallback(fused_candidates, exact_rows, limit, user_query)
 
 
 #: How much deeper than ``limit`` search() reads before collapsing duplicate

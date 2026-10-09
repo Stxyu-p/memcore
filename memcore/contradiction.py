@@ -23,9 +23,6 @@ _NEGATIVE_EN = frozenset({
 _NEGATIVE_TH = frozenset({
     'ไม่', 'ห้าม', 'ไม่ใช่', 'ไม่มี', 'ไม่ได้', 'อย่า', 'ยกเลิก',
 })
-_POSITIVE_TH = frozenset({
-    'ต้อง', 'ควร', 'เสมอ', 'เท่านั้น',
-})
 
 # Numeric claims: "port 20128" vs "port 8080" on the same subject disagree.
 # Standalone numbers only: digits glued inside a word (the "9" in "9router",
@@ -121,7 +118,8 @@ def is_contradiction_pair(a, b):
 
     Returns (is_contradiction, reason).
     """
-    if subject_key(a) != subject_key(b) or not subject_key(a):
+    ska = subject_key(a)
+    if not ska or ska != subject_key(b):
         return False, 'different_subject'
     pa, pb = polarity(a), polarity(b)
     if pa != pb and (pa, pb) in ((0, -1), (-1, 0)):

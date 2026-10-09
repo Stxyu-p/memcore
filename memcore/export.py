@@ -85,10 +85,6 @@ def targets_for(host):
     return HOST_TARGETS.get(key, (DEFAULT_OUT,))
 
 
-def _stamp():
-    return core._now()
-
-
 def rank_for_export(conn, project_id, agent_id, limit, include_private=False):
     """Top memories for a human/agent-readable brief, in engine rank order.
 

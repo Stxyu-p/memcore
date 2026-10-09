@@ -50,7 +50,11 @@ def resolve_config(
     api_key: str | None = None,
 ) -> tuple[str | None, str, str | None]:
     """Resolve endpoint, model, and api_key from presets and environment variables."""
-    # ponytail: lightweight provider dict; add plugin registry only if non-OpenAI protocols needed
+    if endpoint:
+        target_model = model or os.environ.get('MEMCORE_EMBEDDING_MODEL') or DEFAULT_MODEL
+        target_key = api_key or os.environ.get('MEMCORE_EMBEDDING_KEY')
+        return endpoint, target_model, target_key
+
     p_name = (provider or os.environ.get('MEMCORE_EMBEDDING_PROVIDER', '')).lower()
     if p_name in ('none', 'off', 'disabled'):
         return None, '', None
@@ -59,8 +63,7 @@ def resolve_config(
 
     preset = PROVIDERS.get(p_name, {})
     target_url = (
-        endpoint
-        or os.environ.get('MEMCORE_EMBEDDING_URL')
+        os.environ.get('MEMCORE_EMBEDDING_URL')
         or preset.get('url')
         or DEFAULT_ENDPOINT
     )
@@ -177,15 +180,13 @@ def get_embeddings_batch(
     if is_circuit_open():
         return None
 
-    p_name = (provider or os.environ.get('MEMCORE_EMBEDDING_PROVIDER', '')).lower()
-    if p_name in ('local', 'fastembed'):
-        return _get_fastembed_batch(texts, model=model)
-
     target_endpoint, target_model, target_key = resolve_config(
         provider=provider, endpoint=endpoint, model=model, api_key=api_key
     )
     if not target_endpoint:
         return None
+    if target_endpoint == 'in-process':
+        return _get_fastembed_batch(texts, model=target_model)
 
     payload = {
         'input': texts,

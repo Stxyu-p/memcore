@@ -1,80 +1,142 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="430" viewBox="0 0 900 430" role="img" aria-label="MemCore trust architecture: raw journal never recalled directly, governed admission, scope-aware recall">
-  <title>MemCore trust architecture</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520" role="img" aria-label="MemCore Governed Trust &amp; Hybrid Architecture">
+  <title>MemCore Governed Trust &amp; Hybrid Architecture</title>
   <defs>
-    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#334155"/>
-      <stop offset="100%" stop-color="#64748b"/>
+    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#131d31" stroke-width="0.5"/>
+    </pattern>
+    <linearGradient id="edge-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#10b981"/>
     </linearGradient>
+    <filter id="card-shadow" x="-5%" y="-5%" width="110%" height="115%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.4"/>
+    </filter>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#64748b"/>
+    </marker>
+    <marker id="arr-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#10b981"/>
+    </marker>
+    <marker id="arr-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#a78bfa"/>
+    </marker>
     <style>
-      .bg{fill:#0b1120}
-      .panel{fill:#111c33;stroke:#24344f;stroke-width:1}
-      .zone{fill:#0f172a;stroke:#1e293b;stroke-width:1}
-      .t1{fill:#e2e8f0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:13px;font-weight:600}
-      .t2{fill:#94a3b8;font-family:ui-sans-serif,system-ui,Segoe UI,sans-serif;font-size:11px}
-      .t3{fill:#64748b;font-family:ui-sans-serif,system-ui,Segoe UI,sans-serif;font-size:10px;letter-spacing:.08em;text-transform:uppercase}
-      .edge{stroke:url(#edge);stroke-width:1.4;fill:none;marker-end:url(#arrow)}
-      .edge-soft{stroke:#334155;stroke-width:1.1;fill:none;stroke-dasharray:3 3;marker-end:url(#arrow-soft)}
-      .bar{fill:#1e293b}
-      .bar-ok{fill:#14532d}
-      .bar-warn{fill:#713f12}
+      .bg { fill: #070d19; }
+      .zone { fill: #0b1325; stroke: #1e293b; stroke-width: 1; }
+      .card { fill: #0f172a; stroke: #24344f; stroke-width: 1; filter: url(#card-shadow); }
+      .card-accent { fill: #111e38; stroke: #3b82f6; stroke-width: 1.2; filter: url(#card-shadow); }
+      .card-green { fill: #0b2320; stroke: #10b981; stroke-width: 1.2; filter: url(#card-shadow); }
+      .card-purple { fill: #1c1536; stroke: #8b5cf6; stroke-width: 1.2; filter: url(#card-shadow); }
+      .t-title { fill: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; font-size: 13px; font-weight: 600; }
+      .t-sub { fill: #94a3b8; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; }
+      .t-tag { fill: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+      .edge { stroke: #475569; stroke-width: 1.3; fill: none; marker-end: url(#arr); }
+      .edge-green { stroke: #10b981; stroke-width: 1.4; fill: none; marker-end: url(#arr-green); }
+      .edge-purple { stroke: #a78bfa; stroke-width: 1.3; fill: none; marker-end: url(#arr-purple); }
+      .edge-dash { stroke: #334155; stroke-width: 1.2; stroke-dasharray: 4 3; fill: none; marker-end: url(#arr); }
     </style>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
-    </marker>
-    <marker id="arrow-soft" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
-    </marker>
   </defs>
-  <rect class="bg" width="900" height="430" fill="#0b1120"/>
 
-  <text class="t3" x="24" y="30">LANE 1 · RAW ACTIVITY — UNTRUSTED, NEVER RECALLED DIRECTLY</text>
-  <rect class="zone" x="24" y="42" width="852" height="66" rx="8"/>
-  <rect class="panel" x="44" y="56" width="180" height="38" rx="6"/>
-  <text class="t1" x="134" y="72" text-anchor="middle">Agent turn</text>
-  <text class="t2" x="134" y="87" text-anchor="middle">tool calls · delegation</text>
-  <path class="edge" d="M224 75 H 292"/>
-  <rect class="panel" x="300" y="56" width="230" height="38" rx="6"/>
-  <text class="t1" x="415" y="72" text-anchor="middle">Raw ingest journal</text>
-  <text class="t2" x="415" y="87" text-anchor="middle">append-only ledger</text>
-  <path class="edge" d="M530 75 H 598"/>
-  <rect class="panel" x="606" y="56" width="250" height="38" rx="6"/>
-  <text class="t1" x="731" y="72" text-anchor="middle">Semantic review queue</text>
-  <text class="t2" x="731" y="87" text-anchor="middle">remember → private candidate only</text>
+  <!-- Background Base -->
+  <rect class="bg" width="960" height="520"/>
+  <rect width="960" height="520" fill="url(#grid)" opacity="0.7"/>
 
-  <text class="t3" x="24" y="140">LANE 2 · GOVERNED CANONICAL MEMORY — THE ONLY RECALL SOURCE</text>
-  <rect class="zone" x="24" y="152" width="852" height="112" rx="8"/>
-  <rect class="panel" x="44" y="168" width="196" height="38" rx="6"/>
-  <text class="t1" x="142" y="184" text-anchor="middle">Admission gate</text>
-  <text class="t2" x="142" y="199" text-anchor="middle">tombstone · duplicate · clash</text>
-  <path class="edge" d="M240 187 H 292"/>
-  <rect class="panel" x="300" y="168" width="230" height="38" rx="6"/>
-  <text class="t1" x="415" y="184" text-anchor="middle">Canonical store</text>
-  <text class="t2" x="415" y="199" text-anchor="middle">immutable versions · scoped</text>
-  <path class="edge" d="M530 187 H 598"/>
-  <rect class="panel" x="606" y="168" width="250" height="38" rx="6"/>
-  <text class="t1" x="731" y="184" text-anchor="middle">Recall</text>
-  <text class="t2" x="731" y="199" text-anchor="middle">ranked lane first · bounded budget</text>
-  <path class="edge" d="M731 206 V 236"/>
-  <rect class="panel" x="606" y="236" width="250" height="16" rx="4"/>
-  <rect class="bar-ok" x="606" y="236" width="186" height="16" rx="4"/>
-  <text class="t2" x="731" y="248" text-anchor="middle" fill="#0b1120">injected into prompt context</text>
+  <!-- ==================== LANE 1: RAW INGEST & AUDIT ==================== -->
+  <text class="t-tag" x="24" y="26">LANE 1 · RAW INGEST &amp; AUDIT — UNTRUSTED · NEVER RECALLED DIRECTLY</text>
+  <rect class="zone" x="24" y="34" width="912" height="74" rx="8"/>
 
-  <path class="edge-soft" d="M415 108 V 164"/>
-  <path class="edge-soft" d="M731 108 V 164"/>
+  <!-- Agent Execution -->
+  <rect class="card" x="40" y="48" width="190" height="46" rx="6"/>
+  <text class="t-title" x="135" y="67" text-anchor="middle">Agent Execution</text>
+  <text class="t-sub" x="135" y="83" text-anchor="middle">turns · tools · delegations</text>
 
-  <text class="t3" x="24" y="298">ENFORCEMENT BOUNDARY — IN SQL, NOT IN THE MODEL</text>
-  <rect class="zone" x="24" y="310" width="852" height="96" rx="8"/>
-  <rect class="panel" x="44" y="326" width="196" height="32" rx="6"/>
-  <text class="t1" x="142" y="347" text-anchor="middle">Membership</text>
-  <rect class="panel" x="260" y="326" width="196" height="32" rx="6"/>
-  <text class="t1" x="358" y="347" text-anchor="middle">Scope confinement</text>
-  <rect class="panel" x="476" y="326" width="196" height="32" rx="6"/>
-  <text class="t1" x="574" y="347" text-anchor="middle">Tombstones</text>
-  <rect class="panel" x="692" y="326" width="164" height="32" rx="6"/>
-  <text class="t1" x="774" y="347" text-anchor="middle">Trust labels</text>
-  <text class="t2" x="142" y="374" text-anchor="middle">read + write boundary</text>
-  <text class="t2" x="358" y="374" text-anchor="middle">project vs private</text>
-  <text class="t2" x="574" y="374" text-anchor="middle">no silent resurrection</text>
-  <text class="t2" x="774" y="374" text-anchor="middle">4 labels per row</text>
-  <text class="t2" x="450" y="396" text-anchor="middle" fill="#64748b">A wrong memory is worse than no memory: nothing enters recall without a lifecycle, and nothing stays without a tombstone.</text>
+  <path class="edge" d="M230 71 H 290"/>
+
+  <!-- Raw Ingest Journal -->
+  <rect class="card" x="296" y="48" width="240" height="46" rx="6"/>
+  <text class="t-title" x="416" y="67" text-anchor="middle">Raw Ingest Journal</text>
+  <text class="t-sub" x="416" y="83" text-anchor="middle">append-only ledger · immutable</text>
+
+  <path class="edge" d="M536 71 H 596"/>
+
+  <!-- Semantic Review Queue -->
+  <rect class="card" x="602" y="48" width="318" height="46" rx="6"/>
+  <text class="t-title" x="761" y="67" text-anchor="middle">Semantic Review Queue</text>
+  <text class="t-sub" x="761" y="83" text-anchor="middle">governed triage: remember | ignore | defer</text>
+
+  <!-- Downward bridge to Lane 2 -->
+  <path class="edge-dash" d="M416 94 V 132"/>
+  <path class="edge-dash" d="M761 94 V 132"/>
+
+  <!-- ==================== LANE 2: CANONICAL GOVERNED STORE & HYBRID SEARCH ==================== -->
+  <text class="t-tag" x="24" y="132">LANE 2 · CANONICAL STORE &amp; LOCAL HYBRID SEARCH — AUTHORITATIVE MEMORY</text>
+  <rect class="zone" x="24" y="140" width="912" height="236" rx="8"/>
+
+  <!-- Admission Gate -->
+  <rect class="card" x="40" y="154" width="190" height="88" rx="6"/>
+  <text class="t-title" x="135" y="174" text-anchor="middle">Admission Gate</text>
+  <text class="t-sub" x="135" y="193" text-anchor="middle">tombstones · duplicate hash</text>
+  <text class="t-sub" x="135" y="209" text-anchor="middle">conflict detection · scope check</text>
+  <text class="t-sub" x="135" y="225" text-anchor="middle">candidate → accepted</text>
+
+  <path class="edge" d="M230 198 H 290"/>
+
+  <!-- Canonical Store (SQLite WAL) -->
+  <rect class="card-accent" x="296" y="154" width="240" height="88" rx="6"/>
+  <text class="t-title" x="416" y="174" text-anchor="middle" fill="#60a5fa">Canonical Store</text>
+  <text class="t-sub" x="416" y="193" text-anchor="middle">SQLite WAL · 18 migrations</text>
+  <text class="t-sub" x="416" y="209" text-anchor="middle">immutable bitemporal history</text>
+  <text class="t-sub" x="416" y="225" text-anchor="middle">valid_from / valid_until</text>
+
+  <path class="edge-purple" d="M416 242 V 268"/>
+
+  <!-- Vector Embedding Store -->
+  <rect class="card-purple" x="296" y="274" width="240" height="88" rx="6"/>
+  <text class="t-title" x="416" y="294" text-anchor="middle" fill="#c084fc">Vector Embeddings</text>
+  <text class="t-sub" x="416" y="312" text-anchor="middle">memory_embedding (IEEE 754)</text>
+  <text class="t-sub" x="416" y="328" text-anchor="middle">FastEmbed (in-process) · Ollama</text>
+  <text class="t-sub" x="416" y="344" text-anchor="middle">9Router · OpenRouter · OpenAI</text>
+
+  <!-- Connect Store & Embedding to Hybrid Search -->
+  <path class="edge" d="M536 198 H 596"/>
+  <path class="edge-purple" d="M536 318 H 596"/>
+
+  <!-- Local Hybrid Recall -->
+  <rect class="card-green" x="602" y="154" width="318" height="132" rx="6"/>
+  <text class="t-title" x="761" y="176" text-anchor="middle" fill="#34d399">Hybrid Recall (RRF k=60)</text>
+  <text class="t-sub" x="761" y="198" text-anchor="middle">Lane A: FTS5 BM25 + Thai Bigram (Lexical)</text>
+  <text class="t-sub" x="761" y="216" text-anchor="middle">Lane B: Cosine Similarity (Semantic Vector)</text>
+  <text class="t-sub" x="761" y="234" text-anchor="middle">Score(d) = 1/(60+rank_fts) + 1/(60+rank_vec)</text>
+  <text class="t-sub" x="761" y="254" text-anchor="middle" fill="#6ee7b7">Exact terms + Semantic intent amplified</text>
+  <text class="t-sub" x="761" y="272" text-anchor="middle">Token-budget bounded · Zero starvation</text>
+
+  <!-- Output / Consumption -->
+  <path class="edge-green" d="M761 286 V 308"/>
+  <rect class="card" x="602" y="312" width="318" height="50" rx="6"/>
+  <text class="t-title" x="761" y="331" text-anchor="middle">Consumers &amp; Deliverables</text>
+  <text class="t-sub" x="761" y="349" text-anchor="middle">Python SDK (MemCore) · Prompt Inject · Export (AGENTS.md)</text>
+
+  <!-- ==================== LANE 3: ENFORCEMENT BOUNDARY ==================== -->
+  <text class="t-tag" x="24" y="400">ENFORCEMENT BOUNDARY — GUARANTEED IN SQL &amp; CODE · NEVER DELEGATED TO LLM</text>
+  <rect class="zone" x="24" y="408" width="912" height="96" rx="8"/>
+
+  <!-- Four Pillars -->
+  <rect class="card" x="40" y="420" width="206" height="42" rx="6"/>
+  <text class="t-title" x="143" y="438" text-anchor="middle">SQL Scope Confinement</text>
+  <text class="t-sub" x="143" y="452" text-anchor="middle">project vs private boundary</text>
+
+  <rect class="card" x="264" y="420" width="206" height="42" rx="6"/>
+  <text class="t-title" x="367" y="438" text-anchor="middle">Tombstone Anti-Resurrection</text>
+  <text class="t-sub" x="367" y="452" text-anchor="middle">prevents semantic drift replay</text>
+
+  <rect class="card" x="488" y="420" width="206" height="42" rx="6"/>
+  <text class="t-title" x="591" y="438" text-anchor="middle">4 Explicit Trust Labels</text>
+  <text class="t-sub" x="591" y="452" text-anchor="middle">scope · lifecycle · verify · fresh</text>
+
+  <rect class="card" x="712" y="420" width="208" height="42" rx="6"/>
+  <text class="t-title" x="816" y="438" text-anchor="middle">Zero-Daemon Stdlib Core</text>
+  <text class="t-sub" x="816" y="452" text-anchor="middle">100% offline · in-process ONNX</text>
+
+  <!-- Bottom Principle -->
+  <text class="t-sub" x="480" y="488" text-anchor="middle" fill="#64748b">A wrong memory is worse than no memory: raw history stays isolated, while canonical recall is strictly governed and ranked.</text>
 </svg>

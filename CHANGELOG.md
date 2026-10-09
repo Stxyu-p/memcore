@@ -4,6 +4,45 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.7] - 2026-10-09
+
+Comprehensive function sweep hardening and performance optimizations. Every change was profiled and validated on an isolated store with regression tests.
+
+### Fixed
+- **Backup snapshot same-second collision overwrite** (major).
+  `backup_store` formatted timestamps at 1-second resolution (`%Y%m%dT%H%M%SZ`),
+  causing consecutive snapshots within the same second to silently overwrite the
+  previous file via `os.replace`. It now automatically appends a sequential
+  suffix (`_<seq>`) when the target filename exists, and `_SNAPSHOT_RE` regex
+  now matches sequential files as managed recovery snapshots.
+- **CLI `doctor` falsely failed on isolated/staging databases** (major).
+  Running `memcore --db /path/staging.db doctor` failed with exit code 1 because
+  it checked the host's global `~/.hermes/config.yaml` and flagged `store_mismatch`.
+  Added `--skip-binding-check` flag to `doctor` to skip host profile binding drift
+  checks on test/staging stores, and enabled common CLI arguments so `--db` can
+  be passed before or after the `doctor` command.
+- **Ingest pre-classifier falsely admitted negative statements as memories** (minor).
+  `_EXPLICIT_MEMORY_RE` matched `\bremember\b` anywhere in a turn, turning negative
+  or conversational phrases (e.g. *"without explicit remember command"*, *"don't remember this"*,
+  *"ไม่ต้องจำว่า..."*) into `candidate` memories. Added `_NEGATIVE_MEMORY_RE` to
+  intercept negated contexts and route them safely to `review` (`semantic_review_required`).
+
+### Performance
+- **`import_memories` batch transaction savepoints** (3.5x throughput gain).
+  Replaced per-row `BEGIN IMMEDIATE` + `COMMIT` with per-row `SAVEPOINT item_sp`
+  and flushed transactions in 100-item batches. Preserves 100% per-item rollback
+  isolation while cutting SQLite disk fsync overhead.
+  - n=100: **1,655 rows/s** (was 529 rows/s, 3.1x faster)
+  - n=1,000: **906 rows/s** (was 359 rows/s, 2.5x faster)
+  - n=4,000: **585 rows/s** (was 165 rows/s, 3.5x faster — 24.2s down to 6.8s)
+
+### Validation
+- Harness 506 OK (2 expected failures, exit 0), total run time 50.076s.
+- 129 multi-layer functional sweep probes across CLI (59/59), SDK (9/9), Core (22/22),
+  Store (5/5), and Subsystems (34/34) all pass 100%.
+- New regressions: rapid backup collision preservation (`test_backup_rapid_collision_guard_preserves_all_snapshots`),
+  negative ingest context isolation (`test_negative_memory_contexts_prevent_candidate_admission`).
+
 ## [0.8.6] - 2026-10-08
 
 Review fixes. Every finding was reproduced on an isolated store before the fix.

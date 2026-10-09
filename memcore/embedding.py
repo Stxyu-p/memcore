@@ -10,6 +10,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from typing import Any
 
 DEFAULT_ENDPOINT = os.environ.get(
     'MEMCORE_EMBEDDING_URL', 'http://localhost:20128/v1/embeddings'
@@ -53,6 +54,8 @@ def resolve_config(
     p_name = (provider or os.environ.get('MEMCORE_EMBEDDING_PROVIDER', '')).lower()
     if p_name in ('none', 'off', 'disabled'):
         return None, '', None
+    if p_name in ('local', 'fastembed'):
+        return 'in-process', model or 'BAAI/bge-small-en-v1.5', None
 
     preset = PROVIDERS.get(p_name, {})
     target_url = (
@@ -141,6 +144,22 @@ def get_embedding(
     return None
 
 
+_fastembed_cache: dict[str, Any] = {}
+
+
+def _get_fastembed_batch(texts: list[str], model: str | None = None) -> list[list[float]] | None:
+    # ponytail: lazy-load fastembed if installed, None if missing. Zero extra deps on core.
+    try:
+        from fastembed import TextEmbedding
+    except ImportError:
+        return None
+    model_name = model or 'BAAI/bge-small-en-v1.5'
+    if model_name not in _fastembed_cache:
+        _fastembed_cache[model_name] = TextEmbedding(model_name=model_name)
+    embedder = _fastembed_cache[model_name]
+    return [list(vec) for vec in embedder.embed(texts)]
+
+
 def get_embeddings_batch(
     texts: list[str],
     endpoint: str | None = None,
@@ -157,6 +176,10 @@ def get_embeddings_batch(
         return []
     if is_circuit_open():
         return None
+
+    p_name = (provider or os.environ.get('MEMCORE_EMBEDDING_PROVIDER', '')).lower()
+    if p_name in ('local', 'fastembed'):
+        return _get_fastembed_batch(texts, model=model)
 
     target_endpoint, target_model, target_key = resolve_config(
         provider=provider, endpoint=endpoint, model=model, api_key=api_key

@@ -4,11 +4,12 @@ All writes: tombstone admission guard -> short transaction -> audit event.
 All reads: scope enforced in SQL WHERE (never post-filtering).
 """
 import hashlib
+import json
+import math
 import re
 import sqlite3
-import uuid
-import json
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 
 from . import store
@@ -1836,6 +1837,78 @@ def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
         (project_id, agent_id) + tuple(substr_terms) + detail_params +
         tuple(retention_params) + (min(500, limit * DISTINCT_OVERFETCH),)
     ).fetchall()
+
+
+def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    """Compute cosine similarity between two float vectors.
+
+    Returns float in [-1.0, 1.0]. Zero-vectors or mismatched dims return 0.0.
+    """
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for a, b in zip(vec_a, vec_b):
+        dot += a * b
+        norm_a += a * a
+        norm_b += b * b
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
+
+
+def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
+                        limit: int = 20, detail_filter: str = '',
+                        detail_params: tuple = ()) -> list[tuple]:
+    """Retrieve candidate memories having embeddings and rank by cosine similarity.
+
+    Returns rows matching the standard 9-tuple shape:
+    (id, scope, lifecycle, verification, freshness, content, owner_agent_id, rank, claim_fingerprint)
+    """
+    if not query_vec:
+        return []
+    if not store._table_exists(conn, 'memory_embedding'):
+        return []
+
+    now_iso = _eval_now_iso()
+    sql = (
+        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
+        '       v.content, m.owner_agent_id, e.vector, '
+        '       m.claim_fingerprint, m.pinned '
+        'FROM memory m '
+        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+        'JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
+        'WHERE m.project_id = ? '
+        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
+        '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter
+    )
+    params = (
+        now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
+        now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS,
+        project_id, agent_id
+    ) + detail_params
+
+    cur = conn.execute(sql, params)
+    candidates = []
+    for row in cur.fetchall():
+        mid, scope, lifecycle, verif, freshness, content, owner, blob, fp, pinned = row
+        doc_vec = store.unpack_vector(blob)
+        sim = cosine_similarity(query_vec, doc_vec)
+        # rank: lower is better to match bm25 convention (e.g. -sim)
+        rank = -sim
+        candidates.append((mid, scope, lifecycle, verif, freshness, content, owner, rank, fp, pinned))
+
+    def _cand_sort_key(c):
+        pinned_order = 0 if c[9] else 1
+        lifecycle_order = {'accepted': 0, 'conflict': 1}.get(c[2], 2)
+        verif_order = {'user_authoritative': 0, 'runtime_verified': 1, 'source_backed': 2}.get(c[3], 3)
+        return (pinned_order, lifecycle_order, verif_order, c[7])
+
+    candidates.sort(key=_cand_sort_key)
+    return [c[:9] for c in candidates[:limit]]
 
 
 def search(conn, project_id, agent_id, query, limit=20,

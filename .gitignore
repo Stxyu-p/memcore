@@ -8,6 +8,12 @@ dist/
 build/
 scratch/
 
+# Agent execution artifacts & plans (not part of the project)
+progress.md
+findings.md
+task_plan*.md
+docs/superpowers/
+
 # MemCore's own export output: generated files, never committed here.
 MEMORY.md
 GEMINI.md

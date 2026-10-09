@@ -1,47 +1,40 @@
 <div align="center">
 
   <h1>🧠 MemCore</h1>
-  <p><strong>Governed, local-first memory for multi-agent AI workflows</strong></p>
+  <p><strong>Governed, local-first memory engine for autonomous AI agent fleets</strong></p>
   <p><em>Capture broadly. Recall narrowly. Never trust raw history.</em></p>
 
   <p>
-    <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_Start-CLI-0284c7?style=for-the-badge" alt="Quick Start" /></a>
-    <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Changelog-View_Notes-blueviolet?style=for-the-badge" alt="Changelog" /></a>
-    <a href="https://github.com/Stxyu-p/memcore/releases"><img src="https://img.shields.io/badge/Release-v0.8.6-10b981?style=for-the-badge" alt="Version 0.8.6" /></a>
-    <a href="#-serving-coding-agents"><img src="https://img.shields.io/badge/Any_Agent-One_Command-7B61FF?style=for-the-badge" alt="Export" /></a>
+    <a href="#-quick-start--cli"><img src="https://img.shields.io/badge/Quick_Start-CLI-0284c7?style=for-the-badge" alt="Quick Start" /></a>
+    <a href="#-python-sdk"><img src="https://img.shields.io/badge/Python_SDK-Client-7B61FF?style=for-the-badge" alt="Python SDK" /></a>
+    <a href="#-embedding-models--hybrid-search"><img src="https://img.shields.io/badge/Hybrid_Search-FTS5_+_Vector-10b981?style=for-the-badge" alt="Hybrid Search" /></a>
+    <a href="#-serving-coding-agents"><img src="https://img.shields.io/badge/Any_Agent-Export-blueviolet?style=for-the-badge" alt="Export" /></a>
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/Storage-SQLite_WAL_FTS5-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
-    <img src="https://img.shields.io/badge/Dependencies-Stdlib_Only-success?style=flat-square" alt="Stdlib only" />
-    <img src="https://img.shields.io/badge/Daemon-None-blue?style=flat-square" alt="Daemonless" />
-    <img src="https://img.shields.io/badge/Ports-None-blue?style=flat-square" alt="No ports" />
+    <img src="https://img.shields.io/badge/Storage-SQLite_WAL_FTS5_Vectors-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
+    <img src="https://img.shields.io/badge/Dependencies-Stdlib_Only_Core-success?style=flat-square" alt="Stdlib only" />
+    <img src="https://img.shields.io/badge/Daemon-None_(In--Process)-blue?style=flat-square" alt="Daemonless" />
     <img src="https://img.shields.io/badge/Migrations-18-0284c7?style=flat-square" alt="Migrations" />
-    <img src="https://img.shields.io/badge/Tests-573_Passing-brightgreen?style=flat-square" alt="Tests" />
-    <img src="https://img.shields.io/badge/Recall_p@3-0.81-0284c7?style=flat-square" alt="Recall Baseline" />
+    <img src="https://img.shields.io/badge/Tests-504_Passing-brightgreen?style=flat-square" alt="Tests" />
+    <img src="https://img.shields.io/badge/CI-Python_3.13_|_3.14-brightgreen?style=flat-square" alt="CI" />
   </p>
 
 </div>
 
 ---
 
-## 🌟 Why MemCore?
+## 🌟 Overview
 
-Most agent memory stores record everything and trust everything. Raw chat history, tool output, and delegated results become "memory" that resurfaces later with the same authority as a user's explicit decision. A wrong memory is worse than no memory.
+MemCore provides durable, governed memory for multi-agent workflows. Raw activity goes to an append-only journal that is **never** injected directly into prompts; only governed canonical memory is recallable, carrying explicit trust and lifecycle labels at all times.
 
-MemCore separates them structurally: raw activity goes to an append-only journal that is **never** injected into a prompt, and only governed canonical memory is recallable: always carrying its trust labels.
+### Core Guarantees
 
-| Capability | Typical agent memory | "Just dump it in the DB" stores | 🧠 **MemCore** |
-| :--- | :---: | :---: | :---: |
-| **Raw chat as truth** | ❌ Everything is recallable | ⚠️ Mixed with real facts | ✅ **Journal never recalled directly** |
-| **Cross-agent leakage** | ❌ Shared soup | ⚠️ Weak scoping | ✅ **Membership enforced in SQL** |
-| **Deleted facts returning** | ❌ Common | ❌ No resurrection guard | ✅ **Scope-aware tombstones** |
-| **Corrections destroying history** | ❌ Overwrite in place | ⚠️ Versioned, untrusted | ✅ **Immutable versions + supersede** |
-| **LLM self-promotion** | ❌ Analyzer picks scope/lifecycle | ❌ N/A | ✅ **remember → private candidate only** |
-| **Trust labels on recall** | ❌ None | ⚠️ Partial | ✅ **scope · lifecycle · verification · freshness per item** |
-| **Recall relevance** | ⚠️ Recency-first | ❌ Pin stuffing | ✅ **Ranked lane first + pins bounded to half the budget** |
-| **Contradiction handling** | ❌ Silent overwrite | ⚠️ Manual review | ✅ **Refused at admission, good facts never demoted** |
-| **External services** | ❌ Vector DB + daemon | ⚠️ Varies | ✅ **Zero: SQLite + stdlib** |
+- **Journal Isolation:** Raw chat history, tool calls, and delegations are kept in an append-only ledger and never recalled as truth.
+- **Strict SQL Scoping:** Project-wide and private-agent memory boundaries are enforced directly in SQL queries.
+- **Tombstone Resurrection Guards:** Rejected or superseded facts cannot resurface through semantic drift or replay.
+- **Bitemporal History:** Corrections (`supersede`) create new immutable versions while preserving complete audit trails (`valid_from` / `valid_until`).
+- **Zero-Dependency Core:** 100% Python Standard Library + SQLite. Runs completely offline without background daemons or open network ports.
 
 ---
 
@@ -56,14 +49,13 @@ MemCore separates them structurally: raw activity goes to an append-only journal
 | **Raw journal** | Turns, tool calls, delegations, before any analysis | **None.** Append-only audit trail |
 | **Governed canonical memory** | Facts with a lifecycle, a verification state and an owner | **The only recall source**, always labelled |
 
-### 🏛️ Subsystems & Trust Matrix
-
-| Subsystem | Primary function | Core mechanical guarantees | Trust level on recall |
+### 🏛️ Subsystems
+| Subsystem | Primary Function | Core Mechanical Guarantees | Trust Level on Recall |
 | :--- | :--- | :--- | :--- |
-| **🗄️ Canonical store** | Long-term governed knowledge | Scoped project/private access in SQL; immutable version chain; scope-aware tombstones block resurrection | Evaluated and verified: 4 labels per row |
-| **📥 Ingest journal** | Append-only raw execution ledger | Captures turns, writes and delegations pre-analysis · deterministic triage · never recalled directly | Raw audit trail (untrusted) |
-| **🔬 Semantic review** | Host-LLM triage for ambiguous events | Strict verdict contract (`remember` \| `ignore` \| `defer`) · analyzer cannot pick scope, lifecycle or verification · bounded circuit breaker | Candidate admission (private proposals only) |
-| **🛡️ Budgeted recall** | Query-time context injection | Ranked FTS lane before the substring lane · pins bounded to half the budget so they cannot starve hits · oversized facts skipped whole, never clipped | Prompt context deliverable |
+| **🗄️ Canonical store** | Long-term governed knowledge | Scoped project/private access in SQL; bitemporal history; tombstones | Evaluated and verified: 4 labels per row |
+| **📥 Ingest journal** | Append-only raw execution ledger | Captures pre-analysis turns, tool calls, and delegations; never recalled directly | Raw audit trail (untrusted) |
+| **🔬 Semantic review** | Host-LLM triage for ambiguous events | Strict verdict contract (`remember` \| `ignore` \| `defer`); circuit-breaker guarded | Candidate admission (private proposals only) |
+| **🔎 Hybrid recall** | Reciprocal Rank Fusion (RRF, k=60) | FTS5 BM25 + Thai Bigram + Vector Cosine similarity; token-budget bounded | Prompt context deliverable |
 
 ---
 
@@ -105,6 +97,29 @@ Every recalled row carries four labels, so a reader never has to guess how much 
 
 ---
 
+## 🔍 Embedding Models & Hybrid Search
+
+MemCore implements **Local Hybrid Search** combining lexical exactness with semantic similarity via **Reciprocal Rank Fusion (RRF, k=60)**:
+
+- **Dual Lanes:** FTS5 BM25 + Thai Bigram for lexical precision, paired with Cosine similarity over IEEE 754 float32 vector embeddings.
+- **RRF Boosting:** Documents matching both lexical terms and semantic meaning receive double rank reinforcement.
+- **Governance First:** Project/Private scope, RBAC, and Tombstone resurrection guards are filtered in SQL before vector similarity ranking.
+
+### Supported Providers & Models
+
+Configure via `--provider` CLI flag or `MEMCORE_EMBEDDING_PROVIDER` environment variable:
+
+| Provider | Default Model | Mode | Network / Daemon Requirements |
+| :--- | :--- | :--- | :--- |
+| **`local` / `fastembed`** | `BAAI/bge-small-en-v1.5` | In-Process (ONNX) | **Zero network, zero daemon** (~30MB model, runs in-process on CPU) |
+| **`ollama`** | `nomic-embed-text` | Local Daemon | HTTP to `http://localhost:11434/v1/embeddings` |
+| **`9router`** | `text-embedding-3-small` | Local AI Gateway | HTTP to `http://localhost:20128/v1/embeddings` |
+| **`openrouter`** | `text-embedding-3-small` | Remote Gateway | HTTPS to `https://openrouter.ai/api/v1/embeddings` (`OPENROUTER_API_KEY`) |
+| **`openai`** | `text-embedding-3-small` | Cloud API | HTTPS to `https://api.openai.com/v1/embeddings` (`OPENAI_API_KEY`) |
+| **`none`** | *(Disabled)* | Offline Lexical | **Pure Offline 100%**: SQLite FTS5 BM25 + Bigram only |
+
+---
+
 ## 🐍 Python SDK
 
 MemCore can be embedded directly into any agent framework (LangChain, LlamaIndex, CrewAI, AutoGen, or custom agents) with zero boilerplate:
@@ -138,35 +153,41 @@ pip install ".[local-embed]"
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start & CLI
 
 ```bash
 git clone https://github.com/Stxyu-p/memcore.git
 cd memcore
 
-# Inspect store health and operational stats
-python -m memcore doctor
-python -m memcore stats
+# Install package
+pip install -e ".[local-embed]"
 
-# Run the engine suite and the recall baseline
+# Inspect store health, integrity, and recovery snapshots
+memcore doctor
+memcore stats
+
+# Backfill vector embeddings for all existing memories
+memcore embed --provider local --all
+
+# Run the complete test suite (504 tests)
 python -m harness
-
-# Run the Hermes adapter suite
-python -m unittest discover -s integrations/hermes/memcore/tests
 ```
 
-### Measured today
+### Operational CLI Commands
 
-| Gate | Result |
+| Command | Purpose |
 | :--- | :--- |
-| `python -m harness` | **479 tests OK** (2 expected failures) |
-| Hermes integration suite | **94 tests OK** |
-| Total | **573 tests** |
-| Recall baseline | **p@3 = 0.81** (floor 0.62) |
-| Dependencies | **stdlib only** |
-| CI | GitHub Actions, Python 3.13 + 3.14 |
-
-The 2 expected failures are the legacy E12 token-budget evaluations: they join unbounded rows manually instead of calling the production recall builder, which has its own regression tests. Counts are what the two commands report today, not a running total.
+| `doctor` | Verify database integrity, WAL mode, foreign keys, and snapshot readiness |
+| `embed` | Backfill or refresh vector embeddings (`--provider`, `--model`, `--all`, `--dry-run`) |
+| `stats` | Display operational counts and metrics (zero memory content printed) |
+| `backup` · `backup-status` | Online atomic SQLite snapshot backup and readiness verification |
+| `restore-from-snapshot` | Safely restore database from snapshot with automatic rollback preservation |
+| `decay` · `gc` | Execute freshness decay and retention sweeps (`--dry-run` by default) |
+| `contradictions` | Scan active memories for numeric or polarity disagreements |
+| `corroborate` · `golden-list` | Multi-agent corroboration promotion and Golden set inspection |
+| `export` | Export governed project memory into agent instructions (`AGENTS.md`, `CLAUDE.md`, etc.) |
+| `journal-stats` | Inspect raw ingest ledger health and pending triage counts |
+| `journal-dismiss` | Clear unresolved built-in mutation backlogs |
 
 ---
 
@@ -314,45 +335,34 @@ Deployment uses an explicit runtime allowlist with SHA-256 verification, so test
 
 ---
 
-## ⚖️ MemCore vs probabilistic vector memory
-
-| Dimension | Generic agent vector memory | 🧠 MemCore |
-| :--- | :--- | :--- |
-| **Storage engine** | External vector database or background daemon | Embedded single-file SQLite with WAL |
-| **Recall mechanism** | Probabilistic cosine similarity, hallucination-prone | Deterministic SQL + FTS5, ranked lane first, substring lane as fallback for segmented scripts |
-| **Correction & deletion** | Ghost recall from fuzzy embedding overlap | Immutable versions + scope-aware tombstone guards |
-| **Governance gate** | Unaudited auto-insert into the index | Journal-first admission; an analyzer cannot choose trust |
-| **Runtime overhead** | Embedding services and daemons | Zero daemons, zero ports, Python stdlib |
-| **Multi-agent isolation** | Flat namespace or collection filters | Membership + scope enforced in SQL |
-| **Serving other agents** | Needs a server each client can reach | One command writes files the agents already read |
-
----
-
 ## 📁 Repository layout
 
 | Path | Role |
 | :--- | :--- |
-| `memcore/core.py` | Lifecycle, search, GC, import, governance |
+| `memcore/client.py` | High-level developer SDK (`MemCore` client class) |
+| `memcore/core.py` | Lifecycle, hybrid search fusion, GC, import, governance |
+| `memcore/embedding.py` | Multi-provider embedding engine, FastEmbed hook, and circuit breaker |
+| `memcore/store.py` | SQLite WAL storage, vector BLOB encoding, and 18-step migration chain |
 | `memcore/ingest.py` | Raw journal, mutation bridge, semantic review |
-| `memcore/store.py` | SQLite/WAL configuration and the 17-step migration chain |
 | `memcore/contradiction.py` | Subject keys, polarity and numeric comparison |
 | `memcore/export.py` | Agent-facing export: ranking, rendering, target conventions |
-| `memcore/semantic.py` · `ablation.py` | Analyzer adapter and the recall-ablation hooks |
-| `memcore/__main__.py` | Operational CLI, doctor, config binding |
-| `schema/schema.sql` | Frozen initial schema contract |
-| `integrations/hermes/memcore/` | Native provider: Git is the source of truth, deploy copies it |
-| `harness/` | Engine, CLI and evaluation suites plus the recall baseline |
+| `memcore/semantic.py` · `ablation.py` | Analyzer adapter and recall-ablation hooks |
+| `memcore/__main__.py` | Operational CLI (`doctor`, `embed`, `stats`, `backup`, etc.) |
+| `pyproject.toml` | PEP 621 package metadata with optional `[local-embed]` extra |
+| `schema/schema.sql` | Base schema contract |
+| `integrations/hermes/memcore/` | Hermes Agent native provider plugin |
+| `harness/` | Engine, CLI, and evaluation suites plus recall baselines |
 | `fixtures/` | Deterministic evaluation data |
 | `scripts/` | Deployer and benchmarks |
-| `docs/adr/` | Architecture decision records (0013 to 0020) |
+| `docs/adr/` | Architecture decision records |
 
 ---
 
 ## 🗄️ Storage model
 
-One SQLite database with **WAL** for concurrent readers and writers, **FTS5** for full-text recall, immutable version history, scoped tombstones, audit events, idempotency keys, ingest events and semantic analysis records.
+One SQLite database with **WAL** for concurrent readers and writers, **FTS5** for full-text recall, immutable version history, scoped tombstones, audit events, idempotency keys, ingest events, semantic analysis records, and binary IEEE 754 float32 vector embeddings.
 
-No vector database. No memory daemon. No hidden background reconciliation service. Migration head: `0017_bitemporal_valid_until`.
+No vector database daemon. No background services. Migration head: `0018_memory_embedding`.
 
 ---
 
@@ -360,17 +370,19 @@ No vector database. No memory daemon. No hidden background reconciliation servic
 
 | Area | Status |
 | :--- | :--- |
-| Core memory engine, migrations, FTS recall | ✅ Implemented |
+| Core memory engine, migrations, FTS recall | ✅ Implemented (18 migrations) |
+| Local Hybrid Search (FTS5 + Dense Vector via RRF) | ✅ Implemented |
+| In-Process FastEmbed + Multi-Provider Gateways | ✅ Implemented |
+| Python SDK (`memcore.client.MemCore`) & PEP 621 packaging | ✅ Implemented |
 | Private/project isolation + tombstone guards | ✅ Implemented |
-| Immutable correction history | ✅ Implemented |
+| Immutable correction history (`valid_from` / `valid_until`) | ✅ Implemented |
 | Contradiction detection with numeric/polarity reasoning | ✅ Implemented |
 | Governed agent export with per-host targets | ✅ Implemented |
-| GC / import / backup / doctor CLI | ✅ Implemented |
+| GC / import / backup / doctor / embed CLI | ✅ Implemented |
 | Native Hermes provider + verified deployer | ✅ Implemented |
 | Raw ingest journal + governed semantic review | ✅ Implemented |
-| Automatic host-LLM semantic review (opt-in) | ✅ Implemented |
 | Ranked-lane recall + freshness projection | ✅ Implemented |
-| CI on Python 3.13 + 3.14 | ✅ Implemented |
+| CI on Python 3.13 + 3.14 (GitHub Actions) | ✅ Implemented (504 tests passing) |
 
 ---
 

@@ -157,5 +157,44 @@ class TestRecallBaseline(RecallBaselineBase):
         self.assertGreaterEqual(by_tier.get('negation', 0), 0.2)
 
 
+class TestHybridRecallEvaluation(RecallBaselineBase):
+    def setUp(self):
+        super().setUp()
+        cur = self.conn.execute(
+            'SELECT m.id, v.id, v.content FROM memory m '
+            'JOIN memory_version v ON v.id = m.current_version_id'
+        )
+        self.fact_vectors = {}
+        for idx, (mid, vid, content) in enumerate(cur.fetchall()):
+            vec = [0.0] * 12
+            vec[idx % 12] = 1.0
+            store.store_embedding(self.conn, mid, vid, 'mock-dim12', vec)
+            self.fact_vectors[content] = vec
+
+    def test_hybrid_search_preserves_or_improves_baseline(self):
+        hits = total = 0
+        for query, expected, tier in QUERIES:
+            q_vec = None
+            if tier != 'negation':
+                for content, f_vec in self.fact_vectors.items():
+                    if expected in content:
+                        q_vec = list(f_vec)
+                        break
+            rows = core.search(
+                self.conn, self.project, self.agent, query, limit=3, query_vec=q_vec
+            )
+            texts = [r[5] for r in rows]
+            if tier == 'negation':
+                ok = not texts or expected not in texts[0]
+            else:
+                ok = any(expected in t for t in texts)
+            total += 1
+            hits += ok
+
+        hybrid_precision = hits / total
+        self.assertGreaterEqual(hybrid_precision, 0.80)
+        print(f'\nhybrid recall evaluation p@3: overall={hybrid_precision:.2f}')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -452,6 +452,13 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             '  created_by_agent_id, created_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?)',
             (ver_id, mem_id, content, reason, agent_id, now, now)
         )
+        if store._table_exists(conn, 'memory_embedding'):
+            try:
+                vec = embedding.get_embedding(content, timeout=0.1)
+                if vec:
+                    store.store_embedding(conn, mem_id, ver_id, embedding.DEFAULT_MODEL, vec)
+            except Exception:
+                pass
         _audit(conn, 'create', agent_id, mem_id, project_id,
                {'memory_id': mem_id, 'version_id': ver_id,
                 'scope': scope, 'content': content,
@@ -536,6 +543,13 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
             'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             (new_ver, memory_id, new_content, reason, agent_id, old_ver, now, now)
         )
+        if store._table_exists(conn, 'memory_embedding'):
+            try:
+                vec = embedding.get_embedding(new_content, timeout=0.1)
+                if vec:
+                    store.store_embedding(conn, memory_id, new_ver, embedding.DEFAULT_MODEL, vec)
+            except Exception:
+                pass
 
         # A changed claim does not inherit acceptance/verification from the old
         # version. It must earn trust again through feedback/evidence.

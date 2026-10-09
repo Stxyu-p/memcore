@@ -8,7 +8,7 @@ import sys
 import time
 import pathlib
 
-from . import store, core, ingest, export as export_mod
+from . import store, core, ingest, export as export_mod, embedding
 
 
 DEFAULT_DB = str(pathlib.Path.home() / '.memcore' / 'memory.db')
@@ -1562,6 +1562,57 @@ def cmd_doctor(args):
         sys.exit(1)
 
 
+def cmd_embed(args):
+    conn = _open(args)
+    model = getattr(args, 'model', None) or embedding.DEFAULT_MODEL
+    endpoint = getattr(args, 'endpoint', None) or embedding.DEFAULT_ENDPOINT
+    limit = None if getattr(args, 'all_memories', False) else getattr(args, 'limit', 100)
+    dry_run = getattr(args, 'dry_run', False)
+
+    query = (
+        'SELECT m.id, v.id, v.content '
+        'FROM memory m '
+        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+        'LEFT JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
+        'WHERE e.vector IS NULL AND m.lifecycle != ? '
+        'ORDER BY m.created_at DESC'
+    )
+    params = ('tombstoned',)
+    if limit is not None:
+        query += ' LIMIT ?'
+        params += (limit,)
+
+    rows = conn.execute(query, params).fetchall()
+    if dry_run:
+        print(f'Dry run: {len(rows)} memories need embedding (model: {model})')
+        conn.close()
+        return
+
+    if not rows:
+        print('All memories are already embedded.')
+        conn.close()
+        return
+
+    chunk_size = 20
+    total_embedded = 0
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        texts = [r[2] for r in chunk]
+        vectors = embedding.get_embeddings_batch(
+            texts, endpoint=endpoint, model=model
+        )
+        if not vectors or len(vectors) != len(chunk):
+            print(f'Failed to fetch embeddings from {endpoint}')
+            break
+        for (mid, vid, _), vec in zip(chunk, vectors):
+            store.store_embedding(conn, mid, vid, model, vec)
+            total_embedded += 1
+        conn.commit()
+
+    print(f'Embedded {total_embedded} memories (model: {model})')
+    conn.close()
+
+
 def main(argv=None):
     _configure_stdio_utf8()
     parser = argparse.ArgumentParser(
@@ -1835,6 +1886,14 @@ def main(argv=None):
     p.add_argument('--as-of', required=True, dest='as_of',
                    help="ISO timestamp, e.g. '2026-09-01T00:00:00Z'")
     p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser('embed', help='backfill or refresh vector embeddings', parents=[common])
+    p.add_argument('--limit', type=int, default=100, help='max memories to embed (default 100)')
+    p.add_argument('--all', dest='all_memories', action='store_true', help='embed all memories without limit')
+    p.add_argument('--model', default=None, help='embedding model name')
+    p.add_argument('--endpoint', default=None, help='embedding endpoint URL')
+    p.add_argument('--dry-run', action='store_true', help='preview without storing vectors')
+    p.set_defaults(func=cmd_embed)
 
     sub.add_parser('doctor', help='integrity + drift checks').set_defaults(func=cmd_doctor)
 

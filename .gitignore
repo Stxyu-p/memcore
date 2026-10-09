@@ -7,6 +7,7 @@ __pycache__/
 dist/
 build/
 scratch/
+*.egg-info/
 
 # Agent execution artifacts & plans (not part of the project)
 progress.md

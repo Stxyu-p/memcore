@@ -41,15 +41,33 @@ class MemCore:
         self.api_key = api_key
         self.conn = store.open_store(self.db_path)
         if auto_provision:
-            # ponytail: ensure project, agent, and membership exist for ergonomic zero-setup
-            self.conn.execute(
-                "INSERT OR IGNORE INTO project (id, name) VALUES (?, ?)",
-                (self.project, self.project),
-            )
-            self.conn.execute(
-                "INSERT OR IGNORE INTO agent (id, name, profile_key) VALUES (?, ?, ?)",
-                (self.agent, self.agent, self.agent),
-            )
+            # Resolve existing project or insert
+            p_row = self.conn.execute(
+                "SELECT id FROM project WHERE id=? OR name=?",
+                (self.project, self.project)
+            ).fetchone()
+            if p_row:
+                self.project = p_row[0]
+            else:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO project (id, name) VALUES (?, ?)",
+                    (self.project, self.project)
+                )
+
+            # Resolve existing agent or insert
+            a_row = self.conn.execute(
+                "SELECT id FROM agent WHERE id=? OR profile_key=? OR name=?",
+                (self.agent, self.agent, self.agent)
+            ).fetchone()
+            if a_row:
+                self.agent = a_row[0]
+            else:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO agent (id, name, profile_key) VALUES (?, ?, ?)",
+                    (self.agent, self.agent, self.agent),
+                )
+
+            # Ensure membership exists
             self.conn.execute(
                 "INSERT OR IGNORE INTO project_membership (project_id, agent_id, role) "
                 "VALUES (?, ?, 'owner')",

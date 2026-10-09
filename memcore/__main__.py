@@ -1905,7 +1905,7 @@ def main(argv=None):
     p = sub.add_parser('embed', help='backfill or refresh vector embeddings', parents=[common])
     p.add_argument('--limit', type=int, default=100, help='max memories to embed (default 100)')
     p.add_argument('--all', dest='all_memories', action='store_true', help='embed all memories without limit')
-    p.add_argument('--provider', choices=['9router', 'openrouter', 'openai', 'ollama', 'none'], default=None, help='embedding provider preset')
+    p.add_argument('--provider', choices=['9router', 'openrouter', 'openai', 'ollama', 'local', 'fastembed', 'none'], default=None, help='embedding provider preset')
     p.add_argument('--model', default=None, help='embedding model name')
     p.add_argument('--endpoint', default=None, help='embedding endpoint URL')
     p.add_argument('--api-key', default=None, help='API key for embedding provider')

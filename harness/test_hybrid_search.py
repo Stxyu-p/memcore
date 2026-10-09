@@ -50,7 +50,6 @@ class HybridSearchTests(unittest.TestCase):
     def test_rrf_boosts_documents_matching_both_lexical_and_vector(self):
         # Doc 1: matches FTS lexical only ("Database engine sqlite")
         m1, v1 = core.create_memory(self.conn, 'p1', 'a1', 'Database engine sqlite')
-        store.store_embedding(self.conn, m1, v1, 'mock', [0.1, 0.9])
 
         # Doc 2: matches both FTS lexical and vector semantics ("Database system storage")
         m2, v2 = core.create_memory(self.conn, 'p1', 'a1', 'Database system storage')

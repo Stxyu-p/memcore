@@ -9,8 +9,10 @@ from memcore import embedding
 
 class MockEmbeddingHandler(BaseHTTPRequestHandler):
     fail_requests = False
+    last_headers = None
 
     def do_POST(self):
+        MockEmbeddingHandler.last_headers = dict(self.headers)
         if MockEmbeddingHandler.fail_requests:
             self.send_response(500)
             self.end_headers()
@@ -108,3 +110,35 @@ class EmbeddingClientTests(unittest.TestCase):
         embedding.reset_circuit_breaker()
         vec = embedding.get_embedding("recovering", endpoint=self.endpoint)
         self.assertIsNotNone(vec)
+
+    def test_resolve_config_presets(self):
+        # 9router preset
+        url, model, _ = embedding.resolve_config(provider='9router')
+        self.assertEqual(url, 'http://localhost:20128/v1/embeddings')
+        self.assertEqual(model, 'text-embedding-3-small')
+
+        # openrouter preset
+        url, model, _ = embedding.resolve_config(provider='openrouter')
+        self.assertEqual(url, 'https://openrouter.ai/api/v1/embeddings')
+        self.assertEqual(model, 'text-embedding-3-small')
+
+        # ollama preset
+        url, model, _ = embedding.resolve_config(provider='ollama')
+        self.assertEqual(url, 'http://localhost:11434/v1/embeddings')
+        self.assertEqual(model, 'nomic-embed-text')
+
+        # disabled preset
+        url, _, _ = embedding.resolve_config(provider='none')
+        self.assertIsNone(url)
+
+    def test_authorization_header_sent_when_api_key_present(self):
+        MockEmbeddingHandler.last_headers = None
+        vec = embedding.get_embedding(
+            "test auth",
+            endpoint=self.endpoint,
+            api_key="sk-test-secret-12345",
+        )
+        self.assertIsNotNone(vec)
+        self.assertIsNotNone(MockEmbeddingHandler.last_headers)
+        auth = MockEmbeddingHandler.last_headers.get('Authorization')
+        self.assertEqual(auth, 'Bearer sk-test-secret-12345')

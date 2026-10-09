@@ -1564,10 +1564,20 @@ def cmd_doctor(args):
 
 def cmd_embed(args):
     conn = _open(args)
-    model = getattr(args, 'model', None) or embedding.DEFAULT_MODEL
-    endpoint = getattr(args, 'endpoint', None) or embedding.DEFAULT_ENDPOINT
+    provider = getattr(args, 'provider', None)
+    model = getattr(args, 'model', None)
+    endpoint = getattr(args, 'endpoint', None)
+    api_key = getattr(args, 'api_key', None)
     limit = None if getattr(args, 'all_memories', False) else getattr(args, 'limit', 100)
     dry_run = getattr(args, 'dry_run', False)
+
+    target_endpoint, target_model, _ = embedding.resolve_config(
+        provider=provider, endpoint=endpoint, model=model, api_key=api_key
+    )
+    if not target_endpoint:
+        print('Embedding is disabled or no valid endpoint configured.')
+        conn.close()
+        return
 
     query = (
         'SELECT m.id, v.id, v.content '
@@ -1584,7 +1594,8 @@ def cmd_embed(args):
 
     rows = conn.execute(query, params).fetchall()
     if dry_run:
-        print(f'Dry run: {len(rows)} memories need embedding (model: {model})')
+        p_label = provider or 'default'
+        print(f'Dry run: {len(rows)} memories need embedding (provider: {p_label}, model: {target_model})')
         conn.close()
         return
 
@@ -1599,17 +1610,21 @@ def cmd_embed(args):
         chunk = rows[i:i + chunk_size]
         texts = [r[2] for r in chunk]
         vectors = embedding.get_embeddings_batch(
-            texts, endpoint=endpoint, model=model
+            texts,
+            endpoint=endpoint,
+            model=model,
+            api_key=api_key,
+            provider=provider,
         )
         if not vectors or len(vectors) != len(chunk):
-            print(f'Failed to fetch embeddings from {endpoint}')
+            print(f'Failed to fetch embeddings from {target_endpoint}')
             break
         for (mid, vid, _), vec in zip(chunk, vectors):
-            store.store_embedding(conn, mid, vid, model, vec)
+            store.store_embedding(conn, mid, vid, target_model, vec)
             total_embedded += 1
         conn.commit()
 
-    print(f'Embedded {total_embedded} memories (model: {model})')
+    print(f'Embedded {total_embedded} memories (model: {target_model})')
     conn.close()
 
 
@@ -1890,8 +1905,10 @@ def main(argv=None):
     p = sub.add_parser('embed', help='backfill or refresh vector embeddings', parents=[common])
     p.add_argument('--limit', type=int, default=100, help='max memories to embed (default 100)')
     p.add_argument('--all', dest='all_memories', action='store_true', help='embed all memories without limit')
+    p.add_argument('--provider', choices=['9router', 'openrouter', 'openai', 'ollama', 'none'], default=None, help='embedding provider preset')
     p.add_argument('--model', default=None, help='embedding model name')
     p.add_argument('--endpoint', default=None, help='embedding endpoint URL')
+    p.add_argument('--api-key', default=None, help='API key for embedding provider')
     p.add_argument('--dry-run', action='store_true', help='preview without storing vectors')
     p.set_defaults(func=cmd_embed)
 

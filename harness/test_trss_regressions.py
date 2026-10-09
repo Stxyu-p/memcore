@@ -25,3 +25,19 @@ class AdmissionRegressionTests(unittest.TestCase):
         self.assertEqual(ingest.classify_user_text('remember that ' + 'x' * 4100),
                          ('review', 'semantic_review_required', ''))
 
+    def test_negative_memory_contexts_prevent_candidate_admission(self):
+        negatives = (
+            'discussion without explicit remember command',
+            'please don\'t remember this',
+            'do not remember that secret',
+            'never remember this password',
+            'ไม่ต้องจำเรื่องนี้',
+            'อย่าจำว่าเราชอบชา',
+            'ห้ามจำคีย์นี้',
+        )
+        for text in negatives:
+            with self.subTest(text=text):
+                status, decision, _ = ingest.classify_user_text(text)
+                self.assertNotEqual(status, 'candidate')
+                self.assertEqual(decision, 'semantic_review_required')
+

@@ -104,6 +104,26 @@ class TestBackupCreation(BackupBase):
         finally:
             check.close()
 
+    def test_backup_rapid_collision_guard_preserves_all_snapshots(self):
+        """Rapid backup_store calls in the same second must not overwrite each other."""
+        self.remember('rapid backup 1')
+        b1 = store.backup_store(self.db_path)
+        self.remember('rapid backup 2')
+        b2 = store.backup_store(self.db_path)
+        self.remember('rapid backup 3')
+        b3 = store.backup_store(self.db_path)
+        self.assertNotEqual(b1, b2)
+        self.assertNotEqual(b2, b3)
+        self.assertTrue(b1.is_file())
+        self.assertTrue(b2.is_file())
+        self.assertTrue(b3.is_file())
+        # All 3 files must be recognized as managed snapshots
+        managed = store._managed_snapshots(b1.parent, pathlib.Path(self.db_path).stem)
+        managed_names = {p.name for p in managed}
+        self.assertIn(b1.name, managed_names)
+        self.assertIn(b2.name, managed_names)
+        self.assertIn(b3.name, managed_names)
+
     def test_backup_is_self_contained_without_sidecars(self):
         """A snapshot must not depend on the source's WAL sidecars."""
         self.remember('self contained probe')

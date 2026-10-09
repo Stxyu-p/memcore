@@ -1354,7 +1354,8 @@ def cmd_doctor(args):
     report['config_check'] = config_check
     report['binding_drift'] = []
     current_db = db_path.resolve(strict=False)
-    if config_check.get('available'):
+    skip_binding = getattr(args, 'skip_binding_check', False)
+    if config_check.get('available') and not skip_binding:
         for binding in config_check.get('bindings', []):
             reasons = []
             configured_db = pathlib.Path(binding['store_path']).expanduser().resolve(strict=False)
@@ -1459,7 +1460,9 @@ def cmd_doctor(args):
         print(f'  {name}: {agent} ({role})')
     print(f"agent name collisions: {report['agent_name_collisions'] or 'none'}")
     print(f"project name collisions: {report['project_name_collisions'] or 'none'}")
-    if report['config_check'].get('available'):
+    if skip_binding:
+        print('config bindings: skipped (--skip-binding-check)')
+    elif report['config_check'].get('available'):
         print('config bindings:')
         drift_by_profile = {
             item['profile']: item for item in report['binding_drift']
@@ -1547,8 +1550,8 @@ def cmd_doctor(args):
         or report['tombstone_violations']
         or report['agent_name_collisions']
         or report['project_name_collisions']
-        or report['binding_drift']
-        or report['config_check'].get('errors')
+        or (not skip_binding and bool(report['binding_drift']))
+        or (not skip_binding and bool(report['config_check'].get('errors')))
         or not report['store_parent_writable']
         or not report['fts_index']['in_sync']
         or not report['backups']['recovery_ready']
@@ -1912,7 +1915,10 @@ def main(argv=None):
     p.add_argument('--dry-run', action='store_true', help='preview without storing vectors')
     p.set_defaults(func=cmd_embed)
 
-    sub.add_parser('doctor', help='integrity + drift checks').set_defaults(func=cmd_doctor)
+    p = sub.add_parser('doctor', help='integrity + drift checks', parents=[common])
+    p.add_argument('--skip-binding-check', action='store_true',
+                   help='skip Hermes config binding drift checks (useful for test/staging stores)')
+    p.set_defaults(func=cmd_doctor)
 
     args = parser.parse_args(argv)
     # --db is accepted before or after the subcommand; the fallback is resolved

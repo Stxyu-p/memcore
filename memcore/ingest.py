@@ -30,6 +30,11 @@ _EXPLICIT_MEMORY_RE = re.compile(
     r'ฉันชอบ|ผมชอบ|ฉันใช้|ผมใช้|เราตกลง(?:กัน)?|เราตัดสินใจ(?:กัน)?|'
     r'ต่อไป(?=\s|ว่า|:|,|$))', re.IGNORECASE
 )
+_NEGATIVE_MEMORY_RE = re.compile(
+    r'\b(?:without|don\'t|dont|do not|never|not|no need to)\s+(?:explicit\s+)?remember\b|'
+    r'(?:ไม่ต้อง|อย่า|ห้าม|ไม่ได้)\s*(?:จำ|ช่วยจำ)',
+    re.IGNORECASE
+)
 _LEADING_REMEMBER_RE = re.compile(
     r'^\s*(?:(?:please\s+)?remember(?:\s+that)?|จำไว้(?:ว่า)?|ช่วยจำ(?:ไว้)?(?:ว่า)?|จำว่า)'
     r'[\s,:-]*', re.IGNORECASE
@@ -141,6 +146,8 @@ def classify_user_text(text):
         return 'ignore', 'non_user_signal', ''
     if _TRIVIAL_RE.fullmatch(text):
         return 'ignore', 'trivial', ''
+    if _NEGATIVE_MEMORY_RE.search(text):
+        return 'review', 'semantic_review_required', ''
     if _EXPLICIT_MEMORY_RE.search(text):
         candidate = _LEADING_REMEMBER_RE.sub('', text).strip() or text
         if len(candidate) > MAX_ANALYSIS_CANDIDATE_CHARS or '```' in candidate:

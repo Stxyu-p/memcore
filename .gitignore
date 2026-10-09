@@ -14,6 +14,7 @@ progress.md
 findings.md
 task_plan*.md
 docs/superpowers/
+.planning/
 
 # MemCore's own export output: generated files, never committed here.
 MEMORY.md

@@ -560,11 +560,11 @@ BACKUP_DIRNAME = 'backups'
 BACKUP_MAX_AGE_DAYS = 7
 BACKUP_MIN_COUNT = 3
 
-#: Snapshot filenames this module owns: ``<store-stem>-<YYYYmmddTHHMMSSZ>.db``.
+#: Snapshot filenames this module owns: ``<store-stem>-<YYYYmmddTHHMMSSZ>[_<seq>].db``.
 #: Anything else in the backup directory is a hand-made or legacy file and must
 #: not be counted as a managed recovery point.
 _SNAPSHOT_RE = re.compile(
-    r'^(?P<stem>.+)-(?P<stamp>\d{8}T\d{6}Z)\.db$'
+    r'^(?P<stem>.+)-(?P<stamp>\d{8}T\d{6}Z)(?:_(?P<seq>\d+))?\.db$'
 )
 
 
@@ -607,6 +607,11 @@ def backup_store(source_db: str, *, keep: int = 14) -> pathlib.Path:
 
     stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
     dest = backup_dir / f'{src_path.stem}-{stamp}.db'
+    if dest.exists():
+        seq = 1
+        while (backup_dir / f'{src_path.stem}-{stamp}_{seq}.db').exists():
+            seq += 1
+        dest = backup_dir / f'{src_path.stem}-{stamp}_{seq}.db'
     tmp = dest.with_suffix('.db.partial')
 
     src = sqlite3.connect(str(src_path), timeout=10, isolation_level=None)

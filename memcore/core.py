@@ -2539,92 +2539,114 @@ def plan_import(conn, items, project_id, scope='project', agent_id=None):
     return plan
 
 
-def import_memories(conn, items, project_id, agent_id, scope='project'):
+def import_memories(conn, items, project_id, agent_id, scope='project',
+                    batch_size=100):
     """Bulk import candidate memories with per-item atomicity.
 
-    Each memory, audit/idempotency row, and all of its evidence links commit in
-    ONE transaction. If evidence insertion fails, the whole item rolls back.
-    Re-imports are idempotent by ``import:<project>:<fingerprint>`` and exact
+    Each memory, audit/idempotency row, and all of its evidence links form an
+    atomic item unit via savepoints, committed in bounded batches to eliminate
+    per-row disk sync overhead. If evidence insertion fails, the whole item rolls
+    back. Re-imports are idempotent by ``import:<project>:<fingerprint>`` and exact
     claims already present in the same visibility scope are not duplicated.
     """
     if scope not in ('project', 'private'):
         raise MemCoreError(f'invalid scope: {scope}')
     added, skipped, created = 0, 0, []
     seen = set()
-    for item in items:
-        summary, invalid_reason = _import_item_summary(item)
-        if invalid_reason is not None:
-            skipped += 1
-            continue
-        fp = fingerprint(summary)
-        if fp in seen:
-            skipped += 1
-            continue
-        ikey = _import_idempotency_key(
-            project_id, fp, scope=scope, agent_id=agent_id
-        )
-        conn.execute('BEGIN IMMEDIATE')
-        try:
-            already = conn.execute(
-                'SELECT 1 FROM idempotency_key WHERE key = ?', (ikey,)
-            ).fetchone()
-            if already:
-                conn.execute('ROLLBACK')
-                seen.add(fp)
+    in_batch = 0
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        for item in items:
+            summary, invalid_reason = _import_item_summary(item)
+            if invalid_reason is not None:
                 skipped += 1
                 continue
-            if _tombstone_active(
-                conn, fp, project_id, scope=scope, agent_id=agent_id
-            ):
-                conn.execute('ROLLBACK')
-                seen.add(fp)
+            fp = fingerprint(summary)
+            if fp in seen:
                 skipped += 1
                 continue
-            if _claim_already_present(
-                conn, project_id, fp, scope=scope, agent_id=agent_id
-            ):
-                conn.execute('ROLLBACK')
-                seen.add(fp)
-                skipped += 1
-                continue
-            mem_id, ver_id = create_memory(
-                conn, project_id, agent_id,
-                summary, scope=scope,
-                memory_type=item.get('type') or 'fact',
-                idempotency_key=ikey,
-                _manage_transaction=False,
+            ikey = _import_idempotency_key(
+                project_id, fp, scope=scope, agent_id=agent_id
             )
-            for ev in item.get('evidence') or []:
-                raw_kind = ev.get('kind')
-                kind = 'external' if raw_kind in (None, 'source') else raw_kind
-                metadata = {'original_kind': raw_kind} if raw_kind == 'source' else {}
-                ev_id = _new_id('ev')
-                conn.execute(
-                    'INSERT INTO evidence (id, kind, source_uri, source_label, metadata, captured_at) '
-                    'VALUES (?, ?, ?, ?, ?, ?)',
-                    (ev_id, kind, ev.get('source_uri'), ev.get('source_label'),
-                     json.dumps(metadata), _now())
-                )
-                conn.execute(
-                    'INSERT INTO evidence_link (evidence_id, memory_version_id, relation, created_at) '
-                    "VALUES (?, ?, 'supports', ?)",
-                    (ev_id, ver_id, _now())
-                )
-            conn.execute('COMMIT')
-        except (TombstoneBlocked, PermissionDenied, MemCoreError):
+            conn.execute('SAVEPOINT item_sp')
             try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-            skipped += 1
-            continue
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-            raise
-        seen.add(fp)
-        added += 1
-        created.append((mem_id, ver_id))
+                already = conn.execute(
+                    'SELECT 1 FROM idempotency_key WHERE key = ?', (ikey,)
+                ).fetchone()
+                if already:
+                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
+                    conn.execute('RELEASE SAVEPOINT item_sp')
+                    seen.add(fp)
+                    skipped += 1
+                    continue
+                if _tombstone_active(
+                    conn, fp, project_id, scope=scope, agent_id=agent_id
+                ):
+                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
+                    conn.execute('RELEASE SAVEPOINT item_sp')
+                    seen.add(fp)
+                    skipped += 1
+                    continue
+                if _claim_already_present(
+                    conn, project_id, fp, scope=scope, agent_id=agent_id
+                ):
+                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
+                    conn.execute('RELEASE SAVEPOINT item_sp')
+                    seen.add(fp)
+                    skipped += 1
+                    continue
+                mem_id, ver_id = create_memory(
+                    conn, project_id, agent_id,
+                    summary, scope=scope,
+                    memory_type=item.get('type') or 'fact',
+                    idempotency_key=ikey,
+                    _manage_transaction=False,
+                )
+                for ev in item.get('evidence') or []:
+                    raw_kind = ev.get('kind')
+                    kind = 'external' if raw_kind in (None, 'source') else raw_kind
+                    metadata = {'original_kind': raw_kind} if raw_kind == 'source' else {}
+                    ev_id = _new_id('ev')
+                    conn.execute(
+                        'INSERT INTO evidence (id, kind, source_uri, source_label, metadata, captured_at) '
+                        'VALUES (?, ?, ?, ?, ?, ?)',
+                        (ev_id, kind, ev.get('source_uri'), ev.get('source_label'),
+                         json.dumps(metadata), _now())
+                    )
+                    conn.execute(
+                        'INSERT INTO evidence_link (evidence_id, memory_version_id, relation, created_at) '
+                        "VALUES (?, ?, 'supports', ?)",
+                        (ev_id, ver_id, _now())
+                    )
+                conn.execute('RELEASE SAVEPOINT item_sp')
+                seen.add(fp)
+                added += 1
+                created.append((mem_id, ver_id))
+                in_batch += 1
+                if batch_size and in_batch >= batch_size:
+                    conn.execute('COMMIT')
+                    conn.execute('BEGIN IMMEDIATE')
+                    in_batch = 0
+            except (TombstoneBlocked, PermissionDenied, MemCoreError):
+                try:
+                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
+                    conn.execute('RELEASE SAVEPOINT item_sp')
+                except sqlite3.OperationalError:
+                    pass
+                skipped += 1
+                continue
+            except Exception:
+                try:
+                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
+                    conn.execute('RELEASE SAVEPOINT item_sp')
+                except sqlite3.OperationalError:
+                    pass
+                raise
+        conn.execute('COMMIT')
+    except Exception:
+        try:
+            conn.execute('ROLLBACK')
+        except sqlite3.OperationalError:
+            pass
+        raise
     return {'added': added, 'skipped': skipped, 'created': created}

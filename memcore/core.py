@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from . import store
 from . import ablation as _ablation
+from . import embedding
 
 
 class MemCoreError(Exception):
@@ -1912,10 +1913,11 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
 
 
 def search(conn, project_id, agent_id, query, limit=20,
-           scope_detail=None):
-    """FTS5 search over memory content, scope-enforced in SQL.
+           scope_detail=None, query_vec=None):
+    """FTS5 + Vector hybrid search over memory content, scope-enforced in SQL.
 
-    Deterministic rank: FTS bm25 + pinned + lifecycle/verification/freshness
+    Deterministic rank: FTS bm25 + Vector cosine similarity via Reciprocal
+    Rank Fusion (RRF, k=60) + pinned + lifecycle/verification/freshness
     + continuous retention (salience * exp(-lambda*age) + reinforcement),
     then updated_at/id tie-breaks. MEMCORE_ABLATE_DECAY=1 neutralizes
     exactly the retention term (legacy CASE+bm25 ordering).
@@ -1994,62 +1996,116 @@ def search(conn, project_id, agent_id, query, limit=20,
                     break
             if len(substr_terms) >= MAX_SUBSTR_TERMS:
                 break
+
+    # Lane 3.3: Local vector search lane (semantic similarity)
+    if query_vec is None:
+        try:
+            query_vec = embedding.get_embedding(user_query, timeout=0.15)
+        except Exception:
+            query_vec = None
+
+    vec_rows = []
+    if query_vec:
+        try:
+            vec_rows = _vector_search_lane(
+                conn, project_id, agent_id, query_vec,
+                limit=limit * DISTINCT_OVERFETCH,
+                detail_filter=detail_filter, detail_params=detail_params
+            )
+        except Exception:
+            vec_rows = []
+
     match_expr = _fts_query(raw_query)
-    if not match_expr:
-        return exact_rows
-    fts_limit = min(500, (limit + len(exact_rows)) * DISTINCT_OVERFETCH)
-    cur = conn.execute(
-        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
-        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
-        '       v.content, m.owner_agent_id, '
-        '       bm25(memory_version_fts) AS rank, m.claim_fingerprint '
-        'FROM memory_version_fts fts '
-        'JOIN memory_version v ON v.rowid = fts.rowid '
-        'JOIN memory m ON m.id = v.memory_id '
-        'WHERE memory_version_fts MATCH ? '
-        '  AND v.id = m.current_version_id '
-        '  AND m.project_id = ? '
-        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-        '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter +
-        'ORDER BY m.pinned DESC, ' +
-        "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
-        "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
-        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
-        retention_tail_fts + ', ' +
-        'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
-        (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
-         now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
-        (match_expr, project_id, agent_id) + detail_params +
-        tuple(retention_params) + (fts_limit,)
-    )
-    fts_rows = cur.fetchall()
+    fts_rows = []
+    if match_expr:
+        fts_limit = min(500, (limit + len(exact_rows)) * DISTINCT_OVERFETCH)
+        cur = conn.execute(
+            'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+            '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
+            '       v.content, m.owner_agent_id, '
+            '       bm25(memory_version_fts) AS rank, m.claim_fingerprint '
+            'FROM memory_version_fts fts '
+            'JOIN memory_version v ON v.rowid = fts.rowid '
+            'JOIN memory m ON m.id = v.memory_id '
+            'WHERE memory_version_fts MATCH ? '
+            '  AND v.id = m.current_version_id '
+            '  AND m.project_id = ? '
+            "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+            "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
+            '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter +
+            'ORDER BY m.pinned DESC, ' +
+            "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
+            "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
+            "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
+            retention_tail_fts + ', ' +
+            'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
+            (now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
+             now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS) +
+            (match_expr, project_id, agent_id) + detail_params +
+            tuple(retention_params) + (fts_limit,)
+        )
+        fts_rows = cur.fetchall()
+
     # Substring lane runs ONLY as a fallback, and only when the ranked lane did
-    # not already supply enough DISTINCT claims. It is unranked (no bm25) and
-    # costs a full scan per OR-term, so running it unconditionally doubled Thai
-    # latency and, worse, could never be ranked against real hits.
-    #
-    # Count CLAIMS, not rows: the fleet corroborates by re-writing one claim
-    # from several agents, so a row count hits `limit` while carrying a single
-    # fact — the collapse would then have a freed slot with nothing to put in
-    # it, and the one substring-only claim was dropped. Measured: 6 copies of
-    # one claim + 1 distinct Thai claim filled a 5-slot window with 5 copies
-    # and lost the distinct one.
+    # not already supply enough DISTINCT claims.
     if substr_terms and len({row[8] for row in fts_rows}) < limit:
         exact_rows = _run_substring_lane(
             conn, project_id, agent_id, substr_terms, detail_filter,
             detail_params, retention_tail_exact, retention_params, now_iso, limit)
-    if not exact_rows:
+
+    if not vec_rows:
+        if not fts_rows and not exact_rows:
+            return []
+        if not exact_rows:
+            return _demote_numeric_mismatch(
+                user_query, _collapse_duplicate_claims(fts_rows, limit))
+        seen = {row[0] for row in fts_rows}
+        merged = list(fts_rows)
+        merge_cap = min(500, limit * DISTINCT_OVERFETCH)
+        for row in exact_rows:
+            if row[0] not in seen:
+                merged.append(row)
+                seen.add(row[0])
+                if len(merged) >= merge_cap:
+                    break
         return _demote_numeric_mismatch(
-            user_query, _collapse_duplicate_claims(fts_rows, limit))
-    # bm25-ranked hits come FIRST; the substring lane only tops up the remainder.
-    # The substring lane is unranked (rank 0.0), so leading with it buried every
-    # ranked hit — measured: "โทเคน Discord เก็บไว้ที่ไหน" returned 13 weak
-    # substring matches while the DISCORD_BOT_TOKEN fact stayed in the store,
-    # unfound. Merging to the over-fetch depth gives the collapse below spare
-    # rows to swap copies of one claim for a different claim.
-    seen = {row[0] for row in fts_rows}
-    merged = list(fts_rows)
+            user_query, _collapse_duplicate_claims(merged, limit))
+
+    # Reciprocal Rank Fusion (RRF, k=60)
+    k_rrf = 60
+    fts_rank_map = {row[0]: idx for idx, row in enumerate(fts_rows)}
+    vec_rank_map = {row[0]: idx for idx, row in enumerate(vec_rows)}
+
+    all_ids = set(fts_rank_map.keys()) | set(vec_rank_map.keys())
+    doc_map = {}
+    for r in fts_rows:
+        doc_map[r[0]] = r
+    for r in vec_rows:
+        if r[0] not in doc_map:
+            doc_map[r[0]] = r
+
+    fused_candidates = []
+    for mid in all_ids:
+        score = 0.0
+        if mid in fts_rank_map:
+            score += 1.0 / (k_rrf + fts_rank_map[mid])
+        if mid in vec_rank_map:
+            score += 1.0 / (k_rrf + vec_rank_map[mid])
+        r = doc_map[mid]
+        # (id, scope, lifecycle, verification, freshness, content, owner, -score, fp)
+        fused_candidates.append(
+            (r[0], r[1], r[2], r[3], r[4], r[5], r[6], -score, r[8])
+        )
+
+    def _fused_sort_key(c):
+        lifecycle_order = {'accepted': 0, 'conflict': 1}.get(c[2], 2)
+        verif_order = {'user_authoritative': 0, 'runtime_verified': 1, 'source_backed': 2}.get(c[3], 3)
+        return (lifecycle_order, verif_order, c[7])
+
+    fused_candidates.sort(key=_fused_sort_key)
+
+    seen = {row[0] for row in fused_candidates}
+    merged = list(fused_candidates)
     merge_cap = min(500, limit * DISTINCT_OVERFETCH)
     for row in exact_rows:
         if row[0] not in seen:

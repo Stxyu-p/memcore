@@ -112,6 +112,102 @@ def numbers(content):
     return frozenset(_NUMBER_RE.findall(str(content or '')))
 
 
+# Exclusive-choice word sets: naming one member implicitly rejects the
+# others on the same subject ("converse in English" vs a memory stating
+# Thai). Language lanes are the fleet-case; protocol/method pairs follow
+# the same shape. Deliberately small: each set must be unambiguous in
+# the fleet domain, never generic adjectives.
+_EXCLUSIVE_SETS = (
+    frozenset({'thai', 'english'}),
+    frozenset({'mcp', 'bridge'}),
+)
+
+
+def _nearest_member_to_anchor(text, excl, other_tok):
+    """Exclusive-set member closest to any shared anchor token.
+
+    Anchor = token present on both sides (len>=4, not a pure number).
+    Returns (member, distance) or (None, None) when neither exists.
+    Nearest wins: a compound fact ("Thai with P Choke; English for
+    bots") scopes each member to its own clause instead of letting a
+    far member pollute the comparison.
+    """
+    toks = _tokens(text)
+    # Anchors are shared NON-member tokens: the member itself is never
+    # its own anchor (else distance is trivially 0 on both sides and
+    # every comparison ties).
+    anchors = {i for i, t in enumerate(toks)
+               if len(t) >= 4 and t in other_tok and t not in excl
+               and not _NUMBER_RE.fullmatch(t)}
+    if not anchors:
+        return None, None
+    best, best_d = None, None
+    for i, t in enumerate(toks):
+        if t in excl and anchors:
+            d = min(abs(i - ax) for ax in anchors)
+            if best_d is None or d < best_d:
+                best, best_d = t, d
+    return best, best_d
+
+
+def _near_anchor_positions(text, excl, own_tok, other_tok, window=6):
+    """Exclusive-set members within `window` tokens of a shared anchor.
+
+    Anchor = token present on both sides (len>=4, not a pure number).
+    Returns the member subset near an anchor, else empty set.
+    """
+    toks = _tokens(text)
+    anchors = {i for i, t in enumerate(toks)
+               if len(t) >= 4 and t in other_tok
+               and not _NUMBER_RE.fullmatch(t)}
+    if not anchors:
+        return set()
+    out = set()
+    for i, t in enumerate(toks):
+        if t in excl and any(abs(i - a) <= window for a in anchors):
+            out.add(t)
+    return out
+
+
+def query_fact_incompatible(query, fact):
+    """True when a query and a fact share a subject anchor but state
+
+    incompatible values: disjoint standalone numbers, or different
+    members of an exclusive-choice set. Query-side companion to
+    is_contradiction_pair (which pairs two stored claims via the strict
+    subject key): queries are short and word order differs, so pairing
+    uses shared rare anchors instead of the key.
+
+    Precision over recall: False means "no signal", never "compatible".
+    """
+    qtok = set(_tokens(query))
+    ftok = set(_tokens(fact))
+    # shared anchor: a non-trivial token on both sides (length>=4 skips
+    # particles/prepositions; digits handled by the numeric check below).
+    anchor_shared = any(
+        len(t) >= 4 and t in ftok
+        for t in qtok
+        # identifiers (9router, lnwjud_call) anchor; pure numbers do not.
+        if not _NUMBER_RE.fullmatch(t)
+    )
+    if not anchor_shared:
+        return False
+    qn, fn = numbers(query), numbers(fact)
+    if qn and fn and not (qn & fn):
+        return True
+    for excl in _EXCLUSIVE_SETS:
+        # Scope the exclusivity to the shared subject window: the member
+        # must sit within a few tokens of a shared anchor on BOTH sides.
+        # ("converse in English with P Choke" vs a fact that also says
+        # "always in English" for bot-to-bot: bag-of-words would miss,
+        # but near the shared anchor P-Choke only Thai appears.)
+        qm, _ = _nearest_member_to_anchor(query, excl, ftok)
+        fm, _ = _nearest_member_to_anchor(fact, excl, qtok)
+        if qm is not None and fm is not None and qm != fm:
+            return True
+    return False
+
+
 def is_contradiction_pair(a, b):
     """True if two contents disagree: same subject key, opposite polarity,
     or same subject with disjoint non-empty number sets.

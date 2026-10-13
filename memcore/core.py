@@ -2433,12 +2433,21 @@ def _demote_numeric_mismatch(query, rows):
         return rows
     from memcore import contradiction as _cd
     query_numbers = _cd.numbers(query)
-    if not query_numbers:
+    # Numeric demotion needs numbers on the query side; the incompatibility
+    # check below additionally fires on exclusive-choice words, so a query
+    # without numbers still proceeds when it names a choice member.
+    if not query_numbers and not any(
+        _cd._tokens(query) and (set(_cd._tokens(query)) & excl)
+        for excl in _cd._EXCLUSIVE_SETS
+    ):
         return rows
     keep, demoted = [], []
     for row in rows:
-        row_numbers = _cd.numbers(row[5] if len(row) > 5 else row)
-        if row_numbers and not (row_numbers & query_numbers):
+        content = row[5] if len(row) > 5 else row
+        row_numbers = _cd.numbers(content)
+        if query_numbers and row_numbers and not (row_numbers & query_numbers):
+            demoted.append(row)
+        elif _cd.query_fact_incompatible(query, content):
             demoted.append(row)
         else:
             keep.append(row)

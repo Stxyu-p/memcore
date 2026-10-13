@@ -5,6 +5,7 @@ including the cross-profile loop (A remembers, B recalls) that is the
 point of Phase 2.
 """
 import importlib.util
+import hashlib
 import json
 import pathlib
 import sys
@@ -324,6 +325,39 @@ class TestToolsAgainstRealStore(ToolTestBase):
         self.assertIn('go build', seen['results'][0]['content'])
         self.assertEqual(seen['results'][0]['freshness'], 'current')
 
+    def test_remember_and_supersede_store_source_provenance(self):
+        source = pathlib.Path(self.tmp.name) / 'config.py'
+        source.write_text('PORT = 4310\n', encoding='utf-8')
+        out = json.loads(plugin.tool_memory_remember(
+            {'content': 'Service port is 4310', 'source_file': str(source),
+             'source_commit': 'source-commit-one'}, self.ctx('sora')))
+        self.assertTrue(out['success'], out)
+        conn = plugin._get_conn(self.store)
+        original = conn.execute(
+            'SELECT source_hash, source_commit, source_file FROM memory_version '
+            'WHERE id=?', (out['version_id'],)
+        ).fetchone()
+        self.assertEqual(original, (
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+            'source-commit-one', str(source.resolve())
+        ))
+
+        source.write_text('PORT = 4311\n', encoding='utf-8')
+        superseded = json.loads(plugin.tool_memory_supersede(
+            {'memory_id': out['memory_id'], 'new_content': 'Service port is 4311',
+             'source_file': str(source), 'source_commit': 'source-commit-two'},
+            self.ctx('sora')))
+        self.assertTrue(superseded['success'], superseded)
+        current = conn.execute(
+            'SELECT v.source_hash, v.source_commit, v.source_file '
+            'FROM memory m JOIN memory_version v ON v.id=m.current_version_id '
+            'WHERE m.id=?', (out['memory_id'],)
+        ).fetchone()
+        self.assertEqual(current, (
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+            'source-commit-two', str(source.resolve())
+        ))
+
     def test_remember_scope_cannot_be_model_overridden(self):
         out = json.loads(plugin.tool_memory_remember(
             {'content': 'shared deployment preference', 'scope_hint': 'private'},
@@ -538,6 +572,41 @@ class TestToolsAgainstRealStore(ToolTestBase):
             {'memory_id': out['memory_id'], 'outcome': 'accepted'}, self.ctx('sora')))
         self.assertTrue(fb.get('success'), msg=f"feedback failed: {fb}")
         self.assertEqual(fb.get('outcome'), 'accepted')
+
+    def test_feedback_accepted_routes_through_auto_accept_gate(self):
+        # Candidate 1: the plugin accepted path owns the conflict gate now.
+        # A candidate contradicting live memory is held, not accepted: no
+        # accepted feedback audit, row left as-is, clear held response.
+        truth = json.loads(plugin.tool_memory_remember(
+            {'content': '9router gateway runs on port 20128'},
+            self.ctx('sora')))
+        self.assertTrue(truth['success'], truth)
+        conn = plugin._get_conn(self.store)
+        rival, _ = plugin.core.create_memory(
+            conn, 'proj-demo', 'agent-mika',
+            '9router gateway runs on port 8080',
+            scope='project', lifecycle='candidate')
+        conn.commit()
+        fb = json.loads(plugin.tool_memory_feedback(
+            {'memory_id': rival, 'outcome': 'accepted'},
+            self.ctx('mika')))
+        self.assertTrue(fb.get('success'), msg=f"feedback failed: {fb}")
+        self.assertTrue(fb.get('held'), fb)
+        rows = dict(conn.execute(
+            'SELECT id, lifecycle FROM memory WHERE id IN (?, ?)',
+            (truth['memory_id'], rival)).fetchall())
+        self.assertEqual(rows[rival], 'candidate')
+        self.assertEqual(rows[truth['memory_id']], 'accepted')
+        accepted_audits = conn.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE memory_id=? "
+            "AND action='feedback' AND detail LIKE '%accepted%'",
+            (rival,)).fetchone()[0]
+        self.assertEqual(accepted_audits, 0)
+        holds = conn.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE memory_id=? "
+            "AND action='contradiction-hold'",
+            (rival,)).fetchone()[0]
+        self.assertEqual(holds, 1)
 
     def test_fail_closed_without_membership(self):
         conn = plugin._get_conn(self.store)

@@ -299,7 +299,8 @@ def _seed_memories(conn):
     )
 
     # N2: Stale code-backed fact — edge-tts audio
-    # This fact references source_file + source_commit that are now outdated
+    # The source hash represents an earlier version of a real repo file.
+    # Absolute paths keep detection independent of the caller's working directory.
     conn.execute(
         'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
         '  lifecycle, verification, freshness, current_version_id, '
@@ -313,14 +314,16 @@ def _seed_memories(conn):
         'INSERT INTO memory_version '
         '  (id, memory_id, content, reason, created_by_agent_id, '
         '   created_at, validated_at, valid_from, valid_until, '
-        '   source_commit, source_file) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        '   source_hash, source_commit, source_file) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         (VER_NC_AUDIO_V1, MEM_NC_AUDIO,
          'Edge-TTS library version 0.1.0 is installed and working for '
          'Chinese voice synthesis in audio preview.',
          'Verified during audio feature development',
          AGENT_SORA, _ago(10), _ago(10), _ago(10), None,
-         'old-commit-hash-001', 'go.mod')
+         hashlib.sha256(b'previous pyproject contents').hexdigest(),
+         'old-commit-hash-001',
+         str(pathlib.Path(__file__).resolve().parent.parent / 'pyproject.toml'))
     )
 
     # ── novelclaw project — conflicting claim pair ──────────────────────

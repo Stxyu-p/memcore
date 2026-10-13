@@ -272,6 +272,10 @@ class MemCoreMemoryProvider(MemoryProvider):
                 limit=min(500, self._max_items + len(pinned))
             )
             hits = [row for row in raw if row[0] not in pinned_ids]
+        finalized = core.finalize_recall(conn, pinned + hits)
+        pinned_count = len(pinned)
+        pinned = finalized[:pinned_count]
+        hits = finalized[pinned_count:]
         return pinned, hits
 
     def prefetch(self, query: str, *, session_id: str = '') -> str:
@@ -319,14 +323,13 @@ class MemCoreMemoryProvider(MemoryProvider):
     def sync_turn(self, user_content: str, assistant_content: str, *,
                   session_id: str = '', messages=None) -> None:
         conn = self._write_conn()
-        event_id, _created = ingest.append_event(
+        ingest.record(
             conn, self._project_id, self._agent_id, 'turn',
             session_id=session_id or self._session_id,
             user_content=user_content or '',
             assistant_content=assistant_content or '',
             metadata=self._event_metadata(messages)
         )
-        ingest.process_event(conn, event_id)
         self._run_auto_semantic_review(conn)
 
     def on_memory_write(self, action: str, target: str, content: str,
@@ -338,7 +341,7 @@ class MemCoreMemoryProvider(MemoryProvider):
         if not content and action != 'remove':
             return
         conn = self._write_conn()
-        event_id, _created = ingest.append_event(
+        ingest.record(
             conn, self._project_id, self._agent_id, 'memory_write',
             session_id=self._session_id, user_content=content or '',
             metadata=self._event_metadata(
@@ -346,19 +349,17 @@ class MemCoreMemoryProvider(MemoryProvider):
                 builtin_metadata=builtin_metadata
             )
         )
-        ingest.process_event(conn, event_id)
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = '', **kwargs):
         if not task and not result:
             return
         conn = self._write_conn()
-        event_id, _created = ingest.append_event(
+        ingest.record(
             conn, self._project_id, self._agent_id, 'delegation',
             session_id=self._session_id,
             user_content=task or '', assistant_content=result or '',
             metadata=self._event_metadata(child_session_id=child_session_id)
         )
-        ingest.process_event(conn, event_id)
 
     @staticmethod
     def _semantic_tool_schemas() -> List[Dict[str, Any]]:

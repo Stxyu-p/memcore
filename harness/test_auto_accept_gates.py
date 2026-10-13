@@ -228,5 +228,106 @@ class AutoAcceptGatesTests(unittest.TestCase):
         self.assertEqual(row[0], 'candidate')
 
 
+class AutoAcceptInterfaceTests(unittest.TestCase):
+    """Candidate 1: the deep core.auto_accept interface (gate -> hold -> accept -> sweep)."""
+
+    def setUp(self):
+        self.tmp, self.db, self.conn = _make_test_store()
+
+    def tearDown(self):
+        try:
+            self.conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        except Exception:
+            pass
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                os.unlink(self.db + suffix)
+            except OSError:
+                pass
+        try:
+            os.rmdir(self.tmp)
+        except OSError:
+            pass
+
+    def test_auto_accept_hold_audits_and_leaves_opposing_row_untouched(self):
+        truth, _ = core.create_memory(
+            self.conn, 'proj-test', 'agent-alice',
+            '9router gateway runs on port 20128',
+            scope='project', lifecycle='accepted',
+        )
+        self.conn.execute('BEGIN IMMEDIATE')
+        rival, _ = core.create_memory(
+            self.conn, 'proj-test', 'agent-bob',
+            '9router gateway runs on port 8080',
+            scope='project', lifecycle='candidate',
+            _manage_transaction=False,
+        )
+        outcome = core.auto_accept(
+            self.conn, rival, 'agent-bob', 'interface probe')
+        self.conn.execute('COMMIT')
+        self.assertTrue(outcome['held'])
+        self.assertFalse(outcome['accepted'])
+        self.assertEqual(len(outcome['hits']), 1)
+        self.assertEqual(outcome['hits'][0][0], truth)
+        self.assertNotIn('sweep', outcome)
+        rows = dict(self.conn.execute(
+            'SELECT id, lifecycle FROM memory WHERE id IN (?, ?)',
+            (truth, rival)).fetchall())
+        self.assertEqual(rows[truth], 'accepted')
+        self.assertEqual(rows[rival], 'candidate')
+        holds = self.conn.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE action='contradiction-hold' "
+            'AND memory_id=?', (rival,)).fetchone()[0]
+        self.assertEqual(holds, 1)
+        conflicts = self.conn.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE action='mark_conflict'").fetchone()[0]
+        self.assertEqual(conflicts, 0)
+
+    def test_auto_accept_clean_accepts_with_sweep_outcome(self):
+        self.conn.execute('BEGIN IMMEDIATE')
+        mem_id, _ = core.create_memory(
+            self.conn, 'proj-test', 'agent-alice',
+            'quiet interface probe claim nebula',
+            scope='project', lifecycle='candidate',
+            _manage_transaction=False,
+        )
+        outcome = core.auto_accept(
+            self.conn, mem_id, 'agent-alice', 'interface probe')
+        self.conn.execute('COMMIT')
+        self.assertFalse(outcome['held'])
+        self.assertTrue(outcome['accepted'])
+        self.assertTrue(outcome['transitioned'])
+        self.assertIn('sweep', outcome)
+        self.assertEqual(
+            self.conn.execute('SELECT lifecycle FROM memory WHERE id=?',
+                              (mem_id,)).fetchone()[0], 'accepted')
+
+    def test_accept_already_accepted_tombstoned_row_raises(self):
+        claim = 'already accepted then tombstoned probe'
+        mem_id, _ = core.create_memory(
+            self.conn, 'proj-test', 'agent-alice', claim,
+            scope='private', lifecycle='candidate',
+        )
+        self.assertTrue(core.accept_memory(
+            self.conn, mem_id, 'agent-alice', 'first accept'))
+        other, _ = core.create_memory(
+            self.conn, 'proj-test', 'agent-alice', claim,
+            scope='project', lifecycle='candidate',
+        )
+        self.assertTrue(core.reject(
+            self.conn, other, 'agent-alice', 'tombstone probe'))
+        # The row is already accepted AND its fingerprint is now tombstoned:
+        # the veto wins over the already-accepted early return.
+        with self.assertRaises(core.TombstoneBlocked):
+            core.accept_memory(self.conn, mem_id, 'agent-alice', 're-accept')
+        self.assertEqual(
+            self.conn.execute('SELECT lifecycle FROM memory WHERE id=?',
+                              (mem_id,)).fetchone()[0], 'accepted')
+
+
 if __name__ == '__main__':
     unittest.main()

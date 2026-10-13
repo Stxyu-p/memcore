@@ -9,6 +9,8 @@ Run:  python -m unittest discover   (from project root)
       python -m harness              (alternative)
 """
 import os
+import hashlib
+import pathlib
 import sqlite3
 import sys
 import tempfile
@@ -216,8 +218,8 @@ class TestE5_Correction(EvalTestBase):
 class TestE6_StalenessOnSourceChange(EvalTestBase):
     """E6 — Source-backed memories must transition to 'stale' on file change."""
 
-    def test_stale_flag_set_when_source_commit_changes(self):
-        """Memory bound to old-commit-hash-001 should be stale after code change."""
+    def test_stale_flag_set_when_source_hash_is_outdated(self):
+        """Memory bound to an earlier source-file hash starts stale in the fixture."""
         cur = self.conn.execute(
             'SELECT m.freshness, v.source_commit, v.source_file '
             'FROM memory_version v '
@@ -226,26 +228,110 @@ class TestE6_StalenessOnSourceChange(EvalTestBase):
             (fixtures.VER_NC_AUDIO_V1,)
         )
         ver = cur.fetchone()
-        # Right now the fixture already marks this as stale (correct setup).
-        # TODO Phase 5: the engine must AUTOMATICALLY flip freshness
-        # when it detects source_commit != current repo commit for source_file.
+        # Fixture pre-marks stale (correct setup); the engine flip itself is
+        # covered by test_auto_flip_mismatched_hash_with_real_file below.
         self.assertEqual(
             ver[0], 'stale',
             f'Memory bound to outdated source should be stale, got freshness={ver[0]}'
         )
 
-    def test_engine_would_reverify_on_commit_change(self):
-        """Verify the fixture encodes a source_commit that would mismatch after a real commit.
-        Phase 5 engine: compare memory_version.source_commit against current HEAD."""
+    def test_fixture_has_source_hash_for_file_validation(self):
+        """Verify source-backed memories record a content hash and absolute path."""
         cur = self.conn.execute(
-            'SELECT source_commit FROM memory_version WHERE id = ?',
+            'SELECT source_hash, source_file FROM memory_version WHERE id = ?',
             (fixtures.VER_NC_AUDIO_V1,)
         )
-        stored_commit = cur.fetchone()[0]
-        self.assertNotEqual(
-            stored_commit, None,
-            'Source-backed memory must have a source_commit to enable staleness detection'
+        source_hash, source_file = cur.fetchone()
+        self.assertRegex(source_hash, r'^[0-9a-f]{64}$')
+        self.assertTrue(pathlib.Path(source_file).is_absolute())
+
+    def test_auto_flip_mismatched_hash_with_real_file(self):
+        """A changed tracked file flips freshness to stale without a Git lookup."""
+        real_file = pathlib.Path(__file__).resolve().parents[1] / 'pyproject.toml'
+        self.assertTrue(os.path.isfile(real_file), 'fixture file must exist')
+        # Fixture pre-marks stale; reset to current so the engine flip is real.
+        self.conn.execute(
+            "UPDATE memory SET freshness='current' WHERE id = ?",
+            (fixtures.MEM_NC_AUDIO,))
+        self.conn.commit()
+        before = self.conn.execute(
+            "SELECT freshness, updated_at FROM memory WHERE id = ?",
+            (fixtures.MEM_NC_AUDIO,)
+        ).fetchone()
+        self.assertEqual(before[0], 'current')
+        flipped = core.check_source_staleness(self.conn, [fixtures.MEM_NC_AUDIO])
+        self.assertEqual(flipped, [fixtures.MEM_NC_AUDIO])
+        after = self.conn.execute(
+            "SELECT freshness, updated_at FROM memory WHERE id = ?",
+            (fixtures.MEM_NC_AUDIO,)
+        ).fetchone()
+        self.assertEqual(after[0], 'stale')
+        self.assertEqual(after[1], before[1], 'auto-flip must not touch updated_at')
+        audit = self.conn.execute(
+            "SELECT action, actor_agent_id, detail FROM audit_event "
+            "WHERE memory_id = ? ORDER BY id DESC LIMIT 1",
+            (fixtures.MEM_NC_AUDIO,)
+        ).fetchone()
+        self.assertEqual(audit[0], 'auto_stale_source_changed')
+        self.assertIsNone(audit[1])
+
+    def test_no_flip_when_source_file_hash_matches(self):
+        """An unchanged source stays current even if repository history differs."""
+        source_file = pathlib.Path(__file__).resolve().parents[1] / 'pyproject.toml'
+        current_hash = hashlib.sha256(source_file.read_bytes()).hexdigest()
+        self.conn.execute(
+            'UPDATE memory_version SET source_hash=? WHERE id=?',
+            (current_hash, fixtures.VER_NC_AUDIO_V1)
         )
+        self.conn.execute(
+            "UPDATE memory SET freshness='current' WHERE id = ?",
+            (fixtures.MEM_NC_AUDIO,))
+        n_audit_before = self.conn.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE memory_id = ?",
+            (fixtures.MEM_NC_AUDIO,)).fetchone()[0]
+        flipped = core.check_source_staleness(self.conn, [fixtures.MEM_NC_AUDIO])
+        self.assertEqual(flipped, [])
+        fresh = self.conn.execute(
+            "SELECT freshness FROM memory WHERE id = ?",
+            (fixtures.MEM_NC_AUDIO,)).fetchone()[0]
+        self.assertEqual(fresh, 'current')
+        n_audit_after = self.conn.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE memory_id = ?",
+            (fixtures.MEM_NC_AUDIO,)).fetchone()[0]
+        self.assertEqual(n_audit_after, n_audit_before)
+
+    def test_skip_when_source_file_missing(self):
+        """A missing source file is skipped, never false-stale."""
+        self.conn.execute(
+            "UPDATE memory_version SET source_file='no-such-file-xyz.txt' "
+            "WHERE id = ?",
+            (fixtures.VER_NC_AUDIO_V1,))
+        self.conn.execute(
+            "UPDATE memory SET freshness='current' WHERE id = ?",
+            (fixtures.MEM_NC_AUDIO,))
+        flipped = core.check_source_staleness(self.conn, [fixtures.MEM_NC_AUDIO])
+        self.assertEqual(flipped, [])
+        fresh = self.conn.execute(
+            "SELECT freshness FROM memory WHERE id = ?",
+            (fixtures.MEM_NC_AUDIO,)).fetchone()[0]
+        self.assertEqual(fresh, 'current')
+
+    def test_skip_legacy_relative_source_path(self):
+        """A relative legacy path is not resolved against the caller's CWD."""
+        self.conn.execute(
+            "UPDATE memory_version SET source_file='pyproject.toml', source_hash=? "
+            'WHERE id=?', ('0' * 64, fixtures.VER_NC_AUDIO_V1)
+        )
+        self.conn.execute(
+            "UPDATE memory SET freshness='current' WHERE id=?",
+            (fixtures.MEM_NC_AUDIO,)
+        )
+        flipped = core.check_source_staleness(self.conn, [fixtures.MEM_NC_AUDIO])
+        self.assertEqual(flipped, [])
+        fresh = self.conn.execute(
+            'SELECT freshness FROM memory WHERE id=?', (fixtures.MEM_NC_AUDIO,)
+        ).fetchone()[0]
+        self.assertEqual(fresh, 'current')
 
 
 # ── E7: Tombstone resurrection guard ─────────────────────────────────

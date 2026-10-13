@@ -27,7 +27,7 @@ not be edited directly.
 ```text
 memcore/
 ├── __init__.py              # registers MemCoreMemoryProvider
-├── plugin.yaml              # Hermes plugin manifest (0.8.0)
+├── plugin.yaml              # Hermes plugin manifest (0.8.8)
 ├── native_provider.py       # journal-first native MemoryProvider adapter
 ├── plugin.py                # binding, governed tools, recall builder, auto-join
 ├── semantic_analyzer.py     # host-LLM semantic review adapter
@@ -150,6 +150,11 @@ and stay pending when the target cannot be proven.
 | `memory_feedback` | Mark accepted/rejected/stale after use |
 | `memory_review_queue` | Inspect this agent's pending semantic-review queue |
 | `memory_review_decide` | Apply `remember`, `ignore`, or `defer` |
+
+`memory_remember` and `memory_supersede` accept optional `source_file` and
+`source_commit` provenance. Each new version snapshots the file's absolute path
+and SHA-256; recall marks it stale if that file's contents change. The commit
+value is context only and does not trigger staleness by itself.
 
 Trust lanes (ADR-0018/0019): explicit writes accept directly; semantic
 `remember` with confidence ≥ 0.95 accepts directly; the same claim repeated

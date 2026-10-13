@@ -4,6 +4,59 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.8] - 2026-10-11
+
+Hardening round & architecture deepening: source-file freshness checks, deep Recall lifecycle, retry-safe journal recording, version sync.
+
+### Added
+- **Deep Journal Ingestion & Sweep Module** (`ingest.record` and `ingest.sweep`):
+  Consolidates the two-step `append_event` + `process_event` caller
+  orchestration into a single `record` call, guaranteeing that ingress
+  turns and tool writes are immediately classified without leaked state.
+  Adds `sweep` unifying stale built-in mutation dismissals and defer-cap
+  resolutions in a single call.
+- **Deep Vector Index Module** (`embedding.query_vector_candidates`):
+  Encapsulates binary vector deserialization (IEEE 754 float32 little-endian
+  BLOBs), cosine similarity computation, and candidate sorting within
+  `memcore/embedding.py`. Replaces 60 lines of unpacked math and table joins
+  in `core._vector_search_lane` with a single deep seam while preserving
+  `store.pack_vector`/`unpack_vector` and `core.cosine_similarity` aliases.
+- **Deep Recall Lifecycle Module** (`core.recall`):
+  Encapsulates candidate search, RRF rank fusion, access reinforcement
+  (`record_recall`), and source-file hash checks into a single interface.
+  Callers receive finalized freshness ratings; Hermes prefetch finalizes both
+  pinned and query-matched rows through the same path.
+- **Source-file staleness checks**: `create_memory`, `supersede`, the Python
+  client, and CLI can record a source file. MemCore stores its absolute path
+  and SHA-256; `core.check_source_staleness(conn, memory_ids)` marks recalled
+  rows stale only when that file's contents change. `source_commit` remains
+  provenance context and unrelated Git commits do not flip freshness. Missing
+  files, legacy relative paths, or rows without a source hash are skipped safely. Changes leave
+  `updated_at` untouched and are audited as `auto_stale_source_changed`.
+- **Retry-safe journal recording**: duplicate `ingest.record()` calls resume
+  events still pending and return the saved decision and memory link for
+  finalized events.
+- `core.__version__` single source of truth (namespace-package safe:
+  no `memcore/__init__.py`, which would break the plugin import guard).
+
+### Fixed
+- **Version drift**: pyproject 0.8.0 / CHANGELOG 0.8.7 / badge 504 all
+  synced; badge now reads real suite count (509).
+- **Stale `.pytest_cache` verdict**: 2 cached integration fails re-run
+  green (10/10 OK) — confirmed stale cache, not a real bug.
+- **Self-inflicted import-guard break**: a new `memcore/__init__.py`
+  turned the engine into a regular package and broke 3
+  `test_plugin_import_guard` tests; reverted to namespace layout and
+  moved `__version__` into `core.py`.
+
+### Validation
+- Harness 516 OK (2 expected failures, exit 0), incl. 3 new E6 auto-flip
+  tests, 4 new deep recall lifecycle tests, and 3 new deep journal
+  record/sweep tests.
+- doctor clean: integrity ok, journal health=ok (was operator_attention),
+  0 pending, 0 unresolved, recovery_ready=True, plugin deploy OK.
+- Proof on live store: remember→search round-trip + auto-flip verified.
+
 ## [0.8.7] - 2026-10-09
 
 Comprehensive function sweep hardening and performance optimizations. Every change was profiled and validated on an isolated store with regression tests.

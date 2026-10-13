@@ -303,6 +303,9 @@ def cmd_remember(args):
             memory_type=args.type,
             idempotency_key=args.idempotency_key,
             reason=args.reason,
+            source_file=args.source_file,
+            source_commit=args.source_commit,
+            source_hash=args.source_hash,
         )
         print(f'remembered: {mem_id} (version {ver_id})')
     except core.MemCoreError as e:
@@ -358,7 +361,10 @@ def cmd_supersede(args):
             sys.exit(f'error: agent {agent_id} does not exist; create it first')
         new_ver = core.supersede(
             conn, args.memory_id, agent_id,
-            args.content, reason=args.reason
+            args.content, reason=args.reason,
+            source_file=args.source_file,
+            source_commit=args.source_commit,
+            source_hash=args.source_hash,
         )
         print(f'superseded: {args.memory_id} -> new version {new_ver}')
     except core.MemCoreError as e:
@@ -1682,6 +1688,12 @@ def main(argv=None):
     p.add_argument('--type', default='fact')
     p.add_argument('--idempotency-key', default=None)
     p.add_argument('--reason', default=None)
+    p.add_argument('--source-file', default=None,
+                   help='file whose SHA-256 will be stored as source provenance')
+    p.add_argument('--source-commit', default=None,
+                   help='optional repository commit for provenance context')
+    p.add_argument('--source-hash', default=None,
+                   help='optional SHA-256; must match --source-file')
     p.set_defaults(func=cmd_remember)
 
     p = sub.add_parser('search', help='FTS5 search over memories', parents=[common])
@@ -1702,6 +1714,12 @@ def main(argv=None):
     p.add_argument('--agent', required=True)
     p.add_argument('content')
     p.add_argument('--reason', default=None)
+    p.add_argument('--source-file', default=None,
+                   help='file whose SHA-256 will be stored as source provenance')
+    p.add_argument('--source-commit', default=None,
+                   help='optional repository commit for provenance context')
+    p.add_argument('--source-hash', default=None,
+                   help='optional SHA-256; must match --source-file')
     p.set_defaults(func=cmd_supersede)
 
     p = sub.add_parser('deactivate', help='soft delete a memory', parents=[common])

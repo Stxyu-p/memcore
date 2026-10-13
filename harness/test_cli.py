@@ -50,6 +50,39 @@ class CliImportTests(unittest.TestCase):
         self.assertEqual(fake_out.calls[-1], {'encoding': 'utf-8', 'errors': 'replace'})
         self.assertEqual(fake_err.calls[-1], {'encoding': 'utf-8', 'errors': 'replace'})
 
+    def test_remember_cli_persists_source_file_hash_and_commit(self):
+        conn = store.open_store(self.db)
+        conn.execute(
+            "INSERT INTO agent (id, name, profile_key) VALUES ('agent-cli', 'cli', 'cli')"
+        )
+        conn.execute(
+            "INSERT INTO project_membership (project_id, agent_id, role) "
+            "VALUES ('proj-demo', 'agent-cli', 'owner')"
+        )
+        conn.commit()
+        conn.close()
+        source = pathlib.Path(self.tmp.name) / 'source.py'
+        source.write_text('PORT = 4321\n', encoding='utf-8')
+
+        cli.main([
+            '--db', self.db, 'remember', '--project', 'demo', '--agent', 'cli',
+            '--scope', 'project', '--source-file', str(source),
+            '--source-commit', 'cli-test-commit', 'Service port is 4321'
+        ])
+
+        conn = store.open_store(self.db)
+        try:
+            row = conn.execute(
+                'SELECT v.source_hash, v.source_commit, v.source_file '
+                'FROM memory_version v JOIN memory m ON m.current_version_id=v.id '
+                "WHERE v.content='Service port is 4321'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertRegex(row[0], r'^[0-9a-f]{64}$')
+        self.assertEqual(row[1:], ('cli-test-commit', str(source.resolve())))
+
     def test_import_dry_run_performs_zero_domain_writes(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

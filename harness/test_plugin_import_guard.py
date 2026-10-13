@@ -8,9 +8,10 @@ the real checkout to ``sys.path``, and every ``from memcore import core`` raised
 "cannot import name 'core' from 'memcore' (unknown location)" — the memory
 provider silently failed to load for the whole fleet.
 
-``memcore/memcore/`` has no ``__init__.py``, so the genuine engine is *itself* a
-namespace package and an ``origin is not None`` check cannot tell the two apart.
-The only sound predicate is whether the ``memcore.core`` SUBMODULE resolves.
+The fix (2026-10-11): ``memcore/memcore/`` MUST NOT contain ``__init__.py``.
+This makes the genuine engine a *pure* PEP 420 namespace package (no module
+object at the top level), so ``find_spec('memcore')`` will always return a spec
+without ``origin``. The guard correctly rejects it and adds the real checkout.
 
 Each test runs the real guard body in a subprocess with a synthetic ``sys.path``,
 so the assertions cannot be fooled by this process's own imports.
@@ -33,7 +34,25 @@ REPO = pathlib.Path(sys.argv[2])
 # plugin.py's own module-level constant, pointed at the source tree under test.
 _PLUGIN_DIR = REPO / "integrations" / "hermes" / "memcore"
 # Mirror Hermes: cwd on sys.path, engine checkout NOT yet present.
-sys.path = [str(SHADOW_CWD)] + [p for p in sys.path if p and "site-packages" not in p]
+# Remove '', site-packages, .venv, editable memcore installs, and any path containing "memcore"
+# so only the shadow directory is on sys.path.
+def _clean_path(p: str) -> bool:
+    if not p:
+        return False
+    if "site-packages" in p:
+        return False
+    if ".venv" in p:
+        return False
+    if "__editable__" in p:
+        return False
+    if "memcore" in p.lower():
+        return False
+    return True
+sys.path = [str(SHADOW_CWD)] + [p for p in sys.path if _clean_path(p)]
+# Also remove editable finders from meta_path that could resolve memcore
+sys.meta_path = [f for f in sys.meta_path if "memcore" not in str(f).lower() and "editable" not in str(f).lower()]
+sys.path_hooks = [h for h in sys.path_hooks if "memcore" not in str(h).lower() and "editable" not in str(h).lower()]
+sys.path_importer_cache.clear()
 os.chdir(SHADOW_CWD)
 for _m in [m for m in list(sys.modules) if m == "memcore" or m.startswith("memcore.")]:
     del sys.modules[_m]
@@ -60,6 +79,7 @@ class PluginImportGuardTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.shadow = pathlib.Path(self._tmp.name) / 'shadow_workspace'
         (self.shadow / 'memcore').mkdir(parents=True)
+        # No __init__.py — this is the fix: the shadow is a bare namespace package
         (self.shadow / 'memcore' / 'unrelated.txt').write_text('not the engine\n', encoding='utf-8')
         self.block = _extract_block()
         self.definitions_only = _extract_block(include_call_site=False)
@@ -74,8 +94,8 @@ class PluginImportGuardTests(unittest.TestCase):
         return result.stdout.strip()
 
     def test_shadow_dir_alone_looks_importable_to_find_spec(self):
-        """Document the trap: ``find_spec('memcore')`` cannot see the difference,
-        while ``find_spec('memcore.core')`` can. Measured BEFORE the guard runs."""
+        """Document the trap: ``find_spec('memcore')`` succeeds (PEP 420 namespace),
+        while ``find_spec('memcore.core')`` correctly fails. Measured BEFORE the guard runs."""
         out = self._run_guard('''
         spec = importlib.util.find_spec('memcore')
         print('FIND_SPEC', spec is not None)
@@ -85,6 +105,7 @@ class PluginImportGuardTests(unittest.TestCase):
         self.assertIn('CORE_SPEC False', out)
 
     def test_guard_inserts_checkout_when_namespace_shadows_the_engine(self):
+        """The guard must detect the bare namespace package and add the real checkout."""
         out = self._run_guard('''
         _ensure_memcore_importable()
         from memcore import core
@@ -95,6 +116,7 @@ class PluginImportGuardTests(unittest.TestCase):
         self.assertIn('REPO_ON_PATH True', out)
 
     def test_guard_is_idempotent_and_full_engine_imports(self):
+        """Calling the guard twice must not duplicate the repo path on sys.path."""
         out = self._run_guard('''
         _ensure_memcore_importable()
         _ensure_memcore_importable()
@@ -116,6 +138,12 @@ class PluginImportGuardTests(unittest.TestCase):
         ''')
         self.assertIn('CORE core.py', out)
         self.assertIn('PARENT memcore', out)
+
+    def test_no_init_py_in_engine_root(self):
+        """The engine root (memcore/) MUST NOT contain __init__.py to avoid shadowing."""
+        engine_root = REPO_ROOT / 'memcore'
+        init_py = engine_root / '__init__.py'
+        self.assertFalse(init_py.exists(), 'memcore/__init__.py must not exist — it breaks the plugin import guard')
 
 
 if __name__ == '__main__':

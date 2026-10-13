@@ -487,6 +487,8 @@ def tool_memory_remember(args, ctx=None):
             scope=scope, memory_type=args.get('type') or 'note',
             lifecycle='accepted',
             reason='memory_remember tool (explicit auto-accept)',
+            source_file=args.get('source_file'),
+            source_commit=args.get('source_commit'),
             idempotency_key=f'remember:{pid}:agent-{agent_name}:{fp}')
         core.maybe_auto_corrob(conn, pid, fp, 'agent-' + agent_name)
         conn.commit()
@@ -506,14 +508,7 @@ def tool_memory_search(args, ctx=None):
         return store_error
     try:
         pid, aid = _require_bound_membership(conn, project, agent_name)
-        rows = core.search(conn, pid, aid, query, limit=10)
-        # Phase 6b reinforcement: retrieved memories prove useful. Recorded
-        # best-effort on this writable handle; search() itself stays read-only
-        # safe. A failure here must never break the read the user asked for.
-        try:
-            core.record_recall(conn, [r[0] for r in rows])
-        except Exception:
-            pass
+        rows = core.recall(conn, pid, aid, query, limit=10)
         return _tool_ok(results=[
             {'id': r[0], 'scope': r[1], 'lifecycle': r[2],
              'verification': r[3], 'freshness': r[4], 'content': r[5]}
@@ -558,7 +553,9 @@ def tool_memory_supersede(args, ctx=None):
     try:
         _pid, aid = _require_bound_memory(conn, project, agent_name, memory_id)
         core.supersede(conn, memory_id, aid, new_content,
-                       reason=args.get('reason') or 'memory_supersede tool')
+                       reason=args.get('reason') or 'memory_supersede tool',
+                       source_file=args.get('source_file'),
+                       source_commit=args.get('source_commit'))
         conn.commit()
         return _tool_ok(memory_id=memory_id, superseded=True)
     except Exception as e:
@@ -621,35 +618,23 @@ def tool_memory_feedback(args, ctx=None):
                     f'(lifecycle={lifecycle})'
                 )
             if outcome == 'accepted':
-                # Route through core.accept_memory so the transition is
-                # idempotent (already-accepted is a no-op, not a rewrite) and
-                # carries the standard auto_accept audit trail. Verification
-                # is left untouched, exactly as the previous raw SQL did.
-                #
-                # accept_memory returns early on already-accepted rows WITHOUT
-                # a tombstone check, so check the veto explicitly first: a
-                # duplicate claim tombstoned elsewhere must still refuse here.
-                # ponytail: if core.accept_memory ever checks the veto before
-                # the early return, this pre-check becomes redundant — delete it.
-                _cur_ver, _claim_fp = core._current_claim_identity(conn, memory_id)
-                _mem_row = conn.execute(
-                    'SELECT project_id, scope, owner_agent_id FROM memory WHERE id=?',
-                    (memory_id,),
-                ).fetchone()
-                _veto = core._tombstone_active(
-                    conn, _claim_fp, _mem_row[0],
-                    scope=_mem_row[1], agent_id=_mem_row[2],
-                )
-                if _veto:
-                    raise core.TombstoneBlocked(_claim_fp, _veto[0])
-                changed = core.accept_memory(
+                # Route through core.auto_accept so this path gains the same
+                # conflict gate + corroboration sweep the ingest lanes have.
+                # Hold is audit-only: on contradiction leave the row as-is,
+                # write no accepted feedback, and report the hold clearly.
+                result = core.auto_accept(
                     conn, memory_id, aid,
                     reason='accepted via memory_feedback tool',
-                    _manage_transaction=False,
                 )
+                if result['held']:
+                    conn.execute('COMMIT')
+                    return _tool_ok(memory_id=memory_id, outcome='held',
+                                    held=True,
+                                    reason='contradiction hold: claim contradicts live memory',
+                                    hits=[list(h) for h in result['hits']])
                 store_audit(conn, 'feedback', aid, memory_id, pid,
                             {'outcome': outcome, 'source': 'memory_feedback tool',
-                             'transition_applied': changed})
+                             'transition_applied': result['transitioned']})
             else:
                 conn.execute(
                     "UPDATE memory SET freshness='stale', updated_at=? WHERE id=?",
@@ -792,6 +777,14 @@ TOOL_SCHEMAS = [
             'properties': {
                 'content': {'type': 'string'},
                 'type': {'type': 'string', 'enum': ['fact', 'decision', 'preference', 'note']},
+                'source_file': {
+                    'type': 'string',
+                    'description': 'Optional path to a source file; MemCore stores its absolute path and SHA-256.',
+                },
+                'source_commit': {
+                    'type': 'string',
+                    'description': 'Optional repository commit for provenance context.',
+                },
             },
             'required': ['content'],
         },
@@ -826,6 +819,14 @@ TOOL_SCHEMAS = [
                 'memory_id': {'type': 'string'},
                 'new_content': {'type': 'string'},
                 'reason': {'type': 'string'},
+                'source_file': {
+                    'type': 'string',
+                    'description': 'Optional path to the replacement claim source file; MemCore stores its absolute path and SHA-256.',
+                },
+                'source_commit': {
+                    'type': 'string',
+                    'description': 'Optional repository commit for provenance context.',
+                },
             },
             'required': ['memory_id', 'new_content'],
         },

@@ -127,7 +127,7 @@
 
   <rect class="card" x="264" y="420" width="206" height="42" rx="6"/>
   <text class="t-title" x="367" y="438" text-anchor="middle">Tombstone Anti-Resurrection</text>
-  <text class="t-sub" x="367" y="452" text-anchor="middle">prevents semantic drift replay</text>
+  <text class="t-sub" x="367" y="452" text-anchor="middle">blocks exact fingerprint replay</text>
 
   <rect class="card" x="488" y="420" width="206" height="42" rx="6"/>
   <text class="t-title" x="591" y="438" text-anchor="middle">4 Explicit Trust Labels</text>

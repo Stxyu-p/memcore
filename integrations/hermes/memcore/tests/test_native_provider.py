@@ -178,6 +178,40 @@ class NativeProviderTest(unittest.TestCase):
                       p.system_prompt_block())
         self.assertEqual(p.recall_status().count, 2)
 
+    def test_prefetch_finalizes_pinned_and_matching_rows(self):
+        conn = store.open_store(self.db)
+        pinned, _ = core.create_memory(
+            conn, 'proj-demo', 'agent-alice', 'unrelated pinned recall marker',
+            scope='project'
+        )
+        matching, _ = core.create_memory(
+            conn, 'proj-demo', 'agent-alice', 'nebula matching recall marker',
+            scope='project'
+        )
+        conn.execute(
+            "UPDATE memory SET pinned=1, critical=1, lifecycle='accepted' WHERE id=?",
+            (pinned,)
+        )
+        conn.execute(
+            "UPDATE memory SET lifecycle='accepted' WHERE id=?", (matching,)
+        )
+        conn.close()
+
+        p = self.provider()
+        block = p.prefetch('nebula matching recall marker')
+        self.assertIn('unrelated pinned recall marker', block)
+        self.assertIn('nebula matching recall marker', block)
+
+        conn = store.open_store(self.db)
+        try:
+            counts = dict(conn.execute(
+                'SELECT id, recall_count FROM memory WHERE id IN (?, ?)',
+                (pinned, matching)
+            ).fetchall())
+        finally:
+            conn.close()
+        self.assertEqual(counts, {pinned: 1, matching: 1})
+
     def test_recall_status_counts_only_complete_rendered_facts(self):
         conn = store.open_store(self.db)
         for content in ('nebula ' + 'x' * 400, 'nebula short fact'):

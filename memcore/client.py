@@ -80,8 +80,11 @@ class MemCore:
         content: str,
         memory_type: str = "fact",
         scope: str = "project",
+        source_file: str | pathlib.Path | None = None,
+        source_commit: str | None = None,
+        source_hash: str | None = None,
     ) -> str:
-        """Store a governed memory. Returns the created memory ID."""
+        """Store a governed memory, optionally tied to a source file's SHA-256."""
         mid, _ = core.create_memory(
             self.conn,
             self.project,
@@ -89,6 +92,9 @@ class MemCore:
             content,
             memory_type=memory_type,
             scope=scope,
+            source_file=source_file,
+            source_commit=source_commit,
+            source_hash=source_hash,
         )
         return mid
 
@@ -108,7 +114,7 @@ class MemCore:
                 provider=self.provider,
                 timeout=0.15,
             )
-        rows = core.search(
+        rows = core.recall(
             self.conn,
             self.project,
             self.agent,
@@ -135,14 +141,20 @@ class MemCore:
         memory_id: str,
         new_content: str,
         reason: str | None = None,
+        source_file: str | pathlib.Path | None = None,
+        source_commit: str | None = None,
+        source_hash: str | None = None,
     ) -> str:
-        """Update a memory with bitemporal version tracking."""
+        """Update a memory with bitemporal history and optional source provenance."""
         return core.supersede(
             self.conn,
             memory_id,
             self.agent,
             new_content,
             reason=reason,
+            source_file=source_file,
+            source_commit=source_commit,
+            source_hash=source_hash,
         )
 
     def reject(self, memory_id: str, reason: str = "rejected") -> None:

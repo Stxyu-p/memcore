@@ -208,13 +208,17 @@ class ContradictionGateTests(unittest.TestCase):
         result = ingest.process_event(self.conn, event_id)
         self.assertTrue(result.get('held'))
         self.assertEqual(result.get('decision'), 'contradiction_hold')
-        # Per plan Task 2: no accepted row — both rows conflict when the
-        # actor may mark (bob is member, seed is project scope).
-        row = self.conn.execute(
-            'SELECT lifecycle FROM memory WHERE id=?',
-            (result['memory_id'],),
-        ).fetchone()
-        self.assertEqual(row[0], 'conflict')
+        # Candidate 1: hold is audit-only on every lane. The refused row
+        # stays candidate and the established row is untouched — the old
+        # mark_contradiction demotion of both sides is gone.
+        rows = dict(self.conn.execute(
+            'SELECT id, lifecycle FROM memory WHERE project_id=?',
+            ('proj-test',)).fetchall())
+        self.assertEqual(rows[result['memory_id']], 'candidate')
+        self.assertTrue(all(lc != 'conflict' for lc in rows.values()))
+        mark_conflicts = self.conn.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE action='mark_conflict'").fetchone()[0]
+        self.assertEqual(mark_conflicts, 0)
         # Check audit for contradiction-hold
         audit = self.conn.execute(
             "SELECT action FROM audit_event WHERE action='contradiction-hold'"

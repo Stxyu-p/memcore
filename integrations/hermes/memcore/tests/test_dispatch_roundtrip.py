@@ -33,7 +33,7 @@ for _path in (REPO_ROOT, PLUGIN_ROOT):
     if _value not in sys.path:
         sys.path.insert(0, _value)
 
-from memcore import store
+from memcore.store import open_store, open_store_readonly
 from native_provider import MemCoreMemoryProvider, agent_plugin
 
 
@@ -56,7 +56,7 @@ def _real_store_fingerprint():
     """(exists, memory count) of the user's real store, or None when absent."""
     if not REAL_STORE.exists():
         return None
-    conn = store.open_store_readonly(str(REAL_STORE))
+    conn = open_store_readonly(str(REAL_STORE))
     try:
         return conn.execute('SELECT count(*) FROM memory').fetchone()[0]
     finally:
@@ -67,7 +67,7 @@ class DispatchRoundTripTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='memcore_dispatch_')
         self.db = os.path.join(self.tmp.name, 'memory.db')
-        conn = store.open_store(self.db)
+        conn = open_store(self.db)
         conn.execute("INSERT INTO project (id, name) VALUES ('proj-demo','demo')")
         conn.execute("INSERT INTO agent (id, name, profile_key) VALUES ('agent-alice','alice','alice')")
         conn.execute(
@@ -124,7 +124,7 @@ class DispatchRoundTripTests(unittest.TestCase):
         }))
         memory_id = written.get('memory_id') or written.get('id')
 
-        conn = store.open_store(self.db)
+        conn = open_store(self.db)
         try:
             row = conn.execute(
                 'SELECT lifecycle, verification, scope FROM memory WHERE id=?', (memory_id,)
@@ -148,7 +148,7 @@ class DispatchRoundTripTests(unittest.TestCase):
             real_after, self.real_before,
             'memory tool call mutated the real user store %s' % REAL_STORE,
         )
-        conn = store.open_store_readonly(str(REAL_STORE))
+        conn = open_store_readonly(str(REAL_STORE))
         try:
             leaked = conn.execute(
                 'SELECT count(*) FROM memory_version WHERE content LIKE ?', (PROBE_CONTENT[:30],)
@@ -172,14 +172,14 @@ class StoreLeakDetectorTests(unittest.TestCase):
         self.injected_db = os.path.join(self.tmp.name, 'injected.db')
         self.real_db = os.path.join(self.tmp.name, 'real.db')
         for path in (self.injected_db, self.real_db):
-            conn = store.open_store(path)
-            conn.execute("INSERT INTO project (id, name) VALUES ('proj-demo','demo')")
-            conn.execute("INSERT INTO agent (id, name, profile_key) VALUES ('agent-alice','alice','alice')")
-            conn.execute(
-                "INSERT INTO project_membership (project_id, agent_id, role)"
-                " VALUES ('proj-demo','agent-alice','owner')"
-            )
-            conn.close()
+                    conn = open_store(path)
+                    conn.execute("INSERT INTO project (id, name) VALUES ('proj-demo','demo')")
+                    conn.execute("INSERT INTO agent (id, name, profile_key) VALUES ('agent-alice','alice','alice')")
+                    conn.execute(
+                        "INSERT INTO project_membership (project_id, agent_id, role)"
+                        " VALUES ('proj-demo','agent-alice','owner')"
+                    )
+                    conn.close()
         agent_plugin.reset_conn()
 
     def tearDown(self):
@@ -187,11 +187,11 @@ class StoreLeakDetectorTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _count(self, path):
-        conn = store.open_store_readonly(path)
-        try:
-            return conn.execute('SELECT count(*) FROM memory').fetchone()[0]
-        finally:
-            conn.close()
+            conn = open_store_readonly(path)
+            try:
+                return conn.execute('SELECT count(*) FROM memory').fetchone()[0]
+            finally:
+                conn.close()
 
     def test_leak_is_detected_by_the_same_fingerprint_check(self):
         """Without the config override the write lands in the real config's store."""

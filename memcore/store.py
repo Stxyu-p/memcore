@@ -850,13 +850,14 @@ def verify_all_seals(conn, limit: int = 10000) -> dict:
 
 def pack_vector(floats: list[float]) -> bytes:
     """Pack a list of float numbers into an IEEE 754 float32 little-endian binary BLOB."""
-    return struct.pack(f'<{len(floats)}f', *floats)
+    from . import embedding
+    return embedding.pack_vector(floats)
 
 
 def unpack_vector(blob: bytes) -> list[float]:
     """Unpack an IEEE 754 float32 little-endian binary BLOB into a list of floats."""
-    count = len(blob) // 4
-    return list(struct.unpack(f'<{count}f', blob))
+    from . import embedding
+    return embedding.unpack_vector(blob)
 
 
 def store_embedding(conn: sqlite3.Connection, memory_id: str, version_id: str,

@@ -6,7 +6,9 @@ Uses standard library only (urllib.request). Fails closed to None so callers
 can gracefully fall back to lexical FTS5 search without disrupting operations.
 """
 import json
+import math
 import os
+import struct
 import time
 import urllib.error
 import urllib.request
@@ -100,6 +102,130 @@ def is_circuit_open() -> bool:
         _circuit_open_until = 0.0
         return False
     return True
+
+
+def pack_vector(floats: list[float]) -> bytes:
+    """Pack a list of float numbers into an IEEE 754 float32 little-endian binary BLOB."""
+    return struct.pack(f'<{len(floats)}f', *floats)
+
+
+def unpack_vector(blob: bytes) -> list[float]:
+    """Unpack an IEEE 754 float32 little-endian binary BLOB into a list of floats."""
+    count = len(blob) // 4
+    return list(struct.unpack(f'<{count}f', blob))
+
+
+def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    """Compute cosine similarity between two float vectors.
+
+    Returns float in [-1.0, 1.0]. Zero-vectors or mismatched dims return 0.0.
+    """
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for a, b in zip(vec_a, vec_b):
+        dot += a * b
+        norm_a += a * a
+        norm_b += b * b
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return dot / math.sqrt(norm_a * norm_b)
+
+
+_LIFECYCLE_ORDER = {'accepted': 0, 'conflict': 1}
+_VERIF_ORDER = {'user_authoritative': 0, 'runtime_verified': 1, 'source_backed': 2}
+
+
+def query_vector_candidates(
+    conn,
+    project_id: str,
+    agent_id: str,
+    query_vec: list[float],
+    limit: int = 20,
+    *,
+    tombstone_guard: str | None = None,
+    freshness_sql: str | None = None,
+    freshness_params: tuple = (),
+    detail_filter: str = '',
+    detail_params: tuple = (),
+) -> list[tuple]:
+    """Retrieve candidate memories having embeddings and rank by cosine similarity.
+
+    Encapsulates binary vector deserialization, cosine similarity computation,
+    and candidate sorting. Returns standard 9-tuple candidate rows:
+    (id, scope, lifecycle, verification, freshness, content, owner, rank, fp)
+    """
+    if not query_vec:
+        return []
+
+    query_norm_sq = sum(x * x for x in query_vec)
+    if query_norm_sq <= 0.0:
+        return []
+    query_norm = math.sqrt(query_norm_sq)
+
+    try:
+        cur = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_embedding'"
+        )
+        if not cur.fetchone():
+            return []
+    except Exception:
+        return []
+
+    guard_sql = ('AND ' + tombstone_guard) if tombstone_guard else ''
+    fresh_proj = (freshness_sql + ' AS freshness') if freshness_sql else "m.freshness AS freshness"
+
+    sql = (
+        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+        '       ' + fresh_proj + ', '
+        '       v.content, m.owner_agent_id, e.vector, '
+        '       m.claim_fingerprint, m.pinned '
+        'FROM memory m '
+        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+        'JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
+        'WHERE m.project_id = ? '
+        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
+        + guard_sql + ' ' + detail_filter
+    )
+    params = tuple(freshness_params) + (project_id, agent_id) + tuple(detail_params)
+
+    try:
+        cur = conn.execute(sql, params)
+        raw_rows = cur.fetchall()
+    except Exception:
+        return []
+
+    candidates = []
+    for row in raw_rows:
+        mid, scope, lifecycle, verif, freshness, content, owner, blob, fp, pinned = row
+        doc_vec = unpack_vector(blob)
+        if len(doc_vec) != len(query_vec):
+            continue
+        dot = 0.0
+        doc_norm_sq = 0.0
+        for q, d in zip(query_vec, doc_vec):
+            dot += q * d
+            doc_norm_sq += d * d
+        if doc_norm_sq <= 0.0:
+            sim = 0.0
+        else:
+            sim = dot / (query_norm * math.sqrt(doc_norm_sq))
+        # rank: lower is better to match bm25 convention (e.g. -sim)
+        rank = -sim
+        candidates.append((mid, scope, lifecycle, verif, freshness, content, owner, rank, fp, pinned))
+
+    def _cand_sort_key(c):
+        pinned_order = 0 if c[9] else 1
+        lifecycle_order = _LIFECYCLE_ORDER.get(c[2], 2)
+        verif_order = _VERIF_ORDER.get(c[3], 3)
+        return (pinned_order, lifecycle_order, verif_order, c[7])
+
+    candidates.sort(key=_cand_sort_key)
+    # Return standard 9-tuple shape (excluding pinned helper at index 9)
+    return [c[:9] for c in candidates[:limit]]
 
 
 def reset_circuit_breaker() -> None:

@@ -3,9 +3,12 @@
 All writes: tombstone admission guard -> short transaction -> audit event.
 All reads: scope enforced in SQL WHERE (never post-filtering).
 """
+
+__version__ = "0.8.8"
 import hashlib
 import json
 import math
+import pathlib
 import re
 import sqlite3
 import unicodedata
@@ -92,6 +95,38 @@ def fingerprint(content: str) -> str:
 
 def _new_id(prefix):
     return f'{prefix}-{uuid.uuid4().hex[:12]}'
+
+
+def _source_metadata(source_file=None, source_commit=None, source_hash=None):
+    """Normalize file provenance and bind its SHA-256 to the saved contents."""
+    if source_file is None:
+        if source_hash is not None:
+            raise MemCoreError('source_hash requires source_file')
+        return None, source_commit, None
+    try:
+        path = pathlib.Path(source_file).expanduser().resolve(strict=True)
+        if not path.is_file():
+            raise MemCoreError('source_file must be a regular file')
+        current_hash = _sha256_file(path)
+    except MemCoreError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MemCoreError(f'cannot read source_file: {exc}') from exc
+    if source_hash is not None:
+        if not isinstance(source_hash, str) or not re.fullmatch(
+                r'[0-9a-fA-F]{64}', source_hash):
+            raise MemCoreError('source_hash must be a 64-character SHA-256 hex digest')
+        if source_hash.lower() != current_hash:
+            raise MemCoreError('source_hash does not match source_file contents')
+    return current_hash, source_commit, str(path)
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with pathlib.Path(path).open('rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _now() -> str:
@@ -325,7 +360,9 @@ def _maybe_embed_version(conn, memory_id: str, version_id: str, content: str) ->
 
 def create_memory(conn, project_id, agent_id, content, scope='private',
                   memory_type='fact', lifecycle='candidate', idempotency_key=None,
-                  reason=None, scope_detail=None, _manage_transaction=True):
+                  reason=None, scope_detail=None, source_file=None,
+                  source_commit=None, source_hash=None,
+                  _manage_transaction=True):
     """Create a memory + first immutable version. Tombstone guard applies.
 
     Returns (memory_id, version_id) or existing ids if idempotency_key replays.
@@ -342,6 +379,9 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         raise MemCoreError(
             f'invalid initial lifecycle: {lifecycle}; use an explicit transition'
         )
+    source_hash, source_commit, source_file = _source_metadata(
+        source_file, source_commit, source_hash
+    )
 
     if _manage_transaction:
         conn.execute('BEGIN IMMEDIATE')
@@ -457,8 +497,10 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             )
         conn.execute(
             'INSERT INTO memory_version (id, memory_id, content, reason, '
-            '  created_by_agent_id, created_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (ver_id, mem_id, content, reason, agent_id, now, now)
+            '  created_by_agent_id, created_at, valid_from, source_hash, '
+            '  source_commit, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (ver_id, mem_id, content, reason, agent_id, now, now,
+             source_hash, source_commit, source_file)
         )
         _maybe_embed_version(conn, mem_id, ver_id, content)
         _audit(conn, 'create', agent_id, mem_id, project_id,
@@ -495,7 +537,8 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         raise
 
 
-def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=None):
+def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=None,
+              source_file=None, source_commit=None, source_hash=None):
     """Correct a memory in place while preserving immutable version history.
 
     The old claim receives a scope-appropriate refusal fingerprint, its
@@ -508,6 +551,9 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
         new_content.encode('utf-8')
     except UnicodeEncodeError:
         raise MemCoreError('new_content contains unencodable surrogate characters')
+    source_hash, source_commit, source_file = _source_metadata(
+        source_file, source_commit, source_hash
+    )
     conn.execute('BEGIN IMMEDIATE')
     try:
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
@@ -541,9 +587,11 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
         )
         conn.execute(
             'INSERT INTO memory_version (id, memory_id, content, reason, '
-            '  created_by_agent_id, supersedes_version_id, created_at, valid_from) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            (new_ver, memory_id, new_content, reason, agent_id, old_ver, now, now)
+            '  created_by_agent_id, supersedes_version_id, created_at, valid_from, '
+            '  source_hash, source_commit, source_file) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (new_ver, memory_id, new_content, reason, agent_id, old_ver, now, now,
+             source_hash, source_commit, source_file)
         )
         _maybe_embed_version(conn, memory_id, new_ver, new_content)
 
@@ -584,7 +632,8 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
 
 
 def supersede_memory(conn, old_memory_id, agent_id, new_content, reason=None,
-                     new_project_id=None):
+                     new_project_id=None, source_file=None,
+                     source_commit=None, source_hash=None):
     """Correction model: supersede old memory in place.
 
     Cross-project moves are not part of the correction model. Reject an
@@ -598,7 +647,11 @@ def supersede_memory(conn, old_memory_id, agent_id, new_content, reason=None,
             raise MemCoreError(
                 'supersede_memory cannot move a memory across projects'
             )
-    return supersede(conn, old_memory_id, agent_id, new_content, reason)
+    return supersede(
+        conn, old_memory_id, agent_id, new_content, reason,
+        source_file=source_file, source_commit=source_commit,
+        source_hash=source_hash
+    )
 
 
 def promote(conn, memory_id, agent_id):
@@ -1167,8 +1220,10 @@ def accept_memory(conn, memory_id, agent_id, reason, _manage_transaction=True):
 
     Used by the autonomy paths (corroboration, explicit durable signals,
     high-confidence semantic verdicts). Human-equivalent trust: verification
-    is left untouched here — callers set it explicitly. Tombstone-blocked
-    claims and terminal lifecycles refuse.
+    is left untouched here — callers set it explicitly. Terminal lifecycles
+    refuse; the tombstone veto is checked BEFORE the already-accepted early
+    return, so re-accepting a row whose fingerprint was tombstoned elsewhere
+    still refuses loudly instead of silently succeeding.
     """
     if _manage_transaction:
         conn.execute('BEGIN IMMEDIATE')
@@ -1176,10 +1231,6 @@ def accept_memory(conn, memory_id, agent_id, reason, _manage_transaction=True):
         project_id, scope, owner, lifecycle, _role = _require_memory_write_access(
             conn, memory_id, agent_id
         )
-        if lifecycle == 'accepted':
-            if _manage_transaction:
-                conn.execute('ROLLBACK')
-            return False
         if lifecycle in ('rejected', 'disabled', 'superseded'):
             raise MemCoreError(
                 f'cannot accept terminal memory (lifecycle={lifecycle})'
@@ -1190,6 +1241,10 @@ def accept_memory(conn, memory_id, agent_id, reason, _manage_transaction=True):
         )
         if blocked:
             raise TombstoneBlocked(claim_fp, blocked[0])
+        if lifecycle == 'accepted':
+            if _manage_transaction:
+                conn.execute('ROLLBACK')
+            return False
         conn.execute(
             "UPDATE memory SET lifecycle='accepted', updated_at=? WHERE id=?",
             (_now(), memory_id),
@@ -1208,7 +1263,51 @@ def accept_memory(conn, memory_id, agent_id, reason, _manage_transaction=True):
         raise
 
 
-def set_golden(conn, memory_id, agent_id, golden=True, _manage_transaction=True):
+def auto_accept(conn, memory_id, agent_id, reason):
+    """One deep promotion step: conflict gate -> hold -> accept -> sweep.
+
+    Owns the whole auto-accept sequence every promotion lane used to
+    re-assemble by hand: fetch the live row, run pre_accept_conflict_check,
+    audit-only hold on hits (never resolve, never touch the opposing row),
+    accept_memory on clean, then the maybe_auto_corrob sweep. Joins the
+    caller's already-open transaction: no BEGIN/COMMIT here, so a missing
+    transaction is a caller bug, not this function's to mask.
+    Returns {'held': bool, 'hits': [...], 'accepted': bool,
+    'transitioned': bool, 'sweep': {...}}: 'transitioned' is False when the
+    row was already accepted (accept_memory no-op); 'sweep' is present only
+    on the clean path.
+    """
+    row = conn.execute(
+        'SELECT m.project_id, v.content, m.claim_fingerprint '
+        'FROM memory m JOIN memory_version v '
+        'ON v.id = m.current_version_id AND v.memory_id = m.id '
+        'WHERE m.id=?',
+        (memory_id,),
+    ).fetchone()
+    if row is None:
+        raise NotFound(f'memory {memory_id} not found')
+    project_id, content, claim_fp = row
+    if not claim_fp:
+        # Legacy rows predate the stored fingerprint; the lanes always swept
+        # on the content-derived print, so fall back to it (accept_memory
+        # repairs the stored NULL when it runs).
+        claim_fp = fingerprint(content)
+    hits = pre_accept_conflict_check(
+        conn, project_id, content, exclude_memory_id=memory_id)
+    if hits:
+        _audit(conn, 'contradiction-hold', agent_id, memory_id, project_id,
+               {'hits': [list(h) for h in hits]})
+        return {'held': True, 'hits': hits, 'accepted': False,
+                'transitioned': False}
+    transitioned = accept_memory(
+        conn, memory_id, agent_id, reason, _manage_transaction=False)
+    sweep = maybe_auto_corrob(conn, project_id, claim_fp, agent_id)
+    return {'held': False, 'hits': [], 'accepted': True,
+            'transitioned': transitioned, 'sweep': sweep}
+
+
+def set_golden(
+conn, memory_id, agent_id, golden=True, _manage_transaction=True):
     """Pin/unpin a memory as Golden Rule (pinned+critical). Audited."""
     if _manage_transaction:
         conn.execute('BEGIN IMMEDIATE')
@@ -1406,6 +1505,71 @@ def apply_freshness_decay(conn, aging_days=30, stale_days=90, now=None):
             pass
         raise
 
+
+def check_source_staleness(conn, memory_ids, get_head=None, repo_root=None):
+    """Mark recalled memories stale when their tracked file content changed.
+
+    Git commit is provenance context only; unrelated commits do not change this
+    fact's source. Rows without a saved file hash or with an unavailable source
+    are skipped. Freshness changes without touching updated_at. Best-effort:
+    returns flipped ids and never raises. ``get_head`` and ``repo_root`` are
+    retained as ignored compatibility arguments; file content is authoritative.
+    """
+    ids = [m for m in dict.fromkeys(memory_ids or []) if m]
+    if not ids:
+        return []
+    try:
+        marks = ','.join('?' for _ in ids)
+        rows = conn.execute(
+            'SELECT m.id, m.current_version_id, v.source_hash, v.source_file '
+            'FROM memory m JOIN memory_version v '
+            'ON v.id = m.current_version_id AND v.memory_id = m.id '
+            f"WHERE m.id IN ({marks}) AND m.freshness != 'stale' "
+            'AND v.source_hash IS NOT NULL AND v.source_file IS NOT NULL',
+            ids,
+        ).fetchall()
+        changed = []
+        for mem_id, version_id, saved_hash, source_file in rows:
+            try:
+                path = pathlib.Path(source_file).expanduser()
+                if not path.is_absolute():
+                    continue
+                if not path.is_file():
+                    continue
+                current_hash = _sha256_file(path)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                continue
+            if str(saved_hash).lower() != current_hash:
+                changed.append((mem_id, version_id, source_file,
+                                str(saved_hash), current_hash))
+        if not changed:
+            return []
+
+        flipped = []
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            for mem_id, version_id, source_file, saved_hash, current_hash in changed:
+                cur = conn.execute(
+                    "UPDATE memory SET freshness='stale' "
+                    "WHERE id=? AND current_version_id=? AND freshness != 'stale'",
+                    (mem_id, version_id),
+                )
+                if cur.rowcount:
+                    _audit(conn, 'auto_stale_source_changed', None, mem_id,
+                           None, {'source_file': source_file,
+                                  'source_hash': saved_hash,
+                                  'current_source_hash': current_hash})
+                    flipped.append(mem_id)
+            conn.execute('COMMIT')
+        except Exception:
+            try:
+                conn.execute('ROLLBACK')
+            except sqlite3.OperationalError:
+                pass
+            raise
+        return flipped
+    except Exception:
+        return []
 
 # Ã¢â€â‚¬Ã¢â€â‚¬ reads (scope enforced in SQL WHERE) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
@@ -2143,6 +2307,55 @@ def search(conn, project_id, agent_id, query, limit=20,
 
     fused_candidates.sort(key=_fused_sort_key)
     return _merge_exact_fallback(fused_candidates, exact_rows, limit, user_query)
+
+
+def finalize_recall(conn, rows):
+    """Apply recall side effects and freshness labels to already selected rows.
+
+    Shared by the SDK recall path and integrations that assemble rows from
+    more than one governed source, such as pinned plus query-matched memories.
+    Best-effort writes ensure read-only queries still return their candidates.
+    """
+    rows = list(rows or [])
+    if not rows:
+        return []
+
+    recall_ids = [r[0] for r in rows]
+    flipped = set()
+    try:
+        record_recall(conn, recall_ids)
+        flipped = set(check_source_staleness(conn, recall_ids))
+    except Exception:
+        # Best-effort: failures on read-only databases or temporary locks
+        # must never break memory retrieval for the caller.
+        pass
+    out = []
+    for r in rows:
+        row_list = list(r)
+        if len(row_list) > 4 and row_list[0] in flipped:
+            row_list[4] = 'stale'
+        if len(row_list) > 5:
+            out.append(tuple(row_list))
+        else:
+            out.append(r)
+    return out
+
+
+def recall(conn, project_id, agent_id, query, limit=20,
+           scope_detail=None, query_vec=None, get_head=None, repo_root=None):
+    """The unified, deep memory recall lifecycle.
+
+    Encapsulates candidate search, access reinforcement, source staleness
+    verification, and final freshness resolution into a single interface.
+    Returns list of candidate tuples with finalized freshness state. The legacy
+    ``get_head`` and ``repo_root`` keywords are accepted for call compatibility;
+    source-file hashes now determine freshness.
+    """
+    rows = search(
+        conn, project_id, agent_id, query, limit=limit,
+        scope_detail=scope_detail, query_vec=query_vec
+    )
+    return finalize_recall(conn, rows)
 
 
 #: How much deeper than ``limit`` search() reads before collapsing duplicate

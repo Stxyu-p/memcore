@@ -328,16 +328,15 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
         )
         # ADR-0019 high-confidence lane: confidence >= 0.95 self-accepts.
         # Below stays candidate. Tombstone-blocked claims refuse loudly.
-        # Task 2 gate: contradiction hit holds the accept, audits
-        # contradiction-hold, never resolves.
+        # core.auto_accept owns gate -> hold -> accept -> sweep; the lane
+        # keeps only the event/analysis writes and its decision strings.
         decision = 'semantic_private_candidate'
+        swept = False
         if confidence is not None and float(confidence) >= core.HIGH_CONFIDENCE_ACCEPT:
-            gate_hits = core.pre_accept_conflict_check(
-                conn, project_id, candidate_content,
-                exclude_memory_id=memory_id)
-            if gate_hits:
-                core._audit(conn, 'contradiction-hold', agent_id, memory_id,
-                            project_id, {'hits': [list(h) for h in gate_hits]})
+            outcome = core.auto_accept(
+                conn, memory_id, agent_id,
+                'high-confidence semantic auto-accept')
+            if outcome['held']:
                 now = core._now()
                 conn.execute(
                     "INSERT INTO ingest_derivation "
@@ -355,14 +354,12 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
                 return {'event_id': event_id, 'status': 'processed',
                         'decision': 'contradiction_hold', 'analysis_id': analysis_id,
                         'memory_id': memory_id, 'held': True}
-            core.accept_memory(
-                conn, memory_id, agent_id,
-                'high-confidence semantic auto-accept',
-                _manage_transaction=False)
             decision = 'semantic_private_accepted'
-        # Either lane may complete a corroboration set started by other
-        # agents — always run the sweep on the new row.
-        core.maybe_auto_corrob(conn, project_id, claim_fp, agent_id)
+            swept = True
+        if not swept:
+            # The low-confidence candidate path still needs its own sweep:
+            # it may complete a corroboration set started by other agents.
+            core.maybe_auto_corrob(conn, project_id, claim_fp, agent_id)
         conn.execute(
             "INSERT INTO ingest_derivation "
             "(event_id,memory_id,relation,created_at) VALUES (?,?,'created',?)",
@@ -648,19 +645,29 @@ def process_event(conn, event_id):
     conn.execute('BEGIN IMMEDIATE')
     try:
         row = conn.execute(
-            'SELECT project_id, agent_id, event_type, user_content, metadata, status '
+            'SELECT project_id, agent_id, event_type, user_content, metadata, status, decision '
             'FROM ingest_event WHERE id=?', (event_id,)
         ).fetchone()
         if row is None:
             raise core.MemCoreError(f'ingest event not found: {event_id}')
-        project_id, agent_id, event_type, user_content, metadata_raw, status = row
+        project_id, agent_id, event_type, user_content, metadata_raw, status, decision = row
         try:
             metadata = json.loads(metadata_raw or '{}')
         except (TypeError, ValueError, json.JSONDecodeError):
             metadata = {}
         if status != 'pending':
+            linked = conn.execute(
+                'SELECT memory_id FROM ingest_derivation WHERE event_id=? '
+                'ORDER BY CASE relation WHEN \'created\' THEN 0 WHEN \'duplicate\' THEN 1 '
+                'ELSE 2 END, created_at DESC LIMIT 1', (event_id,)
+            ).fetchone()
             conn.execute('ROLLBACK')
-            return {'event_id': event_id, 'status': status}
+            result = {'event_id': event_id, 'status': status}
+            if decision:
+                result['decision'] = decision
+            if linked:
+                result['memory_id'] = linked[0]
+            return result
         if event_type == 'memory_write':
             action = str(metadata.get('action') or '').strip().lower()
             if action in ('replace', 'remove'):
@@ -730,22 +737,17 @@ def process_event(conn, event_id):
             idempotency_key=f'ingest:{event_id}',
             reason='native provider journal analysis', _manage_transaction=False
         )
-        # ADR-0019 explicit lane: a deliberate durable signal ("จำไว้ว่า…",
-        # memory_write/add) self-accepts instead of parking in candidate.
-        # Tombstone-blocked claims refuse loudly; corroboration still runs.
-        # Task 2 gate: contradiction hit holds the accept, audits
-        # contradiction-hold, marks conflict when permitted, never resolves.
-        gate_hits = core.pre_accept_conflict_check(
-            conn, project_id, candidate, exclude_memory_id=memory_id)
-        if gate_hits:
-            try:
-                core.mark_contradiction(
-                    conn, memory_id, gate_hits[0][0], agent_id,
-                    gate_hits[0][1], _manage_transaction=False)
-            except core.PermissionDenied:
-                pass
-            core._audit(conn, 'contradiction-hold', agent_id, memory_id,
-                        project_id, {'hits': [list(h) for h in gate_hits]})
+        # ADR-0019 explicit lane: a deliberate durable signal self-accepts
+        # instead of parking in candidate. Tombstone-blocked claims refuse
+        # loudly. core.auto_accept owns gate -> hold -> accept -> sweep;
+        # the lane keeps only the event writes and its decision strings.
+        # ponytail: hold is audit-only on every lane; the removed
+        # mark_contradiction demoted the established row from an explicit
+        # write, so one bad signal could bury a good fact with no recovery.
+        outcome = core.auto_accept(
+            conn, memory_id, agent_id,
+            'explicit durable signal auto-accept')
+        if outcome['held']:
             conn.execute(
                 "INSERT INTO ingest_derivation "
                 "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'ignored', ?)",
@@ -759,13 +761,7 @@ def process_event(conn, event_id):
             return {'event_id': event_id, 'status': 'processed',
                     'decision': 'contradiction_hold', 'memory_id': memory_id,
                     'held': True}
-        decision = 'private_candidate'
-        core.accept_memory(
-            conn, memory_id, agent_id,
-            'explicit durable signal auto-accept', _manage_transaction=False)
         decision = 'private_accepted'
-        core.maybe_auto_corrob(
-            conn, project_id, core.fingerprint(candidate), agent_id)
         conn.execute(
             "INSERT INTO ingest_derivation "
             "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'created', ?)",
@@ -798,6 +794,44 @@ def process_event(conn, event_id):
             except Exception:
                 pass
         raise
+
+
+def record(conn, project_id, agent_id, event_type, *, session_id='',
+           user_content='', assistant_content='', metadata=None,
+           auto_process=True):
+    """Unified journal recording and automatic classification.
+
+    Appends an ingress event durably to the journal and immediately triggers
+    deterministic classification/processing when auto_process is True.
+    Returns status dictionary augmented with 'event_id' and 'created'.
+    """
+    event_id, created = append_event(
+        conn, project_id, agent_id, event_type,
+        session_id=session_id, user_content=user_content,
+        assistant_content=assistant_content, metadata=metadata
+    )
+    if not auto_process and created:
+        return {'event_id': event_id, 'created': True, 'status': 'pending'}
+    if not auto_process:
+        row = conn.execute(
+            'SELECT status, decision FROM ingest_event WHERE id=?', (event_id,)
+        ).fetchone()
+        if row is None:
+            raise core.MemCoreError(f'ingest event not found: {event_id}')
+        result = {'event_id': event_id, 'created': False, 'status': row[0]}
+        if row[1]:
+            result['decision'] = row[1]
+        linked = conn.execute(
+            'SELECT memory_id FROM ingest_derivation WHERE event_id=? '
+            'ORDER BY CASE relation WHEN \'created\' THEN 0 WHEN \'duplicate\' THEN 1 '
+            'ELSE 2 END, created_at DESC LIMIT 1', (event_id,)
+        ).fetchone()
+        if linked:
+            result['memory_id'] = linked[0]
+        return result
+    proc = process_event(conn, event_id)
+    proc['created'] = created
+    return proc
 
 
 def journal_stats(conn, project_id=None, agent_id=None):
@@ -1172,6 +1206,25 @@ def auto_resolve_defer_cap(conn, max_defers=3, actor_agent_id=None):
                 pass
             raise
     return dismissed
+
+
+def sweep(conn, *, builtin_days=7, max_defers=3, actor_agent_id=None):
+    """Run full automated journal maintenance sweep in one call.
+
+    Auto-dismisses stale unresolved built-in mutations older than builtin_days
+    and auto-resolves semantic events deferred max_defers or more times.
+    Returns summary dict of dismissed event IDs.
+    """
+    stale_builtin = auto_dismiss_stale_builtin(
+        conn, days=builtin_days, actor_agent_id=actor_agent_id
+    )
+    defer_cap = auto_resolve_defer_cap(
+        conn, max_defers=max_defers, actor_agent_id=actor_agent_id
+    )
+    return {
+        'stale_builtin': stale_builtin,
+        'defer_cap': defer_cap,
+    }
 
 
 def prune_journal(conn, days=30, statuses=('ignored', 'processed'), project_id=None):

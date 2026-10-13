@@ -150,24 +150,6 @@ def _nearest_member_to_anchor(text, excl, other_tok):
     return best, best_d
 
 
-def _near_anchor_positions(text, excl, own_tok, other_tok, window=6):
-    """Exclusive-set members within `window` tokens of a shared anchor.
-
-    Anchor = token present on both sides (len>=4, not a pure number).
-    Returns the member subset near an anchor, else empty set.
-    """
-    toks = _tokens(text)
-    anchors = {i for i, t in enumerate(toks)
-               if len(t) >= 4 and t in other_tok
-               and not _NUMBER_RE.fullmatch(t)}
-    if not anchors:
-        return set()
-    out = set()
-    for i, t in enumerate(toks):
-        if t in excl and any(abs(i - a) <= window for a in anchors):
-            out.add(t)
-    return out
-
 
 def query_fact_incompatible(query, fact):
     """True when a query and a fact share a subject anchor but state

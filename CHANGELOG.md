@@ -6,11 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Token-efficient recall, write-lane secret scrubbing, CI removal.
+Token-efficient recall, write-lane secret scrubbing, in-process C-level vector math, short-circuit search.
 
 ### Added
 - `memory_search` returns 180-char previews by default (`content_truncated`,
   `content_chars`); full bodies only with `include_content=True`.
+- Salience-aware L1 preview scoring (`_truncate_row_content`): prioritizes
+  negations, numerical constraints, and file paths when truncating rows to 180 chars.
+- In-process C-level pointer vector dot product in `core._vector_search_lane`
+  and `core.cosine_similarity` via `array.array('f')` and `operator.mul`,
+  reducing p50 query latency from 4.12 ms to 2.42 ms and tail p95 from 8.75 ms to 5.20 ms.
+- Longest-first selective substring matching in `core._run_substring_lane`,
+  short-circuiting SQLite table scans on spaceless scripts (Thai/CJK) and cutting
+  worst-case query latency from 52.80 ms to 12.07 ms.
 - `core.scrub_secrets()`: high-precision credential redaction (sk-/ghp_/AKIA/
   xox-/Discord/AWS-secret/PEM) on every write lane — create, supersede,
   reject, semantic candidate/rationale — plus a null-byte guard.

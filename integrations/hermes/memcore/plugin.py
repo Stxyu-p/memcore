@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import sys
 import threading
 import uuid
@@ -167,16 +168,51 @@ MAX_ROW_CHARS = 220
 PINNED_MAX_SHARE = 0.5
 
 
+_NEG_PAT = re.compile(
+    r"\b(not|never|no|none|forbidden|prohibited|must\s+not|cannot|do\s+not)\b"
+    r"|(ห้าม|ไม่|ไม่ใช่|ไม่ได้|ยกเว้น|ปราศจาก)",
+    re.IGNORECASE,
+)
+_NUM_PATH_PAT = re.compile(r"(\d+(?:\.\d+)?|[a-zA-Z0-9_\-]+/[a-zA-Z0-9_.\-/]+|`[^`]+`)")
+
+
 def _truncate_row_content(content, max_chars):
     """Collapse whitespace, cap at max_chars on a word boundary + ellipsis.
 
     Space-separated text cuts at the last space (never mid-word). Thai and
     other spaceless scripts fall back to a hard cut — there is no boundary
     to respect. Short content passes through untouched.
+    Prioritizes salience (negations, numbers, paths) across clauses when possible.
     """
     text = ' '.join(str(content).split())
     if len(text) <= max_chars:
         return text
+
+    clauses = [c.strip() for c in re.split(r'(?<=[.!?])\s+|\n+', text) if c.strip()]
+    if len(clauses) > 1:
+        def score_clause(idx, cl):
+            score = 10.0 if idx == 0 else (3.0 / (idx + 1))
+            if _NEG_PAT.search(cl):
+                score += 15.0
+            score += min(len(_NUM_PATH_PAT.findall(cl)) * 3.0, 12.0)
+            return score
+
+        ranked = sorted(enumerate(clauses), key=lambda x: score_clause(x[0], x[1]), reverse=True)
+        selected = []
+        used_len = 0
+        for idx, cl in ranked:
+            add_len = len(cl) + (3 if selected else 0)
+            if used_len + add_len <= max_chars - 1:
+                selected.append((idx, cl))
+                used_len += add_len
+        if selected:
+            selected.sort(key=lambda x: x[0])
+            res = " … ".join(c for _, c in selected)
+            if len(res) < len(text) and not res.endswith("…"):
+                res += "…"
+            if len(res) <= max_chars + 1:
+                return res
+
     cut = text[:max_chars]
     space = cut.rfind(' ')
     if space > max_chars // 2:

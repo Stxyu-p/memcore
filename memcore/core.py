@@ -5,9 +5,11 @@ All reads: scope enforced in SQL WHERE (never post-filtering).
 """
 
 __version__ = "0.8.8"
+import array
 import hashlib
 import json
 import math
+import operator
 import pathlib
 import re
 import sqlite3
@@ -2055,9 +2057,11 @@ def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
 
     unicode61 never segments glued Thai, so this exists purely to bridge that.
     It carries NO bm25 rank, which is why search() runs it only as a fallback and
-    never lets it lead the result.
+    never lets it lead the result. Terms are ordered longest-first so SQLite's
+    OR evaluation short-circuits early on selective matches.
     """
-    or_clauses = ' OR '.join(['instr(v.content, ?) > 0'] * len(substr_terms))
+    sorted_terms = sorted(dict.fromkeys(substr_terms), key=len, reverse=True)
+    or_clauses = ' OR '.join(['instr(v.content, ?) > 0'] * len(sorted_terms))
     return conn.execute(
         'SELECT m.id, m.scope, m.lifecycle, m.verification, '
         '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
@@ -2077,7 +2081,7 @@ def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
         retention_tail + ', '
         'm.updated_at DESC, m.id ASC LIMIT ?',
         _freshness_params(now_iso) +
-        (project_id, agent_id) + tuple(substr_terms) + detail_params +
+        (project_id, agent_id) + tuple(sorted_terms) + detail_params +
         tuple(retention_params) + (min(500, limit * DISTINCT_OVERFETCH),)
     ).fetchall()
 
@@ -2089,13 +2093,11 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     """
     if not vec_a or not vec_b or len(vec_a) != len(vec_b):
         return 0.0
-    dot = 0.0
-    norm_a = 0.0
-    norm_b = 0.0
-    for a, b in zip(vec_a, vec_b):
-        dot += a * b
-        norm_a += a * a
-        norm_b += b * b
+    arr_a = array.array('f', vec_a)
+    arr_b = array.array('f', vec_b)
+    dot = sum(map(operator.mul, arr_a, arr_b))
+    norm_a = sum(a * a for a in arr_a)
+    norm_b = sum(b * b for b in arr_b)
     if norm_a <= 0.0 or norm_b <= 0.0:
         return 0.0
     return dot / math.sqrt(norm_a * norm_b)
@@ -2114,10 +2116,13 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
     if not store._table_exists(conn, 'memory_embedding'):
         return []
 
-    query_norm_sq = sum(x * x for x in query_vec)
+    q_arr = array.array('f', query_vec)
+    query_norm_sq = sum(x * x for x in q_arr)
     if query_norm_sq <= 0.0:
         return []
     query_norm = math.sqrt(query_norm_sq)
+    q_len = len(q_arr)
+    mul = operator.mul
 
     now_iso = _eval_now_iso()
     sql = (
@@ -2139,14 +2144,12 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
     candidates = []
     for row in cur.fetchall():
         mid, scope, lifecycle, verif, freshness, content, owner, blob, fp, pinned = row
-        doc_vec = store.unpack_vector(blob)
-        if len(doc_vec) != len(query_vec):
+        v_arr = array.array('f')
+        v_arr.frombytes(blob)
+        if len(v_arr) != q_len:
             continue
-        dot = 0.0
-        doc_norm_sq = 0.0
-        for q, d in zip(query_vec, doc_vec):
-            dot += q * d
-            doc_norm_sq += d * d
+        dot = sum(map(mul, q_arr, v_arr))
+        doc_norm_sq = sum(d * d for d in v_arr)
         if doc_norm_sq <= 0.0:
             sim = 0.0
         else:

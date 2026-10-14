@@ -184,6 +184,34 @@ def _truncate_row_content(content, max_chars):
     return cut.rstrip() + '…'
 
 
+#: Default preview cap for tool_memory_search (L0 progressive recall).
+#: Full bodies cost ~4.8x the chars of a preview row (BASELINE_token.md);
+#: the tool lane returns previews unless include_content=True is explicit.
+SEARCH_PREVIEW_CHARS = 180
+SEARCH_PREVIEW_MIN = 40
+SEARCH_PREVIEW_MAX = 500
+
+
+def _clamp_preview_chars(raw):
+    """Clamp hostile preview_chars into [MIN, MAX]; non-numeric -> default."""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return SEARCH_PREVIEW_CHARS
+    return min(max(n, SEARCH_PREVIEW_MIN), SEARCH_PREVIEW_MAX)
+
+
+def _preview_search_content(content, preview_chars):
+    """Collapse whitespace, cap at preview_chars via the shared row cap.
+
+    Returns (text, truncated). Short content passes through untouched.
+    """
+    text = ' '.join(str(content).split())
+    if len(text) <= preview_chars:
+        return text, False
+    return _truncate_row_content(text, preview_chars), True
+
+
 def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8,
                        pinned_max_share=PINNED_MAX_SHARE):
     """Deterministic, budget-capped recall block. Empty rows -> ''.
@@ -509,11 +537,23 @@ def tool_memory_search(args, ctx=None):
     try:
         pid, aid = _require_bound_membership(conn, project, agent_name)
         rows = core.recall(conn, pid, aid, query, limit=10)
-        return _tool_ok(results=[
-            {'id': r[0], 'scope': r[1], 'lifecycle': r[2],
-             'verification': r[3], 'freshness': r[4], 'content': r[5]}
-            for r in rows
-        ])
+        if args.get('include_content'):
+            return _tool_ok(results=[
+                {'id': r[0], 'scope': r[1], 'lifecycle': r[2],
+                 'verification': r[3], 'freshness': r[4], 'content': r[5],
+                 'content_truncated': False, 'content_chars': len(r[5] or '')}
+                for r in rows
+            ])
+        preview_chars = _clamp_preview_chars(args.get('preview_chars'))
+        results = []
+        for r in rows:
+            text, truncated = _preview_search_content(r[5], preview_chars)
+            results.append(
+                {'id': r[0], 'scope': r[1], 'lifecycle': r[2],
+                 'verification': r[3], 'freshness': r[4], 'content': text,
+                 'content_truncated': truncated,
+                 'content_chars': len(r[5] or '')})
+        return _tool_ok(results=results)
     except Exception as e:
         return _tool_error('%s: %s' % (type(e).__name__, e))
 
@@ -792,10 +832,14 @@ TOOL_SCHEMAS = [
     },
     {
         'name': 'memory_search',
-        'description': 'Search shared project memory (FTS5).',
+        'description': 'Search shared project memory (FTS5). Returns previews by default; full bodies need include_content.',
         'parameters': {
             'type': 'object',
-            'properties': {'query': {'type': 'string'}},
+            'properties': {
+                'query': {'type': 'string'},
+                'include_content': {'type': 'boolean'},
+                'preview_chars': {'type': 'integer'},
+            },
             'required': ['query'],
         },
         'handler': tool_memory_search,

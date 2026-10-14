@@ -4,6 +4,22 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Token-efficient recall, write-lane secret scrubbing, CI removal.
+
+### Added
+- `memory_search` returns 180-char previews by default (`content_truncated`,
+  `content_chars`); full bodies only with `include_content=True`.
+- `core.scrub_secrets()`: high-precision credential redaction (sk-/ghp_/AKIA/
+  xox-/Discord/AWS-secret/PEM) on every write lane — create, supersede,
+  reject, semantic candidate/rationale — plus a null-byte guard.
+- `BASELINE_{latency,token,resource,error}.md`: frozen pre-sweep measurements.
+
+### Removed
+- `.github/workflows/ci.yml`: the live store is the only verification lane
+  (harness 543 green locally, no remote CI dependency).
+
 ## [0.8.8] - 2026-10-11
 
 Hardening round & architecture deepening: source-file freshness checks, deep Recall lifecycle, retry-safe journal recording, version sync.

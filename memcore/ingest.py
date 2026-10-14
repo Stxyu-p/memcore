@@ -222,10 +222,10 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
     """
     analyzer = str(analyzer or '').strip()[:128]
     verdict = str(verdict or '').strip().lower()
-    candidate_content = _clean_text(candidate_content).strip()
+    candidate_content = core.scrub_secrets(_clean_text(candidate_content).strip())
     if len(candidate_content) > MAX_ANALYSIS_CANDIDATE_CHARS:
         raise core.MemCoreError('semantic candidate exceeds 4000 characters; submit a complete atomic fact')
-    rationale = _clean_text(rationale).strip()[:4000]
+    rationale = core.scrub_secrets(_clean_text(rationale).strip()[:4000])
     metadata = metadata if isinstance(metadata, dict) else {}
     if not analyzer:
         raise core.MemCoreError('semantic analyzer name is required')

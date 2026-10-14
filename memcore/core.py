@@ -71,6 +71,46 @@ class AmbiguousTombstonePrefix(MemCoreError):
         )
 
 
+#: High-precision secret patterns scrubbed before any disk write.
+#: Deliberately narrow: env-var NAMES (DISCORD_BOT_TOKEN) and normal
+#: prose ("password policy") must pass through untouched. Only shapes
+#: that are unmistakably credential VALUES are redacted.
+#: FREEZE (P Choke 2026-10-14): CI deleted — the live store is the only
+#: verification lane. This list MUST NOT gain broad patterns (e.g. bare
+#: hex blobs, "token" words, env-var names) without a RED test proving
+#: the new shape fires AND guard tests proving prose/names survive.
+# ponytail: regex list, one pass; add a pattern only with a RED test proving it fires + a guard test proving prose survives.
+_SECRET_PATTERNS = (
+    # OpenAI-style keys: sk-<20+ alnum> (also sk-proj-, sk-ant-).
+    re.compile(r'sk-(?:proj|ant)-[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9]{20,}'),
+    # GitHub PATs: ghp_/gho_/github_pat_ + long token.
+    re.compile(r'(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}'),
+    # Slack tokens: xox[baprs]-... (+ xoxe.xox[bap]-...).
+    re.compile(r'xoxe\.xox[barps]-[A-Za-z0-9-]+|xox[barps]-[A-Za-z0-9-]+'),
+    # AWS access key IDs: AKIA + 16 uppercase alnum.
+    re.compile(r'AKIA[0-9A-Z]{16}'),
+    # AWS secret access keys: 40-char base64-ish after an explicit label.
+    re.compile(r'(?i)\b(?:aws[_-]?secret[_-]?access[_-]?key)\b\s*[:=]\s*[A-Za-z0-9/+=]{40}'),
+    # Generic bearer/API-key assignments with a long opaque value.
+    re.compile(r'(?i)\b(?:bearer|api[_-]?key|secret[_-]?key|access[_-]?token)\b\s*[:=]\s*[A-Za-z0-9_\-.~+/=]{20,}'),
+    # Discord bot tokens: 3 dot-separated base64url segments (~59+ chars).
+    re.compile(r'[MN][A-Za-z\d]{23}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27}'),
+    # PEM private-key blocks (header alone is enough to refuse the value).
+    re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY(?: BLOCK)?-----'),
+)
+_SECRET_REDACTED = '«redacted:secret»'
+
+
+def scrub_secrets(content: str) -> str:
+    """Redact unmistakable credential values; names and prose survive."""
+    if not isinstance(content, str) or not content:
+        return content
+    out = content
+    for pattern in _SECRET_PATTERNS:
+        out = pattern.sub(_SECRET_REDACTED, out)
+    return out
+
+
 class RejectResult(dict):
     """Outcome of reject(): a dict that stays truthy-compatible.
 
@@ -379,6 +419,12 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         raise MemCoreError(
             f'invalid initial lifecycle: {lifecycle}; use an explicit transition'
         )
+    content = scrub_secrets(content)
+    if not content.strip():
+        raise MemCoreError('content must be a non-empty string')
+    if '\x00' in content:
+        raise MemCoreError('content must not contain null bytes')
+    reason = scrub_secrets(reason) if isinstance(reason, str) else reason
     source_hash, source_commit, source_file = _source_metadata(
         source_file, source_commit, source_hash
     )
@@ -551,6 +597,12 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
         new_content.encode('utf-8')
     except UnicodeEncodeError:
         raise MemCoreError('new_content contains unencodable surrogate characters')
+    new_content = scrub_secrets(new_content)
+    if not new_content.strip():
+        raise MemCoreError('new_content must be a non-empty string')
+    if '\x00' in new_content:
+        raise MemCoreError('new_content must not contain null bytes')
+    reason = scrub_secrets(reason) if isinstance(reason, str) else reason
     source_hash, source_commit, source_file = _source_metadata(
         source_file, source_commit, source_hash
     )
@@ -790,6 +842,7 @@ def reject(conn, memory_id, agent_id, reason, create_tombstone=True, write_key=N
     if not create_tombstone:
         raise MemCoreError('rejection requires a tombstone refusal guard')
     _require_nonempty_reason(reason)
+    reason = scrub_secrets(reason)
     conn.execute('BEGIN IMMEDIATE')
     try:
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
@@ -886,6 +939,7 @@ def reject_value(conn, project_id, agent_id, content, reason):
     the same lane a project-row reject would cover.
     """
     _require_nonempty_reason(reason)
+    reason = scrub_secrets(reason)
     if not isinstance(content, str):
         raise MemCoreError('reject-value content must be a non-empty string')
     try:

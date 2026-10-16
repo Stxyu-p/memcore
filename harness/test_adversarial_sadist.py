@@ -327,5 +327,39 @@ class TestSeamHardeningWave1(SadistTestBase):
             os.chmod(victim, 0o666)
 
 
+class TestSeamHardeningWave2(SadistTestBase):
+    """Wave-2 hardening: hostile collections/types in mutation/lookup seams.
+
+    Proves that non-string / non-scalar IDs and references raise typed domain
+    exceptions (PermissionDenied / NotFound / MemCoreError) instead of leaking
+    sqlite3.ProgrammingError parameter-binding crashes.
+    """
+
+    def test_non_scalar_memory_ids_raise_typed_permission_denied(self):
+        for bad in ([], {}, object(), ()):
+            with self.assertRaises(core.PermissionDenied):
+                core.promote(self.conn, bad, self.alice)
+            with self.assertRaises(core.PermissionDenied):
+                core.reject(self.conn, bad, self.alice, 'reason')
+            with self.assertRaises(core.PermissionDenied):
+                core.supersede(self.conn, bad, self.alice, 'new content')
+
+    def test_non_scalar_project_or_agent_in_search_returns_empty(self):
+        for bad in ([], {}, object(), None, 123):
+            self.assertEqual(core.search(self.conn, bad, self.alice, 'query'), [])
+            self.assertEqual(core.search(self.conn, self.project, bad, 'query'), [])
+
+    def test_non_scalar_tombstone_ref_raises_not_found(self):
+        for bad in ([], {}, object(), None, ''):
+            with self.assertRaises(core.NotFound):
+                core.unreject_tombstone(self.conn, bad, self.alice)
+
+    def test_mark_contradiction_hostile_args(self):
+        mid, _ = core.create_memory(self.conn, self.project, self.alice, 'probe')
+        for bad in ([], {}, object()):
+            with self.assertRaises(core.PermissionDenied):
+                core.mark_contradiction(self.conn, bad, mid, self.alice, 'reason')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -302,6 +302,8 @@ def _sweep_duplicate_claims(conn, project_id, claim_fp, refusal_scope,
 
 
 def _membership_role(conn, project_id, agent_id):
+    if not isinstance(project_id, str) or not isinstance(agent_id, str):
+        return None
     row = conn.execute(
         'SELECT role FROM project_membership WHERE project_id=? AND agent_id=?',
         (project_id, agent_id)
@@ -320,6 +322,8 @@ def _require_membership(conn, project_id, agent_id):
 
 def _current_claim_identity(conn, memory_id):
     """Return (current_version_id, fingerprint), lazily repairing legacy NULLs."""
+    if not isinstance(memory_id, str):
+        raise NotFound(f'memory {memory_id} not found')
     row = conn.execute(
         'SELECT current_version_id, claim_fingerprint FROM memory WHERE id=?',
         (memory_id,)
@@ -355,6 +359,8 @@ def _require_memory_write_access(conn, memory_id, agent_id):
     ids indistinguishable to non-members, avoiding a cross-project existence
     oracle at mutation boundaries.
     """
+    if not isinstance(memory_id, str) or not isinstance(agent_id, str):
+        raise PermissionDenied('memory is not accessible to this agent')
     mem = conn.execute(
         'SELECT m.project_id, m.scope, m.owner_agent_id, m.lifecycle, pm.role '
         'FROM memory m JOIN project_membership pm '
@@ -1064,9 +1070,9 @@ def unreject_tombstone(conn, tombstone_ref, agent_id, project_id=None):
     and GC still purges the row after 90d. Returns
     {'tombstone_id', 'overridden'}.
     """
-    ref = (tombstone_ref or '').strip().lower()
-    if not ref:
+    if not isinstance(tombstone_ref, str) or not tombstone_ref.strip():
         raise NotFound(f'tombstone {tombstone_ref!r} not found')
+    ref = tombstone_ref.strip().lower()
     exact = conn.execute(
         'SELECT id FROM tombstone WHERE id=?', (tombstone_ref,),
     ).fetchone()

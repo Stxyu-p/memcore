@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, 'C:/Users/BlankScreen/Workspace/memcore')
 
-from memcore import core, store
+from memcore import core, ingest, store
 
 
 def _make_store(tmpdir):
@@ -181,6 +181,83 @@ class TestSecretScrub(unittest.TestCase):
         stored = self._stored_content(mid)
         self.assertNotIn('sk-abcDEF1234567890abcdef1234567890', stored)
         self.assertIn('redacted', stored.lower())
+
+
+    def test_scrub_huggingface_and_google_api_keys(self):
+        """H6: hf_/AIza patterns fire; env names and prose survive."""
+        hf_token = 'hf_' + 'a' * 40
+        google_key = 'AIza' + 'b' * 35
+        body = f'tokens {hf_token} and {google_key} to rotate'
+        mid, _ = core.create_memory(
+            self.conn, 'p', 'a', body, scope='project', lifecycle='accepted')
+        self.conn.commit()
+        stored = self._stored_content(mid)
+        self.assertNotIn(hf_token, stored)
+        self.assertNotIn(google_key, stored)
+        self.assertIn('redacted', stored)
+        for benign in (
+            'HF_TOKEN and GOOGLE_API_KEY are env var names, not values',
+            'the huggingface token policy and Google API key rotation runbook',
+            'hf_short and AIzaShort are plain words here',
+        ):
+            mid2, _ = core.create_memory(
+                self.conn, 'p', 'a', benign, scope='project',
+                lifecycle='candidate')
+            self.conn.commit()
+            self.assertEqual(self._stored_content(mid2), benign, benign)
+
+    def test_scrub_secrets_on_append_event_and_audit_reasons(self):
+        """H6: journal ingress + audit reason lanes never store raw secrets."""
+        secret = 'ghp_' + 'c' * 30
+
+        event_id, _ = ingest.append_event(
+            self.conn, 'p', 'a', 'turn',
+            user_content=f'please rotate {secret} soon')
+        stored = self.conn.execute(
+            'SELECT user_content FROM ingest_event WHERE id=?',
+            (event_id,)).fetchone()[0]
+        self.assertNotIn(secret, stored)
+        self.assertIn('redacted', stored)
+
+        mid, _ = core.create_memory(
+            self.conn, 'p', 'a', 'service alpha rotation note',
+            scope='project', lifecycle='candidate')
+        self.conn.commit()
+        core.deactivate(self.conn, mid, 'a', reason=f'rotate {secret} now')
+        detail = self.conn.execute(
+            "SELECT detail FROM audit_event WHERE action='deactivate' "
+            'ORDER BY id DESC LIMIT 1').fetchone()[0]
+        self.assertNotIn(secret, detail)
+        self.assertIn('redacted', detail)
+
+        a, _ = core.create_memory(
+            self.conn, 'p', 'a', 'audit scrubbed contradiction claim alpha',
+            scope='project', lifecycle='candidate')
+        b, _ = core.create_memory(
+            self.conn, 'p', 'a', 'audit scrubbed contradiction claim bravo',
+            scope='project', lifecycle='candidate')
+        self.conn.commit()
+        core.mark_contradiction(self.conn, a, b, 'a',
+                                reason=f'conflict over {secret}')
+        detail = self.conn.execute(
+            "SELECT detail FROM audit_event WHERE action='mark_conflict' "
+            'ORDER BY id DESC LIMIT 1').fetchone()[0]
+        self.assertNotIn(secret, detail)
+        self.assertIn('redacted', detail)
+
+        ev, _ = ingest.append_event(
+            self.conn, 'p', 'a', 'turn', user_content='needs operator review')
+        self.conn.execute(
+            "UPDATE ingest_event SET decision='semantic_review_required' "
+            'WHERE id=?', (ev,))
+        self.conn.commit()
+        ingest.dismiss_unresolved_event(
+            self.conn, ev, 'a', rationale=f'dismiss because {secret}')
+        detail = self.conn.execute(
+            "SELECT detail FROM audit_event WHERE action='journal_dismiss' "
+            'ORDER BY id DESC LIMIT 1').fetchone()[0]
+        self.assertNotIn(secret, detail)
+        self.assertIn('redacted', detail)
 
 
 if __name__ == '__main__':

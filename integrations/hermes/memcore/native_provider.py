@@ -410,8 +410,11 @@ class MemCoreMemoryProvider(MemoryProvider):
         ]
 
     def _handle_semantic_tool_call(self, tool_name: str, args: Dict[str, Any]) -> str:
-        conn = store.open_runtime_store(self._store_path)
+        # H9: reuse the per-thread cached handle (same pool every other hook
+        # uses) instead of opening and closing a fresh store connection per
+        # call — no repeated file open, PRAGMAs, or migration checks.
         try:
+            conn = self._write_conn()
             if tool_name == 'memory_review_queue':
                 limit = args.get('limit', 10)
                 events = ingest.pending_semantic_events(
@@ -446,8 +449,6 @@ class MemCoreMemoryProvider(MemoryProvider):
                 'success': False,
                 'error': f'{type(exc).__name__}: {exc}',
             }, ensure_ascii=False)
-        finally:
-            conn.close()
         return json.dumps({'success': False, 'error': f'unknown MemCore tool: {tool_name}'})
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:

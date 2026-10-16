@@ -99,6 +99,10 @@ _SECRET_PATTERNS = (
     re.compile(r'[MN][A-Za-z\d]{23}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27}'),
     # PEM private-key blocks (header alone is enough to refuse the value).
     re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY(?: BLOCK)?-----'),
+    # HuggingFace user access tokens: hf_ + long alnum tail.
+    re.compile(r'\bhf_[A-Za-z0-9]{34,}\b'),
+    # Google API keys: AIza + 35 chars of the documented alphabet.
+    re.compile(r'\bAIza[0-9A-Za-z_-]{35}\b'),
 )
 _SECRET_REDACTED = '«redacted:secret»'
 
@@ -331,11 +335,16 @@ def _current_claim_identity(conn, memory_id):
     if content_row is None:
         raise MemCoreError(f'current version {version_id} is missing for memory {memory_id}')
     claim_fp = fingerprint(content_row[0])
-    conn.execute(
-        'UPDATE memory SET claim_fingerprint=? '
-        'WHERE id=? AND claim_fingerprint IS NULL',
-        (claim_fp, memory_id)
-    )
+    # H3: lazy repair is best-effort — a read-only handle (mode=ro) must keep
+    # serving the RAM-computed fingerprint instead of crashing on the UPDATE.
+    try:
+        conn.execute(
+            'UPDATE memory SET claim_fingerprint=? '
+            'WHERE id=? AND claim_fingerprint IS NULL',
+            (claim_fp, memory_id)
+        )
+    except sqlite3.OperationalError:
+        pass
     return version_id, claim_fp
 
 
@@ -389,13 +398,34 @@ def _validate_scope_detail(scope, scope_detail):
     return detail
 
 
-def _maybe_embed_version(conn, memory_id: str, version_id: str, content: str) -> None:
-    """Best-effort embedding persistence on version creation/supersede."""
+def _fetch_embedding_safe(content: str):
+    """Best-effort embedding fetch for use OUTSIDE write transactions (H1).
+
+    Network/model I/O must never run while a BEGIN IMMEDIATE write lock is
+    held: with five agents on one store it blocks every writer and can blow
+    the busy_timeout. Callers precompute the vector here and persist it
+    inside the transaction with ``_store_embedding_safe`` (pure SQL).
+    """
+    try:
+        vec = embedding.get_embedding(content, timeout=0.1)
+        return vec if vec else None
+    except Exception:
+        return None
+
+
+def _store_embedding_safe(conn, memory_id: str, version_id: str, vec) -> None:
+    """Persist a precomputed embedding with SQL only (safe inside a write tx).
+
+    Batched callers that already hold a transaction (``_manage_transaction=
+    False``) pass ``vec=None`` and skip embedding instead of firing per-row
+    HTTP inside the lock; ``memcore embed`` backfills those rows later.
+    """
+    if not vec:
+        return
     if store._table_exists(conn, 'memory_embedding'):
         try:
-            vec = embedding.get_embedding(content, timeout=0.1)
-            if vec:
-                store.store_embedding(conn, memory_id, version_id, embedding.DEFAULT_MODEL, vec)
+            store.store_embedding(conn, memory_id, version_id,
+                                  embedding.DEFAULT_MODEL, vec)
         except Exception:
             pass
 
@@ -430,6 +460,17 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
     source_hash, source_commit, source_file = _source_metadata(
         source_file, source_commit, source_hash
     )
+
+    # H1: embedding fetch is network/model I/O and runs OUTSIDE the write
+    # lock. Batched callers (manage=False) already hold a transaction and
+    # skip embedding rather than firing HTTP inside it.
+    embed_vec = None
+    if _manage_transaction:
+        try:
+            if store._table_exists(conn, 'memory_embedding'):
+                embed_vec = _fetch_embedding_safe(content)
+        except Exception:
+            embed_vec = None
 
     if _manage_transaction:
         conn.execute('BEGIN IMMEDIATE')
@@ -545,7 +586,7 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             (ver_id, mem_id, content, reason, agent_id, now, now,
              source_hash, source_commit, source_file)
         )
-        _maybe_embed_version(conn, mem_id, ver_id, content)
+        _store_embedding_safe(conn, mem_id, ver_id, embed_vec)
         _audit(conn, 'create', agent_id, mem_id, project_id,
                {'memory_id': mem_id, 'version_id': ver_id,
                 'scope': scope, 'content': content,
@@ -603,6 +644,13 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
     source_hash, source_commit, source_file = _source_metadata(
         source_file, source_commit, source_hash
     )
+    # H1: fetch the replacement's embedding before taking the write lock.
+    embed_vec = None
+    try:
+        if store._table_exists(conn, 'memory_embedding'):
+            embed_vec = _fetch_embedding_safe(new_content)
+    except Exception:
+        embed_vec = None
     conn.execute('BEGIN IMMEDIATE')
     try:
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
@@ -642,7 +690,7 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
             (new_ver, memory_id, new_content, reason, agent_id, old_ver, now, now,
              source_hash, source_commit, source_file)
         )
-        _maybe_embed_version(conn, memory_id, new_ver, new_content)
+        _store_embedding_safe(conn, memory_id, new_ver, embed_vec)
 
         # A changed claim does not inherit acceptance/verification from the old
         # version. It must earn trust again through feedback/evidence.
@@ -749,6 +797,7 @@ def promote(conn, memory_id, agent_id):
 
 def deactivate(conn, memory_id, agent_id, reason=None):
     """Soft delete: lifecycle -> disabled. Audited. Reversible via restore."""
+    reason = scrub_secrets(reason) if isinstance(reason, str) else reason
     conn.execute('BEGIN IMMEDIATE')
     try:
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
@@ -1157,15 +1206,24 @@ def mark_contradiction(conn, memory_id_a, memory_id_b, agent_id,
     and owned-writable by agent_id. Does NOT resolve: resolution is supersede
     or reject by a human or governed tool. Returns True.
     """
+    reason = scrub_secrets(reason) if isinstance(reason, str) else reason
     if _manage_transaction:
         conn.execute('BEGIN IMMEDIATE')
     try:
+        if memory_id_a == memory_id_b:
+            raise MemCoreError(
+                'contradiction pair requires two distinct memories')
+        projects = set()
         for mem_id in (memory_id_a, memory_id_b):
             project_id, _scope, _owner, lifecycle, _role = (
                 _require_memory_write_access(conn, mem_id, agent_id))
             if lifecycle in ('rejected', 'disabled', 'superseded'):
                 raise MemCoreError(
                     f'cannot mark terminal memory as conflict: {mem_id}')
+            projects.add(project_id)
+        if len(projects) != 1:
+            raise MemCoreError(
+                'contradiction pair must belong to the same project')
         conn.execute(
             "UPDATE memory SET lifecycle='conflict', updated_at=? WHERE id IN (?, ?)",
             (_now(), memory_id_a, memory_id_b),
@@ -1493,7 +1551,39 @@ def maybe_auto_corrob(conn, project_id, claim_fp, actor_agent_id):
         raise
 
 
-def apply_freshness_decay(conn, aging_days=30, stale_days=90, now=None):
+def _scan_freshness_decay(conn, now, aging_days, stale_days):
+    """Shared decay scan used by both dry-run and apply (C1 parity).
+
+    Evaluates the exact same conditions — including the last_recalled
+    reinforcement window — so the two callers can never drift apart.
+    """
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
+    reinforced = (
+        "AND (last_recalled IS NULL OR datetime(last_recalled) < "
+        "datetime(?, '-' || ? || ' days')) "
+        if 'last_recalled' in cols else ''
+    )
+    params_aging = (now, aging_days) + (
+        (now, REINFORCEMENT_WINDOW_DAYS) if 'last_recalled' in cols else ())
+    aged = [r[0] for r in conn.execute(
+        "SELECT id FROM memory WHERE freshness='current' "
+        "AND datetime(updated_at) < datetime(?, '-' || ? || ' days') "
+        + reinforced,
+        params_aging,
+    ).fetchall()]
+    params_stale = (now, stale_days) + (
+        (now, REINFORCEMENT_WINDOW_DAYS) if 'last_recalled' in cols else ())
+    staled = [r[0] for r in conn.execute(
+        "SELECT id FROM memory WHERE freshness='aging' "
+        "AND datetime(updated_at) < datetime(?, '-' || ? || ' days') "
+        + reinforced,
+        params_stale,
+    ).fetchall()]
+    return aged, staled
+
+
+def apply_freshness_decay(conn, aging_days=30, stale_days=90, now=None, *,
+                          dry_run=False):
     """Age-based freshness decay: current → aging → stale by updated_at.
 
     Decay never changes lifecycle, never tombstones, and never hides rows —
@@ -1503,36 +1593,21 @@ def apply_freshness_decay(conn, aging_days=30, stale_days=90, now=None):
     now: optional override for deterministic tests — a datetime, an ISO-8601
     Z string (simulated-time protocol), or None for the simulated clock
     (FAKE_NOW else real time). CLI behaviour is unchanged when unset.
+
+    dry_run=True (C1): evaluates the exact same scan with no write
+    transaction and no mutations, so the dry-run and --apply lists are
+    identical by construction (they used to drift on reinforced rows).
     """
     if aging_days < 0:
         raise MemCoreError('aging_days must be >= 0')
     if stale_days < aging_days:
         raise MemCoreError('stale_days must be >= aging_days')
     now = _coerce_now(now)
+    if dry_run:
+        return _scan_freshness_decay(conn, now, aging_days, stale_days)
     conn.execute('BEGIN IMMEDIATE')
     try:
-        cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
-        reinforced = (
-            "AND (last_recalled IS NULL OR datetime(last_recalled) < "
-            "datetime(?, '-' || ? || ' days')) "
-            if 'last_recalled' in cols else ''
-        )
-        params_aging = (now, aging_days) + (
-            (now, REINFORCEMENT_WINDOW_DAYS) if 'last_recalled' in cols else ())
-        aged = [r[0] for r in conn.execute(
-            "SELECT id FROM memory WHERE freshness='current' "
-            "AND datetime(updated_at) < datetime(?, '-' || ? || ' days') "
-            + reinforced,
-            params_aging,
-        ).fetchall()]
-        params_stale = (now, stale_days) + (
-            (now, REINFORCEMENT_WINDOW_DAYS) if 'last_recalled' in cols else ())
-        staled = [r[0] for r in conn.execute(
-            "SELECT id FROM memory WHERE freshness='aging' "
-            "AND datetime(updated_at) < datetime(?, '-' || ? || ' days') "
-            + reinforced,
-            params_stale,
-        ).fetchall()]
+        aged, staled = _scan_freshness_decay(conn, now, aging_days, stale_days)
         for mem_id in aged:
             conn.execute(
                 "UPDATE memory SET freshness='aging', updated_at=? WHERE id=?",
@@ -1940,19 +2015,59 @@ _RETENTION_EXPR_NO_RECALL_M = (
     % (_DECAY_SALIENCE_SQL_M, _DECAY_LAMBDA_SQL_M, _RETENTION_AGE_SQL_M)
 )
 
-_CONN_TABLE_COLS: dict[tuple[int, str], set[str]] = {}
+#: Hard cap on the per-connection table-columns cache. Entries are keyed by
+#: id(conn), and sqlite3 connections support neither weakrefs nor attribute
+#: slots, so entries cannot auto-evict — the cap drops the cache wholesale
+#: when it grows past the bound.
+_TABLE_COLS_CACHE_MAX = 128
+
+#: (id(conn), table) -> ((db path, schema_version), columns). Every hit is
+#: validated against the connection's live (path, schema_version) marker:
+#: SQLite bumps schema_version on ANY schema change, and the path separates
+#: distinct databases, so a recycled id(conn) or a migrated schema can never
+#: serve stale columns.
+_CONN_TABLE_COLS: dict[tuple[int, str], tuple[tuple[str, int], set[str]]] = {}
+
+
+def _clear_table_cols_cache() -> None:
+    """Drop the schema cache (called after migrations change the schema)."""
+    _CONN_TABLE_COLS.clear()
+
+
+def _conn_schema_marker(conn) -> tuple[str, int]:
+    """Cheap identity marker: (main db file path, schema_version)."""
+    path = ''
+    try:
+        row = conn.execute('PRAGMA database_list').fetchone()
+        if row is not None and len(row) > 2 and row[2]:
+            path = str(row[2])
+    except Exception:
+        return ('', -1)
+    try:
+        version = conn.execute('PRAGMA schema_version').fetchone()[0]
+    except Exception:
+        version = -1
+    return (path, int(version))
 
 
 def _table_cols(conn, table: str = 'memory') -> set[str]:
-    cid = id(conn)
-    key = (cid, table)
-    cols = _CONN_TABLE_COLS.get(key)
-    if cols is None:
-        try:
-            cols = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
-        except Exception:
-            cols = set()
-        _CONN_TABLE_COLS[key] = cols
+    key = (id(conn), table)
+    marker = _conn_schema_marker(conn)
+    entry = _CONN_TABLE_COLS.get(key)
+    if entry is not None and entry[0] == marker:
+        return entry[1]
+    try:
+        cols = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+    except Exception:
+        cols = set()
+    # H4: never cache an empty/missing result — it may only mean the schema
+    # has not been applied yet — and keep the cache bounded.
+    if cols:
+        if len(_CONN_TABLE_COLS) >= _TABLE_COLS_CACHE_MAX:
+            _CONN_TABLE_COLS.clear()
+        _CONN_TABLE_COLS[key] = (marker, cols)
+    else:
+        _CONN_TABLE_COLS.pop(key, None)
     return cols
 
 
@@ -2179,21 +2294,24 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
 
 
 def _merge_exact_fallback(base_rows, exact_rows, limit, user_query):
-    """Merge ranked primary candidates with exact substring fallback rows."""
-    if not exact_rows:
-        return _demote_numeric_mismatch(
-            user_query, _collapse_duplicate_claims(base_rows, limit))
-    seen = {row[0] for row in base_rows}
+    """Merge ranked primary candidates with exact substring fallback rows.
+
+    C3: collapse across the whole overfetch window, demote numeric
+    mismatches, and only THEN slice to ``limit`` — a compatible row from the
+    overfetch window can replace a demoted row instead of being cut early.
+    """
     merged = list(base_rows)
-    merge_cap = min(500, limit * DISTINCT_OVERFETCH)
-    for row in exact_rows:
-        if row[0] not in seen:
-            merged.append(row)
-            seen.add(row[0])
-            if len(merged) >= merge_cap:
-                break
-    return _demote_numeric_mismatch(
-        user_query, _collapse_duplicate_claims(merged, limit))
+    if exact_rows:
+        seen = {row[0] for row in merged}
+        merge_cap = min(500, limit * DISTINCT_OVERFETCH)
+        for row in exact_rows:
+            if row[0] not in seen:
+                merged.append(row)
+                seen.add(row[0])
+                if len(merged) >= merge_cap:
+                    break
+    collapsed = _collapse_duplicate_claims(merged, limit=None)
+    return _demote_numeric_mismatch(user_query, collapsed)[:limit]
 
 
 def search(conn, project_id, agent_id, query, limit=20,

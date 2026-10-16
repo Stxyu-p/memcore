@@ -23,6 +23,10 @@ Token-efficient recall, write-lane secret scrubbing, in-process C-level vector m
   xox-/Discord/AWS-secret/PEM) on every write lane — create, supersede,
   reject, semantic candidate/rationale — plus a null-byte guard.
 - `BASELINE_{latency,token,resource,error}.md`: baseline documents for this cycle.
+- Stabilization hardening regression suite: 27 new tests (23 in
+  `harness/test_stabilization_hardening.py` + 2 in `test_secret_scrub.py` +
+  2 in `integrations/.../tests/test_plugin.py`), corpus now 568 harness +
+  99 integration tests.
 
 ### Changed
 - Vector cosine similarity is a single implementation in `embedding.cosine_similarity`
@@ -36,6 +40,43 @@ Token-efficient recall, write-lane secret scrubbing, in-process C-level vector m
 - `store.pack_vector` / `store.unpack_vector` are direct aliases of the embedding seam.
 - `BASELINE_{latency,token,resource,error}.md` refreshed to the post-sweep
   2026-10-16 measurements.
+
+### Fixed
+- H1: embedding I/O (network/ONNX) no longer runs inside `BEGIN IMMEDIATE`
+  write locks — create/supersede precompute the vector before the transaction
+  and persist it with SQL only; batched lanes skip inline embedding (backfill
+  with `memcore embed`). Removes the slowest writer-lock holder on the
+  5-agent store.
+- H2: `mark_contradiction` refuses self-pairs and cross-project pairs before
+  any write; the `mark-conflict` CLI validates both rows against `--project`
+  and prints `error: ...` instead of a traceback; `cmd_embed` embeds only
+  candidate/accepted/conflict rows (the old `!= 'tombstoned'` predicate was
+  always true and embedded rejected/disabled/superseded rows too).
+- H3: lazy `claim_fingerprint` repair survives read-only handles (`mode=ro`) —
+  the repair UPDATE is best-effort and the RAM-computed value is still served.
+- H4: the per-connection table-columns cache is bounded (<=128 entries), never
+  caches empty results, is invalidated when migrations run, and every hit is
+  validated against the connection's (database path, schema_version) marker so
+  a recycled `id(conn)` or a migrated schema can never serve stale columns.
+- H5: the Hermes semantic analyzer falls back to a stdlib schema validator
+  when `jsonschema` is unavailable — governance-field injection is still
+  refused instead of crashing with ModuleNotFoundError.
+- H6: `scrub_secrets` now covers `ingest.append_event` (scrubbed BEFORE the
+  payload hash so retries keep the same event identity), `core.deactivate`,
+  `core.mark_contradiction` and `ingest.dismiss_unresolved_event`; adds
+  `hf_` and `AIza` high-precision patterns.
+- H7: circuit-breaker counters and the fastembed model cache are guarded by a
+  lock (double-checked locking for the one-time ONNX load).
+- H8: export and restore writes are atomic (same-directory temp file +
+  `os.replace`) with temp cleanup on failure.
+- H9: the Hermes review tools reuse the plugin's cached per-thread connection
+  instead of opening a fresh store on every call.
+- C1: `decay` and `journal-sweep` dry-run and --apply now share one scan
+  implementation, so their lists agree by construction (the decay dry-run
+  previously ignored the last_recalled reinforcement window).
+- C3: search collapses duplicate claims across the full overfetch window,
+  demotes numeric mismatches, and only then slices to `limit` — a compatible
+  hit from the window can replace a demoted row instead of being cut early.
 
 ### Removed
 - `embedding.query_vector_candidates` and its private order dicts — orphaned by the

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
@@ -766,6 +767,114 @@ class TestToolsAgainstRealStore(ToolTestBase):
         self.assertNotIn('run: python -m memcore', out['error'])
 
 
+
+
+class TestStabilizationAdditions(unittest.TestCase):
+    """H5/H9 regression additions from the hardening round."""
+
+    def test_semantic_analyzer_fallback_when_jsonschema_missing(self):
+        """H5: stdlib schema fallback still rejects governance injection."""
+        from semantic_analyzer import HermesSemanticAnalyzer
+
+        class FakeLlm:
+            def __init__(self, parsed):
+                self.parsed = parsed
+                self.calls = []
+
+            def complete_structured(self, **kwargs):
+                self.calls.append(kwargs)
+                return type('Result', (), {
+                    'parsed': dict(self.parsed),
+                    'text': json.dumps(self.parsed),
+                    'provider': 'fake-host',
+                    'model': 'fake-model',
+                    'usage': None,
+                })()
+
+        good = {
+            'verdict': 'ignore',
+            'candidate_content': '',
+            'confidence': 0.9,
+            'rationale': 'Transient detail.',
+        }
+        llm = FakeLlm(good)
+        with mock.patch.dict(sys.modules, {'jsonschema': None}):
+            analyzer = HermesSemanticAnalyzer(llm)
+            result = analyzer.analyze({})
+            self.assertEqual(result['verdict'], 'ignore')
+            # A governance field smuggled in by the model is still refused.
+            llm.parsed['scope'] = 'project'
+            with self.assertRaises(ValueError):
+                analyzer.analyze({})
+            llm.parsed.pop('scope')
+            llm.parsed['confidence'] = 1.5
+            with self.assertRaises(ValueError):
+                analyzer.analyze({})
+
+    def test_semantic_tools_reuse_cached_thread_connection(self):
+        """H9: review tools reuse the per-thread cached handle, no churn."""
+        repo_root = pathlib.Path(__file__).resolve().parents[4]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        import native_provider
+        from native_provider import MemCoreMemoryProvider, agent_plugin
+        from memcore import store
+
+        tmp = tempfile.TemporaryDirectory(prefix='memcore_h9_')
+        try:
+            db = str(pathlib.Path(tmp.name) / 'memory.db')
+            conn = store.open_store(db)
+            conn.execute(
+                "INSERT INTO project (id, name) VALUES ('proj-demo', 'demo')")
+            conn.execute(
+                "INSERT INTO agent (id, name, profile_key) "
+                "VALUES ('agent-sora', 'sora', 'sora')")
+            conn.execute(
+                "INSERT INTO project_membership (project_id, agent_id, role) "
+                "VALUES ('proj-demo', 'agent-sora', 'owner')")
+            conn.commit()
+            conn.close()
+            settings = {
+                'store_path': db,
+                'default_project': 'demo',
+                'agent_name': 'sora',
+                'inject': {'budget_chars': 1200, 'max_items': 8},
+            }
+            config = {'plugins': {'entries': {'memcore': {
+                'settings': settings}}}}
+            provider = MemCoreMemoryProvider()
+            provider._load_config = lambda: config
+            provider.initialize('session-h9', hermes_home=tmp.name,
+                                platform='cli', agent_identity='sora')
+
+            opened = []
+            real_get_conn = agent_plugin._get_conn
+
+            def counting_get_conn(path):
+                handle = real_get_conn(path)
+                opened.append(handle)
+                return handle
+
+            with mock.patch.object(
+                    native_provider.store, 'open_runtime_store',
+                    side_effect=AssertionError('per-call store open')):
+                with mock.patch.object(
+                        agent_plugin, '_get_conn',
+                        side_effect=counting_get_conn):
+                    first = json.loads(provider.handle_tool_call(
+                        'memory_review_queue', {'limit': 1}))
+                    second = json.loads(provider.handle_tool_call(
+                        'memory_review_queue', {'limit': 1}))
+            self.assertTrue(first['success'], first)
+            self.assertTrue(second['success'], second)
+            self.assertEqual(first['events'], [])
+            self.assertGreaterEqual(len(opened), 2)
+            self.assertEqual(
+                len({id(handle) for handle in opened}), 1,
+                'review tools must reuse one cached thread handle')
+        finally:
+            agent_plugin.reset_conn()
+            tmp.cleanup()
 
 
 if __name__ == '__main__':

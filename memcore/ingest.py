@@ -9,6 +9,7 @@ verdicts (confidence >= 0.95).
 import hashlib
 import json
 import re
+import sqlite3
 
 from . import core
 
@@ -75,6 +76,11 @@ def append_event(conn, project_id, agent_id, event_type, *, session_id='',
     raw_assistant_content = '' if assistant_content is None else assistant_content
     if not isinstance(raw_user_content, str) or not isinstance(raw_assistant_content, str):
         raise core.MemCoreError('journal content must be a string')
+    # R1/H6: scrub BEFORE the payload hash so a retry of the same input keeps
+    # the same content_hash/event_id (idempotent) and raw secrets never reach
+    # disk or the semantic-review payload.
+    raw_user_content = core.scrub_secrets(raw_user_content)
+    raw_assistant_content = core.scrub_secrets(raw_assistant_content)
     user_content = _clean_text(raw_user_content)
     assistant_content = _clean_text(raw_assistant_content)
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -446,10 +452,15 @@ def _private_claim_ids(conn, project_id, agent_id, claim_fp, *, active_only=Fals
         if current_fp == claim_fp:
             matches.append(memory_id)
     if repairs:
-        conn.executemany(
-            'UPDATE memory SET claim_fingerprint=? '
-            'WHERE id=? AND claim_fingerprint IS NULL', repairs
-        )
+        # H3: best-effort repair; a read-only handle (mode=ro) still returns
+        # the RAM-computed matches instead of crashing on the UPDATE.
+        try:
+            conn.executemany(
+                'UPDATE memory SET claim_fingerprint=? '
+                'WHERE id=? AND claim_fingerprint IS NULL', repairs
+            )
+        except sqlite3.OperationalError:
+            pass
     return matches
 
 
@@ -1080,7 +1091,7 @@ def dismiss_unresolved_event(conn, event_id, actor_agent_id, rationale='operator
             conn, 'journal_dismiss', actor_agent_id, project_id=project_id,
             detail={'event_id': event_id, 'event_agent_id': event_agent_id,
                     'previous_decision': decision,
-                    'rationale': str(rationale or '')[:1000]}
+                    'rationale': core.scrub_secrets(str(rationale or ''))[:1000]}
         )
         conn.execute('COMMIT')
         return {
@@ -1106,26 +1117,36 @@ _STALE_BUILTIN_DECISIONS = (
 )
 
 
-def auto_dismiss_stale_builtin(conn, days=7, actor_agent_id=None):
-    """Auto-dismiss builtin mutation events stuck longer than `days`.
-
-    Old unresolved builtin targets are almost always orphaned hook payloads
-    (the target memory never existed or was already handled). Dismissing
-    them keeps `journal_stats` honest without human clicks. Audited per
-    event; returns dismissed event ids.
-    """
+def _scan_stale_builtin(conn, days):
+    """Shared scan for stale builtin mutations (dry-run and apply, C1)."""
     if days < 0:
         raise core.MemCoreError('builtin stale days must be >= 0')
     marks = ','.join('?' for _ in _STALE_BUILTIN_DECISIONS)
-    rows = conn.execute(
+    return conn.execute(
         'SELECT id, project_id, agent_id, decision FROM ingest_event '
         "WHERE status='pending' AND decision IN (" + marks + ') '
         "AND datetime(created_at) < datetime('now', '-' || ? || ' days') "
         'ORDER BY created_at, id',
         (*_STALE_BUILTIN_DECISIONS, days),
     ).fetchall()
+
+
+def auto_dismiss_stale_builtin(conn, days=7, actor_agent_id=None, *,
+                               dry_run=False):
+    """Auto-dismiss builtin mutation events stuck longer than `days`.
+
+    Old unresolved builtin targets are almost always orphaned hook payloads
+    (the target memory never existed or was already handled). Dismissing
+    them keeps `journal_stats` honest without human clicks. Audited per
+    event; returns dismissed event ids. dry_run=True evaluates the same scan
+    and only reports the ids — it never writes (C1 parity with --apply).
+    """
+    rows = _scan_stale_builtin(conn, days)
     dismissed = []
     for event_id, project_id, event_agent_id, decision in rows:
+        if dry_run:
+            dismissed.append(event_id)
+            continue
         now = core._now()
         conn.execute('BEGIN IMMEDIATE')
         try:
@@ -1156,16 +1177,11 @@ def auto_dismiss_stale_builtin(conn, days=7, actor_agent_id=None):
     return dismissed
 
 
-def auto_resolve_defer_cap(conn, max_defers=3, actor_agent_id=None):
-    """Auto-ignore semantic events deferred `max_defers` times or more.
-
-    A repeatedly deferred event is the analyzer saying "never sure" —
-    keeping it pending forever only inflates the review queue. Returns
-    dismissed event ids.
-    """
+def _scan_defer_cap(conn, max_defers):
+    """Shared scan for defer-cap candidates (dry-run and apply, C1)."""
     if not isinstance(max_defers, int) or max_defers < 1:
         raise core.MemCoreError('max_defers must be an integer >= 1')
-    rows = conn.execute(
+    return conn.execute(
         'SELECT e.id, e.project_id, e.agent_id, e.decision, '
         '  (SELECT COUNT(*) FROM ingest_analysis a '
         "   WHERE a.event_id=e.id AND a.verdict='defer') AS defers "
@@ -1173,9 +1189,24 @@ def auto_resolve_defer_cap(conn, max_defers=3, actor_agent_id=None):
         "WHERE e.status='pending' AND e.decision='semantic_deferred' "
         'ORDER BY e.created_at, e.id',
     ).fetchall()
+
+
+def auto_resolve_defer_cap(conn, max_defers=3, actor_agent_id=None, *,
+                           dry_run=False):
+    """Auto-ignore semantic events deferred `max_defers` times or more.
+
+    A repeatedly deferred event is the analyzer saying "never sure" —
+    keeping it pending forever only inflates the review queue. Returns
+    dismissed event ids. dry_run=True evaluates the same scan and only
+    reports the ids — it never writes (C1 parity with --apply).
+    """
+    rows = _scan_defer_cap(conn, max_defers)
     dismissed = []
     for event_id, project_id, event_agent_id, decision, defers in rows:
         if (defers or 0) < max_defers:
+            continue
+        if dry_run:
+            dismissed.append(event_id)
             continue
         now = core._now()
         conn.execute('BEGIN IMMEDIATE')
@@ -1208,18 +1239,23 @@ def auto_resolve_defer_cap(conn, max_defers=3, actor_agent_id=None):
     return dismissed
 
 
-def sweep(conn, *, builtin_days=7, max_defers=3, actor_agent_id=None):
+def sweep(conn, *, builtin_days=7, max_defers=3, actor_agent_id=None,
+          dry_run=False):
     """Run full automated journal maintenance sweep in one call.
 
     Auto-dismisses stale unresolved built-in mutations older than builtin_days
     and auto-resolves semantic events deferred max_defers or more times.
-    Returns summary dict of dismissed event IDs.
+    Returns summary dict of dismissed event IDs. dry_run=True routes both
+    phases through their identical scan queries and reports the ids that
+    WOULD be dismissed without writing (C1 parity with --apply).
     """
     stale_builtin = auto_dismiss_stale_builtin(
-        conn, days=builtin_days, actor_agent_id=actor_agent_id
+        conn, days=builtin_days, actor_agent_id=actor_agent_id,
+        dry_run=dry_run
     )
     defer_cap = auto_resolve_defer_cap(
-        conn, max_defers=max_defers, actor_agent_id=actor_agent_id
+        conn, max_defers=max_defers, actor_agent_id=actor_agent_id,
+        dry_run=dry_run
     )
     return {
         'stale_builtin': stale_builtin,

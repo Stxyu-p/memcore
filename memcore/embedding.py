@@ -11,6 +11,7 @@ import math
 import operator
 import os
 import struct
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -91,6 +92,10 @@ def resolve_config(
 CIRCUIT_FAILURE_THRESHOLD = 3
 CIRCUIT_COOLDOWN_SECONDS = 30.0
 
+#: Guards the circuit-breaker counters and the fastembed model cache; both are
+#: process-global state written from worker threads (fleet hooks, tool calls).
+_state_lock = threading.Lock()
+
 _consecutive_failures = 0
 _circuit_open_until = 0.0
 
@@ -98,12 +103,13 @@ _circuit_open_until = 0.0
 def is_circuit_open() -> bool:
     """Return True if the circuit breaker is currently open (blocking calls)."""
     global _circuit_open_until
-    if _circuit_open_until <= 0.0:
-        return False
-    if time.time() >= _circuit_open_until:
-        _circuit_open_until = 0.0
-        return False
-    return True
+    with _state_lock:
+        if _circuit_open_until <= 0.0:
+            return False
+        if time.time() >= _circuit_open_until:
+            _circuit_open_until = 0.0
+            return False
+        return True
 
 
 def pack_vector(floats: list[float]) -> bytes:
@@ -138,21 +144,24 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
 def reset_circuit_breaker() -> None:
     """Reset circuit breaker failure counters and cooldown."""
     global _consecutive_failures, _circuit_open_until
-    _consecutive_failures = 0
-    _circuit_open_until = 0.0
+    with _state_lock:
+        _consecutive_failures = 0
+        _circuit_open_until = 0.0
 
 
 def _record_failure() -> None:
     global _consecutive_failures, _circuit_open_until
-    _consecutive_failures += 1
-    if _consecutive_failures >= CIRCUIT_FAILURE_THRESHOLD:
-        _circuit_open_until = time.time() + CIRCUIT_COOLDOWN_SECONDS
+    with _state_lock:
+        _consecutive_failures += 1
+        if _consecutive_failures >= CIRCUIT_FAILURE_THRESHOLD:
+            _circuit_open_until = time.time() + CIRCUIT_COOLDOWN_SECONDS
 
 
 def _record_success() -> None:
     global _consecutive_failures, _circuit_open_until
-    _consecutive_failures = 0
-    _circuit_open_until = 0.0
+    with _state_lock:
+        _consecutive_failures = 0
+        _circuit_open_until = 0.0
 
 
 def get_embedding(
@@ -190,9 +199,15 @@ def _get_fastembed_batch(texts: list[str], model: str | None = None) -> list[lis
     except ImportError:
         return None
     model_name = model or 'BAAI/bge-small-en-v1.5'
-    if model_name not in _fastembed_cache:
-        _fastembed_cache[model_name] = TextEmbedding(model_name=model_name)
-    embedder = _fastembed_cache[model_name]
+    embedder = _fastembed_cache.get(model_name)
+    if embedder is None:
+        # Double-checked locking: exactly one thread performs the costly ONNX
+        # model load; the fast path above avoids the lock afterwards.
+        with _state_lock:
+            embedder = _fastembed_cache.get(model_name)
+            if embedder is None:
+                embedder = TextEmbedding(model_name=model_name)
+                _fastembed_cache[model_name] = embedder
     return [list(vec) for vec in embedder.embed(texts)]
 
 

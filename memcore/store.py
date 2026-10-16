@@ -912,6 +912,21 @@ def apply_migrations(conn):
             '  lock_until REAL)'
         )
     _run_migrations(conn)
+    _invalidate_core_schema_caches()
+
+
+def _invalidate_core_schema_caches() -> None:
+    """H4: drop core's per-connection table-columns cache after migrations.
+
+    Lazy import keeps store importable without core during bootstrap; any
+    failure is non-fatal (the cache self-heals via its size cap and the
+    no-empty-results rule).
+    """
+    try:
+        from . import core as _core
+        _core._clear_table_cols_cache()
+    except Exception:
+        pass
 
 
 def _migration_lock_row(conn):

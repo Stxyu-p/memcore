@@ -866,28 +866,15 @@ def cmd_journal_sweep(args):
     """Auto-hygiene sweep: stale builtin dismiss + defer-cap (dry-run default)."""
     conn = _open(args) if args.apply else _open_readonly(args)
     try:
-        if args.apply:
-            dismissed_builtin = ingest.auto_dismiss_stale_builtin(
-                conn, days=args.builtin_days)
-            dismissed_defer = ingest.auto_resolve_defer_cap(
-                conn, max_defers=args.max_defers)
-        else:
-            marks = ','.join('?' for _ in ingest._STALE_BUILTIN_DECISIONS)
-            dismissed_builtin = [r[0] for r in conn.execute(
-                'SELECT id FROM ingest_event '
-                "WHERE status='pending' AND decision IN (" + marks + ') '
-                "AND datetime(created_at) < datetime('now', '-' || ? || ' days')",
-                (*ingest._STALE_BUILTIN_DECISIONS, args.builtin_days),
-            ).fetchall()]
-            dismissed_defer = [r[0] for r in conn.execute(
-                'SELECT e.id FROM ingest_event e '
-                'WHERE e.status=\'pending\' AND e.decision=\'semantic_deferred\' '
-                'AND (SELECT COUNT(*) FROM ingest_analysis a '
-                'WHERE a.event_id=e.id AND a.verdict=\'defer\') >= ?',
-                (args.max_defers,),
-            ).fetchall()]
+        # C1: both modes run ingest.sweep's single scan implementation so the
+        # dry-run lists always match what --apply will do.
+        result = ingest.sweep(
+            conn, builtin_days=args.builtin_days, max_defers=args.max_defers,
+            dry_run=not args.apply)
     finally:
         conn.close()
+    dismissed_builtin = result['stale_builtin']
+    dismissed_defer = result['defer_cap']
     print(f'journal sweep ({"applied" if args.apply else "dry-run"}):')
     print(f'  stale builtin (>{args.builtin_days}d): {len(dismissed_builtin)}')
     for eid in dismissed_builtin:
@@ -901,21 +888,12 @@ def cmd_decay(args):
     """Freshness decay sweep: current → aging → stale (dry-run default)."""
     conn = _open(args) if args.apply else _open_readonly(args)
     try:
-        if args.apply:
-            aged, staled = core.apply_freshness_decay(
-                conn, aging_days=args.aging_days, stale_days=args.stale_days)
-        else:
-            now = core._now()
-            aged = [r[0] for r in conn.execute(
-                "SELECT id FROM memory WHERE freshness='current' "
-                "AND datetime(updated_at) < datetime(?, '-' || ? || ' days')",
-                (now, args.aging_days),
-            ).fetchall()]
-            staled = [r[0] for r in conn.execute(
-                "SELECT id FROM memory WHERE freshness='aging' "
-                "AND datetime(updated_at) < datetime(?, '-' || ? || ' days')",
-                (now, args.stale_days),
-            ).fetchall()]
+        # C1: both modes run core.apply_freshness_decay's single scan so the
+        # dry-run lists always match what --apply will do (previously the
+        # dry-run SQL missed the last_recalled reinforcement window).
+        aged, staled = core.apply_freshness_decay(
+            conn, aging_days=args.aging_days, stale_days=args.stale_days,
+            dry_run=not args.apply)
     finally:
         conn.close()
     print(f'decay ({"applied" if args.apply else "dry-run"}):')
@@ -1162,7 +1140,18 @@ def cmd_restore_backup(args):
                 f'Close every process using this store, then retry.'
             )
 
-    shutil.copy2(snapshot, db_path)
+    # H8: atomic replace via a same-directory temp file — a crash or full
+    # disk mid-copy must leave the existing store untouched, never truncated.
+    tmp_path = db_path.with_name(db_path.name + f'.tmp.{os.getpid()}')
+    try:
+        shutil.copy2(snapshot, tmp_path)
+        os.replace(tmp_path, db_path)
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
     print(f'restored: {snapshot} -> {db_path}')
     print(f'  memories={counts["memories"]} '
           f'journal_events={counts["journal_events"]}')
@@ -1192,13 +1181,27 @@ def cmd_mark_conflict(args):
         agent_id, exists = _agent_identity_or_exit(conn, args.agent)
         if not exists:
             sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        # H2: the named project is an active guard — both rows must live in
+        # the project this command was told to operate on.
+        for mem_id in (args.memory_a, args.memory_b):
+            row = conn.execute(
+                'SELECT project_id FROM memory WHERE id = ?', (mem_id,)
+            ).fetchone()
+            if row is None:
+                sys.exit(f'error: memory not found: {mem_id}')
+            if row[0] != project_id:
+                sys.exit(
+                    f'error: memory {mem_id} is not in project {args.project}')
         if not args.confirm:
             print('marking conflict is a governed mutation. Re-run with --confirm.')
             print(f'  pair: {args.memory_a} <-> {args.memory_b}')
             print(f'  reason: {args.reason}')
             return
-        core.mark_contradiction(
-            conn, args.memory_a, args.memory_b, agent_id, args.reason)
+        try:
+            core.mark_contradiction(
+                conn, args.memory_a, args.memory_b, agent_id, args.reason)
+        except core.MemCoreError as e:
+            sys.exit(f'error: {e}')
         conn.commit()
         print(f'marked conflict: {args.memory_a} <-> {args.memory_b}')
     finally:
@@ -1593,10 +1596,10 @@ def cmd_embed(args):
         'FROM memory m '
         'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
         'LEFT JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
-        'WHERE e.vector IS NULL AND m.lifecycle != ? '
+        "WHERE e.vector IS NULL AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
         'ORDER BY m.created_at DESC'
     )
-    params = ('tombstoned',)
+    params = ()
     if limit is not None:
         query += ' LIMIT ?'
         params += (limit,)

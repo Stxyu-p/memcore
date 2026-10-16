@@ -20,6 +20,7 @@ capped so a huge store cannot produce an unusable file.
 from __future__ import annotations
 
 import hashlib
+import os
 import pathlib
 
 from . import core
@@ -142,6 +143,25 @@ def _label(row):
         row[1], row[2], row[3], row[4])
 
 
+def _atomic_write_text(path: pathlib.Path, text: str) -> None:
+    """H8: write via a temp file in the same directory, then os.replace().
+
+    A crash, a killed process, or a full disk mid-write must never leave the
+    destination half-written; the previous file stays intact until the atomic
+    rename. The temp file is removed on any failure.
+    """
+    tmp = path.with_name(f'{path.name}.tmp.{os.getpid()}')
+    try:
+        tmp.write_text(text, encoding='utf-8')
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def render(rows, title, project, generated_at=None, generator=True):
     """Render the export as markdown a coding agent can act on.
 
@@ -220,7 +240,7 @@ def export(conn, project_id, agent_id, out_path=None, limit=40,
                     results.append(result)
                     continue
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(text, encoding='utf-8')
+                _atomic_write_text(path, text)
                 result['wrote'] = True
         results.append(result)
     return results if len(results) > 1 else results[0]

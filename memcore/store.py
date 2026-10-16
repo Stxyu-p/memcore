@@ -14,6 +14,7 @@ import sqlite3
 import struct
 import time
 import unicodedata
+from typing import Any
 
 from . import embedding
 
@@ -476,6 +477,8 @@ def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connecti
     opening it would only surface as confusing per-query malformed errors.
     """
     p = pathlib.Path(db_path).expanduser()
+    if p.is_dir():
+        raise StoreError(f'store path is a directory, not a database: {p}')
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.is_file():
         ratio = _zero_page_ratio(p)
@@ -486,10 +489,15 @@ def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connecti
                 f'incident pattern 2026-10-03). Refusing to open. '
                 f'Restore with: memcore restore-from-snapshot --snapshot <file> --confirm'
             )
-    conn = sqlite3.connect(
-        str(p), timeout=10, isolation_level=None,
-        check_same_thread=check_same_thread
-    )
+    try:
+        conn = sqlite3.connect(
+            str(p), timeout=10, isolation_level=None,
+            check_same_thread=check_same_thread
+        )
+    except Exception as e:
+        if isinstance(e, StoreError):
+            raise
+        raise StoreError(f'failed to open store at {p}: {e}') from e
     try:
         # Set the busy timeout before WAL negotiation: concurrent first boots
         # can otherwise race on PRAGMA journal_mode before SQLite has a chance
@@ -510,9 +518,11 @@ def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connecti
         conn.execute('PRAGMA synchronous = NORMAL')
         apply_migrations(conn)
         return conn
-    except Exception:
+    except Exception as e:
         conn.close()
-        raise
+        if isinstance(e, StoreError):
+            raise
+        raise StoreError(f'failed to initialize store at {p}: {e}') from e
 
 
 def _open_existing_connection(db_path: str, *, readonly: bool,
@@ -526,12 +536,17 @@ def _open_existing_connection(db_path: str, *, readonly: bool,
     """
     p = pathlib.Path(db_path).expanduser().resolve()
     if not p.is_file():
-        raise StoreError(f'store does not exist: {p}')
+        raise StoreError(f'store does not exist or is not a file: {p}')
     mode = 'ro' if readonly else 'rw'
-    conn = sqlite3.connect(
-        p.as_uri() + f'?mode={mode}', uri=True, timeout=10,
-        isolation_level=None, check_same_thread=check_same_thread
-    )
+    try:
+        conn = sqlite3.connect(
+            p.as_uri() + f'?mode={mode}', uri=True, timeout=10,
+            isolation_level=None, check_same_thread=check_same_thread
+        )
+    except Exception as e:
+        if isinstance(e, StoreError):
+            raise
+        raise StoreError(f'failed to open store at {p}: {e}') from e
     try:
         conn.execute('PRAGMA busy_timeout = 5000')
         conn.execute('PRAGMA foreign_keys = ON')
@@ -539,10 +554,14 @@ def _open_existing_connection(db_path: str, *, readonly: bool,
             conn.execute('PRAGMA query_only = ON')
         else:
             conn.execute('PRAGMA synchronous = NORMAL')
+        # Validate that the file is indeed a readable sqlite database
+        conn.execute('PRAGMA schema_version')
         return conn
-    except Exception:
+    except Exception as e:
         conn.close()
-        raise
+        if isinstance(e, StoreError):
+            raise
+        raise StoreError(f'failed to initialize store connection at {p}: {e}') from e
 
 
 def open_runtime_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connection:
@@ -646,9 +665,9 @@ def backup_store(source_db: str, *, keep: int = 14) -> pathlib.Path:
 
 
 
-def _prune_backups(backup_dir: pathlib.Path, keep: int, stem: str) -> None:
+def _prune_backups(backup_dir: pathlib.Path, keep: Any, stem: str) -> None:
     """Retain the ``keep`` newest managed snapshots; never touch other files."""
-    if keep < 1:
+    if not isinstance(keep, int) or isinstance(keep, bool) or keep < 1:
         return
     for stale in _managed_snapshots(backup_dir, stem)[keep:]:
         try:
@@ -657,8 +676,8 @@ def _prune_backups(backup_dir: pathlib.Path, keep: int, stem: str) -> None:
             pass
 
 
-def verify_backups(source_db: str, *, max_age_days: int = BACKUP_MAX_AGE_DAYS,
-                   min_count: int = BACKUP_MIN_COUNT) -> dict:
+def verify_backups(source_db: str, *, max_age_days: Any = BACKUP_MAX_AGE_DAYS,
+                   min_count: Any = BACKUP_MIN_COUNT) -> dict:
     """Content-free recovery-readiness report for a store's backup set.
 
     ``recovery_ready`` means exactly one thing: a verified snapshot of this store
@@ -710,12 +729,23 @@ def verify_backups(source_db: str, *, max_age_days: int = BACKUP_MAX_AGE_DAYS,
     report['oldest_age_days'] = round(max(ages), 2)
     report['newest_snapshot'] = snapshots[0].name
 
-    if min(ages) > max_age_days:
+    eff_max_age = (
+        max_age_days
+        if isinstance(max_age_days, (int, float)) and not isinstance(max_age_days, bool) and max_age_days > 0
+        else BACKUP_MAX_AGE_DAYS
+    )
+    eff_min_count = (
+        min_count
+        if isinstance(min_count, int) and not isinstance(min_count, bool) and min_count >= 1
+        else BACKUP_MIN_COUNT
+    )
+
+    if min(ages) > eff_max_age:
         report['problems'].append(f'stale_backup:{report["newest_age_days"]}d')
         report['recovery_ready'] = False
     else:
         report['recovery_ready'] = True
-        if len(snapshots) < min_count:
+        if len(snapshots) < eff_min_count:
             # Informational only: a verified snapshot is a recovery path on its
             # own; the target count matters for depth, not for recoverability.
             report['problems'].append(f'below_target_snapshots:{len(snapshots)}')
@@ -894,9 +924,11 @@ def open_store_readonly(db_path: str) -> sqlite3.Connection:
                 f'expected {expected}. Open normally to migrate first.'
             )
         return conn
-    except Exception:
+    except Exception as e:
         conn.close()
-        raise
+        if isinstance(e, StoreError):
+            raise
+        raise StoreError(f'failed to validate read-only store: {e}') from e
 
 
 def apply_migrations(conn):

@@ -68,13 +68,8 @@ def _is_network_path(path):
     return False
 
 
-def _discover_hermes_memcore_bindings():
-    """Best-effort read of enabled MemCore bindings from Hermes YAML."""
-    try:
-        import yaml
-    except Exception as exc:
-        return {'available': False, 'error': f'PyYAML unavailable: {exc}', 'bindings': []}
-
+def _hermes_roots():
+    """Candidate Hermes home roots, most-specific first (env > LOCALAPPDATA > ~)."""
     roots = []
     env_home = os.environ.get('HERMES_HOME')
     if env_home:
@@ -83,10 +78,19 @@ def _discover_hermes_memcore_bindings():
     if local:
         roots.append(pathlib.Path(local) / 'hermes')
     roots.append(pathlib.Path.home() / '.hermes')
-    root = next((r for r in roots if (r / 'config.yaml').is_file()), None)
-    if root is None:
-        return {'available': False, 'error': 'Hermes config.yaml not found', 'bindings': []}
+    return roots
 
+
+def _hermes_root_with_config():
+    """First candidate root that actually holds a config.yaml, else None."""
+    for root in _hermes_roots():
+        if (root / 'config.yaml').is_file():
+            return root
+    return None
+
+
+def _hermes_profile_config_files(root):
+    """(profile, config path) pairs: default plus every profile with a config."""
     files = [('default', root / 'config.yaml')]
     profiles = root / 'profiles'
     if profiles.is_dir():
@@ -94,36 +98,60 @@ def _discover_hermes_memcore_bindings():
             (p.name, p / 'config.yaml') for p in profiles.iterdir()
             if p.is_dir() and (p / 'config.yaml').is_file()
         )
+    return files
+
+
+def _enabled_memcore_settings(cfg):
+    """The memcore settings dict when the plugin is enabled, else None."""
+    plugins = cfg.get('plugins') or {}
+    if 'memcore' not in (plugins.get('enabled') or []):
+        return None
+    entry = (plugins.get('entries') or {}).get('memcore') or {}
+    return entry.get('settings') or {}
+
+
+def _binding_from_settings(profile, cfg_path, settings):
+    """One normalized Hermes -> MemCore binding record."""
+    agent = settings.get('agent_name') or (profile if profile != 'default' else None)
+    projects = []
+    default_project = settings.get('default_project')
+    if isinstance(default_project, str) and default_project.strip():
+        projects.append(default_project.strip())
+    for binding in settings.get('path_bindings') or []:
+        if isinstance(binding, dict):
+            project = binding.get('project')
+            if isinstance(project, str) and project.strip():
+                projects.append(project.strip())
+    projects = list(dict.fromkeys(projects))
+    return {
+        'profile': profile,
+        'config': str(cfg_path),
+        'agent': agent,
+        'projects': projects,
+        'store_path': str(settings.get('store_path') or DEFAULT_DB),
+    }
+
+
+def _discover_hermes_memcore_bindings():
+    """Best-effort read of enabled MemCore bindings from Hermes YAML."""
+    try:
+        import yaml
+    except Exception as exc:
+        return {'available': False, 'error': f'PyYAML unavailable: {exc}', 'bindings': []}
+
+    root = _hermes_root_with_config()
+    if root is None:
+        return {'available': False, 'error': 'Hermes config.yaml not found', 'bindings': []}
 
     bindings = []
     errors = []
-    for profile, cfg_path in files:
+    for profile, cfg_path in _hermes_profile_config_files(root):
         try:
             data = yaml.safe_load(cfg_path.read_text(encoding='utf-8')) or {}
-            plugins = data.get('plugins') or {}
-            if 'memcore' not in (plugins.get('enabled') or []):
+            settings = _enabled_memcore_settings(data)
+            if settings is None:
                 continue
-            entry = (plugins.get('entries') or {}).get('memcore') or {}
-            settings = entry.get('settings') or {}
-            agent = settings.get('agent_name') or (profile if profile != 'default' else None)
-            projects = []
-            default_project = settings.get('default_project')
-            if isinstance(default_project, str) and default_project.strip():
-                projects.append(default_project.strip())
-            for binding in settings.get('path_bindings') or []:
-                if isinstance(binding, dict):
-                    project = binding.get('project')
-                    if isinstance(project, str) and project.strip():
-                        projects.append(project.strip())
-            projects = list(dict.fromkeys(projects))
-            store_path = settings.get('store_path') or DEFAULT_DB
-            bindings.append({
-                'profile': profile,
-                'config': str(cfg_path),
-                'agent': agent,
-                'projects': projects,
-                'store_path': str(store_path),
-            })
+            bindings.append(_binding_from_settings(profile, cfg_path, settings))
         except Exception as exc:
             errors.append(f'{cfg_path}: {type(exc).__name__}: {exc}')
     return {'available': True, 'root': str(root), 'bindings': bindings, 'errors': errors}
@@ -248,39 +276,30 @@ def cmd_member_add(args):
         aid, agent_exists = _agent_identity_or_exit(conn, args.agent)
         if not agent_exists:
             sys.exit(f'error: agent {aid} does not exist; create it first')
-        conn.execute('BEGIN IMMEDIATE')
-        row = conn.execute(
-            'SELECT role FROM project_membership WHERE project_id=? AND agent_id=?',
-            (pid, aid)
-        ).fetchone()
-        if row is not None:
-            current_role = row[0]
-            if current_role != args.role:
-                conn.execute('ROLLBACK')
-                sys.exit(
-                    f'error: membership already exists with role {current_role}; '
-                    f'requested role {args.role} was not applied'
-                )
-            conn.execute('ROLLBACK')
-            print(f'member: {aid} -> {pid} ({current_role})')
-            return
-        conn.execute(
-            'INSERT INTO project_membership (project_id, agent_id, role) '
-            'VALUES (?, ?, ?)',
-            (pid, aid, args.role)
-        )
-        core._audit(
-            conn, 'agent_joined', None, None, pid,
-            {'source': 'memcore member CLI', 'agent_id': aid, 'role': args.role}
-        )
-        conn.execute('COMMIT')
-        print(f'member: {aid} -> {pid} ({args.role})')
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except Exception:
-            pass
-        raise
+        with store.write_tx(conn):
+            row = conn.execute(
+                'SELECT role FROM project_membership WHERE project_id=? AND agent_id=?',
+                (pid, aid)
+            ).fetchone()
+            if row is not None:
+                current_role = row[0]
+                if current_role != args.role:
+                    raise SystemExit(
+                        f'error: membership already exists with role {current_role}; '
+                        f'requested role {args.role} was not applied'
+                    )
+                print(f'member: {aid} -> {pid} ({current_role})')
+                return
+            conn.execute(
+                'INSERT INTO project_membership (project_id, agent_id, role) '
+                'VALUES (?, ?, ?)',
+                (pid, aid, args.role)
+            )
+            core._audit(
+                conn, 'agent_joined', None, None, pid,
+                {'source': 'memcore member CLI', 'agent_id': aid, 'role': args.role}
+            )
+            print(f'member: {aid} -> {pid} ({args.role})')
     finally:
         conn.close()
 
@@ -499,53 +518,12 @@ def cmd_gc(args):
             sys.exit('error: GC retention days must be >= 0')
         conn = (_open(args) if args.apply else
                 store.open_store_readonly(getattr(args, 'db', DEFAULT_DB)))
-        candidates, tombstones = core.gc_scan(
-            conn,
-            candidate_days=args.candidate_days,
-            tombstone_days=args.tombstone_days
-        )
-
-        print('GC scan:')
-        print(
-            f'  candidates (candidate, no evidence, unpinned/non-critical, '
-            f'inactive >{args.candidate_days}d): {len(candidates)}'
-        )
-        if candidates:
-            for c in candidates:
-                print(f'    {c[0]} (project={c[1]}, last_updated={c[4]})')
-
-        print(f'  overridden tombstones (age >{args.tombstone_days}d): {len(tombstones)}')
-        if tombstones:
-            for t in tombstones:
-                print(f'    {t[0]} (fingerprint={t[1][:8]}..., reason={t[3]})')
-
         journal_days = getattr(args, 'journal_days', None)
-        if journal_days is not None:
-            if journal_days < 0:
-                sys.exit('error: journal retention days must be >= 0')
-            cutoff_j = core._cutoff(conn, journal_days)
-            prunable_events = conn.execute(
-                "SELECT COUNT(*) FROM ingest_event WHERE status IN ('ignored','processed') "
-                "AND created_at <= ?", (cutoff_j,)
-            ).fetchone()[0]
-            print(f'  prunable journal events (status in ignored/processed, age >{journal_days}d): {prunable_events}')
-
+        if journal_days is not None and journal_days < 0:
+            sys.exit('error: journal retention days must be >= 0')
+        _print_gc_scan(conn, args, journal_days)
         if args.apply:
-            disabled, purged = core.gc_apply(
-                conn,
-                candidate_days=args.candidate_days,
-                tombstone_days=args.tombstone_days
-            )
-            print(f'  applied: {len(disabled)} disabled, {len(purged)} purged')
-            if disabled:
-                for memory_id in disabled:
-                    print(f'    disabled: {memory_id}')
-            if purged:
-                for tid in purged:
-                    print(f'    purged: {tid}')
-            if journal_days is not None:
-                pruned_journal = ingest.prune_journal(conn, days=journal_days)
-                print(f'  journal: {pruned_journal} historical events pruned')
+            _apply_gc_and_report(conn, args, journal_days)
     except (core.MemCoreError, store.StoreError) as e:
         sys.exit(f'error: {e}')
     finally:
@@ -554,6 +532,63 @@ def cmd_gc(args):
                 conn.close()
             except Exception:
                 pass
+
+
+def _print_gc_scan(conn, args, journal_days):
+    """Dry-run view: scan candidates, tombstones, prunable journal events."""
+    candidates, tombstones = core.gc_scan(
+        conn,
+        candidate_days=args.candidate_days,
+        tombstone_days=args.tombstone_days
+    )
+    print('GC scan:')
+    print(
+        f'  candidates (candidate, no evidence, unpinned/non-critical, '
+        f'inactive >{args.candidate_days}d): {len(candidates)}'
+    )
+    for c in candidates:
+        print(f'    {c[0]} (project={c[1]}, last_updated={c[4]})')
+    print(f'  overridden tombstones (age >{args.tombstone_days}d): {len(tombstones)}')
+    for t in tombstones:
+        print(f'    {t[0]} (fingerprint={t[1][:8]}..., reason={t[3]})')
+    if journal_days is not None:
+        cutoff_j = core._cutoff(conn, journal_days)
+        prunable = conn.execute(
+            "SELECT COUNT(*) FROM ingest_event WHERE status IN ('ignored','processed') "
+            "AND created_at <= ?", (cutoff_j,)
+        ).fetchone()[0]
+        print(f'  prunable journal events (status in ignored/processed, '
+              f'age >{journal_days}d): {prunable}')
+
+
+def _apply_gc_and_report(conn, args, journal_days):
+    """--apply leg: run gc_apply (+ journal prune) and report the results."""
+    disabled, purged = core.gc_apply(
+        conn,
+        candidate_days=args.candidate_days,
+        tombstone_days=args.tombstone_days
+    )
+    print(f'  applied: {len(disabled)} disabled, {len(purged)} purged')
+    for memory_id in disabled:
+        print(f'    disabled: {memory_id}')
+    for tid in purged:
+        print(f'    purged: {tid}')
+    if journal_days is not None:
+        pruned_journal = ingest.prune_journal(conn, days=journal_days)
+        print(f'  journal: {pruned_journal} historical events pruned')
+
+
+def _export_config_candidates():
+    """Config files consulted by the export binding fallback (env-aware)."""
+    hermes_home = pathlib.Path(
+        os.environ.get('HERMES_HOME') or (pathlib.Path.home() / '.hermes'))
+    profile = os.environ.get('HERMES_PROFILE_NAME') or ''
+    candidates = [hermes_home / "config.yaml"]
+    if profile:
+        candidates.append(
+            pathlib.Path.home() / ".hermes" / "profiles" / profile / "config.yaml")
+    candidates.append(pathlib.Path.home() / ".hermes" / "config.yaml")
+    return candidates
 
 
 def _default_export_binding():
@@ -569,16 +604,8 @@ def _default_export_binding():
     project = agent = None
     # The active profile is a HERMES_HOME concern, not a hermes_cli import:
     # pulling hermes_cli.profiles in cost another 82ms and its own http.client.
-    hermes_home = pathlib.Path(
-        os.environ.get('HERMES_HOME') or (pathlib.Path.home() / '.hermes'))
-    profile = os.environ.get('HERMES_PROFILE_NAME') or ''
-    candidates = [hermes_home / "config.yaml"]
-    if profile:
-        candidates.append(
-            pathlib.Path.home() / ".hermes" / "profiles" / profile / "config.yaml")
-    candidates.append(pathlib.Path.home() / ".hermes" / "config.yaml")
-    for path in candidates:
-        if path is None or not path.is_file():
+    for path in _export_config_candidates():
+        if not path.is_file():
             continue
         try:
             import yaml  # optional; falls back to the explicit flags
@@ -619,21 +646,7 @@ def cmd_export(args):
             limit=args.limit, include_private=args.include_private,
             title=args.title, force=args.force, host=args.host,
             out_dir=args.out_dir)
-        if not isinstance(results, list):
-            results = [results]
-        refused = 0
-        for result in results:
-            if result.get('refused'):
-                refused += 1
-                print(f"refused {result['path']}: {result['refused']}")
-            elif result['wrote']:
-                print(f"wrote {result['path']} "
-                      f"({result['rows']} rows, {result['bytes']} chars)")
-            else:
-                print(f"{result['path']} already up to date "
-                      f"({result['rows']} rows); use --force to rewrite")
-        if refused:
-            sys.exit(1)
+        _print_export_results(results)
     except (core.MemCoreError, store.StoreError, ValueError) as e:
         sys.exit(f'error: {e}')
     except OSError as e:
@@ -642,6 +655,25 @@ def cmd_export(args):
     finally:
         if conn is not None:
             conn.close()
+
+
+def _print_export_results(results):
+    """Report one export run; exits 1 when any target refused a write."""
+    if not isinstance(results, list):
+        results = [results]
+    refused = 0
+    for result in results:
+        if result.get('refused'):
+            refused += 1
+            print(f"refused {result['path']}: {result['refused']}")
+        elif result['wrote']:
+            print(f"wrote {result['path']} "
+                  f"({result['rows']} rows, {result['bytes']} chars)")
+        else:
+            print(f"{result['path']} already up to date "
+                  f"({result['rows']} rows); use --force to rewrite")
+    if refused:
+        sys.exit(1)
 
 
 def cmd_stats(args):
@@ -924,28 +956,11 @@ def cmd_import(args):
         project_id = _project_or_exit(conn, args.project)
 
         if dry_run:
-            agent_id, agent_exists = _agent_identity_or_exit(conn, args.agent)
-            plan = core.plan_import(
-                conn, items, project_id, scope=args.scope, agent_id=agent_id
-            )
-            member_exists = bool(conn.execute(
-                'SELECT 1 FROM project_membership WHERE project_id=? AND agent_id=?',
-                (project_id, agent_id)
-            ).fetchone())
+            _import_dry_run(conn, args, items, project_id)
             conn.close()
-            print('import dry-run:')
-            print(f'  total: {plan["total"]}')
-            print(f'  would add: {plan["would_add"]}')
-            print(f'  skipped: {plan["skipped"]}')
-            for reason, count in sorted(plan['reasons'].items()):
-                print(f'    {reason}: {count}')
-            print(f'  agent: {"existing" if agent_exists else "would create"}')
-            print(f'  membership: {"existing" if member_exists else "would join"}')
-            print('  writes performed: 0')
             return
 
-        conn.execute('BEGIN IMMEDIATE')
-        try:
+        with store.write_tx(conn):
             agent_id, agent_exists = _agent_identity_or_exit(conn, args.agent)
             if not agent_exists:
                 conn.execute(
@@ -960,24 +975,10 @@ def cmd_import(args):
             if joined.rowcount:
                 core._audit(conn, 'agent_joined', agent_id, None, project_id,
                             {'source': 'memcore import CLI'})
-            conn.execute('COMMIT')
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except Exception:
-                pass
-            raise
 
         result = core.import_memories(conn, items, project_id, agent_id, scope=args.scope)
         conn.close()
-        
-        print('import complete:')
-        print(f'  added: {result["added"]}')
-        print(f'  skipped: {result["skipped"]}')
-        if result['created']:
-            print('  created memories:')
-            for mem_id, ver_id in result['created']:
-                print(f'    {mem_id} (version {ver_id})')
+        _print_import_result(result)
     except (core.MemCoreError, store.StoreError) as e:
         sys.exit(f'error: {e}')
     except FileNotFoundError:
@@ -990,6 +991,38 @@ def cmd_import(args):
                 conn.close()
             except Exception:
                 pass
+
+
+def _import_dry_run(conn, args, items, project_id):
+    """Preview one import: classification + identity state, zero writes."""
+    agent_id, agent_exists = _agent_identity_or_exit(conn, args.agent)
+    plan = core.plan_import(
+        conn, items, project_id, scope=args.scope, agent_id=agent_id
+    )
+    member_exists = bool(conn.execute(
+        'SELECT 1 FROM project_membership WHERE project_id=? AND agent_id=?',
+        (project_id, agent_id)
+    ).fetchone())
+    print('import dry-run:')
+    print(f'  total: {plan["total"]}')
+    print(f'  would add: {plan["would_add"]}')
+    print(f'  skipped: {plan["skipped"]}')
+    for reason, count in sorted(plan['reasons'].items()):
+        print(f'    {reason}: {count}')
+    print(f'  agent: {"existing" if agent_exists else "would create"}')
+    print(f'  membership: {"existing" if member_exists else "would join"}')
+    print('  writes performed: 0')
+
+
+def _print_import_result(result):
+    """Render one completed import's result counters."""
+    print('import complete:')
+    print(f'  added: {result["added"]}')
+    print(f'  skipped: {result["skipped"]}')
+    if result['created']:
+        print('  created memories:')
+        for mem_id, ver_id in result['created']:
+            print(f'    {mem_id} (version {ver_id})')
 
 
 # ── doctor ─────────────────────────────────────────────────────────────
@@ -1103,42 +1136,12 @@ def cmd_restore_backup(args):
 
     stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
     if db_path.is_file():
-        # Check whether another live connection holds an exclusive/shared lock
-        # or WAL index on the target database (portable across Windows & POSIX).
-        try:
-            target_check = sqlite3.connect(str(db_path), timeout=0.1)
-            try:
-                target_check.execute('PRAGMA busy_timeout = 100')
-                target_check.execute('PRAGMA locking_mode = EXCLUSIVE')
-                target_check.execute('BEGIN EXCLUSIVE')
-                target_check.execute('COMMIT')
-            finally:
-                target_check.close()
-        except sqlite3.OperationalError:
-            sys.exit(
-                f'error: cannot restore — store at {db_path} is in use by a live connection. '
-                f'Close every process using this store, then retry.'
-            )
-
+        _assert_store_not_in_use(db_path)
         preserved = db_path.with_name(f'{db_path.name}.pre-restore-{stamp}.bak')
         shutil.copy2(db_path, preserved)
         print(f'preserved current store: {preserved}')
 
-    # Sidecars belong to the file being replaced; keeping them would graft
-    # another database's WAL frames onto the restored image. A sidecar held by
-    # another live connection cannot be deleted, so fail loudly instead of
-    # silently producing a store whose WAL belongs to a different database.
-    for ext in ('-wal', '-shm'):
-        stale = db_path.with_name(db_path.name + ext)
-        if not stale.exists():
-            continue
-        try:
-            stale.unlink()
-        except PermissionError:
-            sys.exit(
-                f'error: cannot remove {stale.name} — it is in use. '
-                f'Close every process using this store, then retry.'
-            )
+    _remove_stale_sidecars(db_path)
 
     # H8: atomic replace via a same-directory temp file — a crash or full
     # disk mid-copy must leave the existing store untouched, never truncated.
@@ -1156,6 +1159,49 @@ def cmd_restore_backup(args):
     print(f'  memories={counts["memories"]} '
           f'journal_events={counts["journal_events"]}')
     print("run 'memcore doctor' to verify the restored store.")
+
+
+def _assert_store_not_in_use(db_path):
+    """Fail loudly when a live connection still holds the target store.
+
+    Probes for an exclusive/shared lock or a WAL index on the database in a
+    way that works identically on Windows and POSIX.
+    """
+    try:
+        target_check = sqlite3.connect(str(db_path), timeout=0.1)
+        try:
+            target_check.execute('PRAGMA busy_timeout = 100')
+            target_check.execute('PRAGMA locking_mode = EXCLUSIVE')
+            target_check.execute('BEGIN EXCLUSIVE')
+            target_check.execute('COMMIT')
+        finally:
+            target_check.close()
+    except sqlite3.OperationalError:
+        sys.exit(
+            f'error: cannot restore — store at {db_path} is in use by a live connection. '
+            f'Close every process using this store, then retry.'
+        )
+
+
+def _remove_stale_sidecars(db_path):
+    """Delete -wal/-shm sidecars of the file being replaced.
+
+    Sidecars belong to the file being replaced; keeping them would graft
+    another database's WAL frames onto the restored image. A sidecar held by
+    another live connection cannot be deleted, so fail loudly instead of
+    silently producing a store whose WAL belongs to a different database.
+    """
+    for ext in ('-wal', '-shm'):
+        stale = db_path.with_name(db_path.name + ext)
+        if not stale.exists():
+            continue
+        try:
+            stale.unlink()
+        except PermissionError:
+            sys.exit(
+                f'error: cannot remove {stale.name} — it is in use. '
+                f'Close every process using this store, then retry.'
+            )
 
 
 def cmd_contradictions(args):
@@ -1228,220 +1274,87 @@ def cmd_history(args):
     print(f'content: {content}')
 
 
+def _check_profile_binding_drift(conn, db_path, skip_binding=False):
+    """(config_check, binding_drift): enabled bindings must resolve here."""
+    config_check = _discover_hermes_memcore_bindings()
+    drift = []
+    if config_check.get('available') and not skip_binding:
+        current_db = db_path.resolve(strict=False)
+        for binding in config_check.get('bindings', []):
+            reasons = _binding_drift_reasons(conn, binding, current_db)
+            if reasons:
+                drift.append({
+                    'profile': binding['profile'],
+                    'agent': binding.get('agent'),
+                    'projects': binding.get('projects') or [],
+                    'reasons': reasons,
+                })
+    return config_check, drift
+
+
+def _binding_drift_reasons(conn, binding, current_db):
+    """Content-free reasons one enabled binding does not resolve into this store."""
+    reasons = []
+    configured_db = pathlib.Path(binding['store_path']).expanduser().resolve(strict=False)
+    if configured_db != current_db:
+        reasons.append(f'store_mismatch:{configured_db}')
+    agent = binding.get('agent')
+    projects = binding.get('projects') or []
+    if not agent:
+        reasons.append('missing_agent_identity')
+    if not projects:
+        reasons.append('missing_project_binding')
+    for project in projects:
+        pid, project_error = _resolve_project_ref(conn, project)
+        if project_error:
+            reasons.append(project_error)
+            continue
+        if agent:
+            aid = f'agent-{agent}'
+            if not conn.execute(
+                'SELECT 1 FROM project_membership '
+                'WHERE project_id=? AND agent_id=?', (pid, aid)
+            ).fetchone():
+                reasons.append(f'missing_membership:{agent}->{project}')
+    return reasons
+
+
 def cmd_doctor(args):
+    """Integrity + drift checks. Thin adapter over the two deep health seams."""
     conn = None
     try:
         conn = store.open_store_readonly(getattr(args, 'db', DEFAULT_DB))
     except store.StoreError as e:
         sys.exit(f'error: {e}')
-    report = {}
-
-    # 1. SQLite structural + foreign-key integrity.
-    report['integrity_check'] = conn.execute('PRAGMA integrity_check').fetchone()[0]
-    report['foreign_key_violations'] = len(
-        conn.execute('PRAGMA foreign_key_check').fetchall()
-    )
-
-    # 2. Journal mode is the health contract. -wal/-shm files are only
-    # transient diagnostics and may legitimately disappear when the DB is idle.
     db_path = pathlib.Path(getattr(args, 'db', DEFAULT_DB)).expanduser()
-    report['journal_mode'] = conn.execute('PRAGMA journal_mode').fetchone()[0].lower()
-    report['wal_file'] = {
-        'exists': db_path.with_suffix(db_path.suffix + '-wal').exists(),
-        'shm_file': db_path.with_suffix(db_path.suffix + '-shm').exists(),
-    }
-
-    # 3. Orphaned rows (integrity of references)
-    report['orphaned_memory_versions'] = conn.execute(
-        'SELECT COUNT(*) FROM memory_version v '
-        'LEFT JOIN memory m ON m.id = v.memory_id WHERE m.id IS NULL'
-    ).fetchone()[0]
-    report['orphaned_audit_events'] = conn.execute(
-        'SELECT COUNT(*) FROM audit_event a '
-        'LEFT JOIN memory m ON m.id = a.memory_id '
-        'LEFT JOIN project p ON p.id = a.project_id '
-        'WHERE (a.memory_id IS NOT NULL AND m.id IS NULL) '
-        '   OR (a.project_id IS NOT NULL AND p.id IS NULL)'
-    ).fetchone()[0]
-    # idempotency_key intentionally predates FK constraints, so foreign_key_check
-    # cannot detect drift here. Validate both references and cross-row identity.
-    report['idempotency_violations'] = conn.execute(
-        'SELECT COUNT(*) FROM idempotency_key ik '
-        'LEFT JOIN project p ON p.id=ik.project_id '
-        'LEFT JOIN memory m ON m.id=ik.memory_id '
-        'LEFT JOIN memory_version v ON v.id=ik.version_id '
-        'WHERE ik.project_id IS NULL OR p.id IS NULL '
-        '   OR m.id IS NULL OR v.id IS NULL '
-        '   OR (v.id IS NOT NULL AND v.memory_id != ik.memory_id) '
-        '   OR (m.id IS NOT NULL AND ik.project_id IS NOT NULL '
-        '       AND m.project_id != ik.project_id)'
-    ).fetchone()[0]
-
-    report['current_version_ownership_violations'] = conn.execute(
-        'SELECT m.id, m.current_version_id, v.memory_id FROM memory m '
-        'LEFT JOIN memory_version v ON v.id=m.current_version_id '
-        'WHERE m.current_version_id IS NULL OR v.id IS NULL OR v.memory_id != m.id '
-        'ORDER BY m.id'
-    ).fetchall()
-    report['memory_fingerprint_violations'] = []
-    for memory_id, claim_fp, content in conn.execute(
-        'SELECT m.id, m.claim_fingerprint, v.content FROM memory m '
-        'JOIN memory_version v ON v.id=m.current_version_id AND v.memory_id=m.id '
-        'ORDER BY m.id'
-    ):
-        expected_fp = core.fingerprint(content)
-        if claim_fp != expected_fp:
-            report['memory_fingerprint_violations'].append(
-                (memory_id, claim_fp, expected_fp)
-            )
-
-    # 4. Tombstone/refusal-guard integrity.
-    report['tombstones'] = {
-        'active': conn.execute(
-            'SELECT COUNT(*) FROM tombstone WHERE overridden_by IS NULL'
-        ).fetchone()[0],
-        'overridden': conn.execute(
-            'SELECT COUNT(*) FROM tombstone WHERE overridden_by IS NOT NULL'
-        ).fetchone()[0],
-    }
-    report['unguarded_rejected_memories'] = []
-    rejected_rows = conn.execute(
-        'SELECT m.id, m.project_id, m.scope, m.owner_agent_id, v.content '
-        'FROM memory m JOIN memory_version v ON v.id=m.current_version_id '
-        "WHERE m.lifecycle='rejected' ORDER BY m.id"
-    ).fetchall()
-    for memory_id, project_id, scope, owner_agent_id, content in rejected_rows:
-        if core._tombstone_active(
-            conn, core.fingerprint(content), project_id,
-            scope=scope, agent_id=owner_agent_id
-        ) is None:
-            report['unguarded_rejected_memories'].append(memory_id)
-
-    # Tombstone.scope is an encoded reference rather than an FK. Validate both
-    # the reference shape and fingerprint so a typo cannot silently disable a
-    # refusal guard.
-    project_ids = {row[0] for row in conn.execute('SELECT id FROM project')}
-    agent_ids = {row[0] for row in conn.execute('SELECT id FROM agent')}
-    report['tombstone_violations'] = []
-    for tomb_id, claim_fp, scope in conn.execute(
-        'SELECT id, claim_fingerprint, scope FROM tombstone ORDER BY id'
-    ):
-        reasons = []
-        if len(claim_fp) != 16 or any(ch not in '0123456789abcdef' for ch in claim_fp):
-            reasons.append('invalid_fingerprint')
-        if scope == 'global' or scope in project_ids:
-            pass
-        elif scope.startswith('private:'):
-            parts = scope.split(':', 2)
-            if len(parts) != 3 or parts[1] not in project_ids or parts[2] not in agent_ids:
-                reasons.append('invalid_private_scope')
-        else:
-            reasons.append('invalid_scope')
-        if reasons:
-            report['tombstone_violations'].append((tomb_id, scope, reasons))
-
-    # 5. Membership listing + identity/project-name collision checks.
-    report['memberships'] = conn.execute(
-        'SELECT p.name, a.name, pm.role FROM project_membership pm '
-        'JOIN project p ON p.id = pm.project_id '
-        'JOIN agent a ON a.id = pm.agent_id ORDER BY p.name, a.name'
-    ).fetchall()
-    report['agent_name_collisions'] = conn.execute(
-        'SELECT p.name, a.name, COUNT(*) FROM project_membership pm '
-        'JOIN project p ON p.id=pm.project_id '
-        'JOIN agent a ON a.id=pm.agent_id '
-        'GROUP BY pm.project_id, a.name HAVING COUNT(*) > 1 '
-        'ORDER BY p.name, a.name'
-    ).fetchall()
-    report['project_name_collisions'] = conn.execute(
-        'SELECT name, COUNT(*), GROUP_CONCAT(id, ",") FROM project '
-        'GROUP BY name HAVING COUNT(*) > 1 ORDER BY name'
-    ).fetchall()
-
-    # 6. Enabled Hermes profile bindings must resolve into this exact store.
-    config_check = _discover_hermes_memcore_bindings()
-    report['config_check'] = config_check
-    report['binding_drift'] = []
-    current_db = db_path.resolve(strict=False)
-    skip_binding = getattr(args, 'skip_binding_check', False)
-    if config_check.get('available') and not skip_binding:
-        for binding in config_check.get('bindings', []):
-            reasons = []
-            configured_db = pathlib.Path(binding['store_path']).expanduser().resolve(strict=False)
-            if configured_db != current_db:
-                reasons.append(f'store_mismatch:{configured_db}')
-            agent = binding.get('agent')
-            projects = binding.get('projects') or []
-            if not agent:
-                reasons.append('missing_agent_identity')
-            if not projects:
-                reasons.append('missing_project_binding')
-            for project in projects:
-                pid, project_error = _resolve_project_ref(conn, project)
-                if project_error:
-                    reasons.append(project_error)
-                    continue
-                if agent:
-                    aid = f'agent-{agent}'
-                    if not conn.execute(
-                        'SELECT 1 FROM project_membership '
-                        'WHERE project_id=? AND agent_id=?', (pid, aid)
-                    ).fetchone():
-                        reasons.append(f'missing_membership:{agent}->{project}')
-            if reasons:
-                report['binding_drift'].append({
-                    'profile': binding['profile'],
-                    'agent': agent,
-                    'projects': projects,
-                    'reasons': reasons,
-                })
-
-    report['network_path'] = _is_network_path(db_path)
-    report['store_parent_writable'] = os.access(db_path.parent, os.W_OK)
-
-    # 7. Migration lock check
-    locks = store.check_migration_lock(conn)
-    report['migration_locks'] = locks if locks else 'none'
-
-    # 7. FTS index consistency
-    fts_rows = conn.execute('SELECT COUNT(*) FROM memory_version_fts').fetchone()[0]
-    ver_rows = conn.execute('SELECT COUNT(*) FROM memory_version').fetchone()[0]
-    report['fts_index'] = {
-        'fts_rows': fts_rows,
-        'version_rows': ver_rows,
-        'in_sync': fts_rows == ver_rows,
-    }
-
-    # 8. Journal health is content-free. Review backlog is informational;
+    skip_binding = bool(getattr(args, 'skip_binding_check', False))
+    report = {}
+    report.update(store.inspect_storage_health(
+        conn, getattr(args, 'db', DEFAULT_DB)))
+    report.update(core.inspect_governance_health(conn))
+    # Journal health is content-free. Review backlog is informational;
     # failed processing is an actual health failure.
     report['journal'] = ingest.journal_stats(conn)
-    # 8a. Journal age: how many whole days the oldest pending row has waited.
-    # Informational only — a cold queue reports None, never a health failure.
+    # Journal age: whole days the oldest pending row has waited. Informational
+    # only - a cold queue reports None, never a health failure.
     report['journal_age'] = ingest.journal_age(conn)
-
-    # 8b. Recovery readiness. A healthy store with no recent verified backup
-    # is still one incident away from total data loss, so this gates doctor.
-    report['backups'] = store.verify_backups(getattr(args, 'db', DEFAULT_DB))
-
-    # 8c. Corroboration funnel. Informational only — a cold pipeline is not a
-    # health failure, but an operator who never sees this number cannot tell
-    # whether the Golden Rule is alive or structurally unreachable.
-    from . import core as _core
-    report['corroboration'] = store.corroboration_funnel(
-        conn,
-        accept_n=_core.CORROBORATE_ACCEPT_N,
-        golden_n=_core.GOLDEN_N,
-    )
-
-    # 8d. Provenance seals (Phase 6a). Invalid seals gate doctor: a seal
-    # mismatch means attribution fields were altered after write.
-    report['provenance'] = store.verify_all_seals(conn)
-
+    report['network_path'] = _is_network_path(db_path)
+    report['store_parent_writable'] = os.access(db_path.parent, os.W_OK)
+    config_check, binding_drift = _check_profile_binding_drift(
+        conn, db_path, skip_binding=skip_binding)
+    report['config_check'] = config_check
+    report['binding_drift'] = binding_drift
     conn.close()
 
-    # 9. Deployed Hermes plugin runtime must match the Git source of truth.
+    # Deployed Hermes plugin runtime must match the Git source of truth.
     report['plugin_deployment'] = _plugin_deployment_report()
+    _print_doctor_report(report, skip_binding=skip_binding)
+    if _doctor_unhealthy(report, skip_binding=skip_binding):
+        sys.exit(1)
 
+
+def _print_doctor_integrity(report):
+    """Integrity + identity sections of the doctor report."""
     print(f"integrity: {report['integrity_check']}")
     print(f"foreign-key violations: {report['foreign_key_violations']}")
     print(f"journal mode: {report['journal_mode']}")
@@ -1469,6 +1382,10 @@ def cmd_doctor(args):
         print(f'  {name}: {agent} ({role})')
     print(f"agent name collisions: {report['agent_name_collisions'] or 'none'}")
     print(f"project name collisions: {report['project_name_collisions'] or 'none'}")
+
+
+def _print_doctor_bindings(report, skip_binding):
+    """Config-binding drift + path sections of the doctor report."""
     if skip_binding:
         print('config bindings: skipped (--skip-binding-check)')
     elif report['config_check'].get('available'):
@@ -1488,6 +1405,10 @@ def cmd_doctor(args):
         print(f"config bindings: unavailable ({report['config_check'].get('error')})")
     print(f"network path: {report['network_path']}")
     print(f"store parent writable: {report['store_parent_writable']}")
+
+
+def _print_doctor_health(report):
+    """FTS / corroboration / provenance / backup / journal / deploy sections."""
     print(f"fts index: in_sync={report['fts_index']['in_sync']}")
     corrob = report['corroboration']
     print(
@@ -1532,7 +1453,9 @@ def cmd_doctor(args):
     oldest_days = report['journal_age']['oldest_pending_days']
     print(f"journal age: oldest_pending={'n/a' if oldest_days is None else f'{oldest_days}d'}")
     if report['journal']['unresolved_builtin_mutations'] > 0:
-        print("  hint: pending unresolved built-in mutations detected. Run 'memcore journal-stats' to inspect and 'memcore journal-dismiss <id> --agent <agent>' to resolve.")
+        print("  hint: pending unresolved built-in mutations detected. "
+              "Run 'memcore journal-stats' to inspect and "
+              "'memcore journal-dismiss <id> --agent <agent>' to resolve.")
     deploy = report['plugin_deployment']
     if not deploy.get('available'):
         print(f"plugin deploy check: unavailable ({deploy.get('error')})")
@@ -1546,32 +1469,45 @@ def cmd_doctor(args):
         else:
             print(f"plugin deploy check: OK ({deploy['target']})")
 
-    unhealthy = (
-        report['integrity_check'] != 'ok'
-        or report['foreign_key_violations'] > 0
-        or report['journal_mode'] != 'wal'
-        or report['orphaned_memory_versions'] > 0
-        or report['orphaned_audit_events'] > 0
-        or report['idempotency_violations'] > 0
-        or report['current_version_ownership_violations']
-        or report['memory_fingerprint_violations']
-        or report['unguarded_rejected_memories']
-        or report['tombstone_violations']
-        or report['agent_name_collisions']
-        or report['project_name_collisions']
-        or (not skip_binding and bool(report['binding_drift']))
-        or (not skip_binding and bool(report['config_check'].get('errors')))
-        or not report['store_parent_writable']
-        or not report['fts_index']['in_sync']
-        or not report['backups']['recovery_ready']
-        or report['provenance']['invalid'] > 0
-        or report['migration_locks'] != 'none'
-        or report['journal']['by_status'].get('failed', 0) > 0
-        or bool(deploy.get('missing_plugin'))
-        or bool(deploy.get('out_of_sync'))
+
+def _print_doctor_report(report, skip_binding=False):
+    """Render the doctor report (adapter only: no checks live here)."""
+    _print_doctor_integrity(report)
+    _print_doctor_bindings(report, skip_binding)
+    _print_doctor_health(report)
+
+
+def _doctor_unhealthy(report, skip_binding=False) -> bool:
+    """Gate for the doctor exit status; content-free boolean roll-up."""
+    if not skip_binding:
+        if report['binding_drift']:
+            return True
+        if report['config_check'].get('errors'):
+            return True
+    deploy = report['plugin_deployment']
+    red_flags = (
+        report['integrity_check'] != 'ok',
+        report['foreign_key_violations'] > 0,
+        report['journal_mode'] != 'wal',
+        report['orphaned_memory_versions'] > 0,
+        report['orphaned_audit_events'] > 0,
+        report['idempotency_violations'] > 0,
+        bool(report['current_version_ownership_violations']),
+        bool(report['memory_fingerprint_violations']),
+        bool(report['unguarded_rejected_memories']),
+        bool(report['tombstone_violations']),
+        bool(report['agent_name_collisions']),
+        bool(report['project_name_collisions']),
+        not report['store_parent_writable'],
+        not report['fts_index']['in_sync'],
+        not report['backups']['recovery_ready'],
+        report['provenance']['invalid'] > 0,
+        report['migration_locks'] != 'none',
+        report['journal']['by_status'].get('failed', 0) > 0,
+        bool(deploy.get('missing_plugin')),
+        bool(deploy.get('out_of_sync')),
     )
-    if unhealthy:
-        sys.exit(1)
+    return any(red_flags)
 
 
 def cmd_embed(args):

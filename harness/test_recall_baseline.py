@@ -156,6 +156,18 @@ class TestRecallBaseline(RecallBaselineBase):
         _, by_tier = self.precision_at(k=3)
         self.assertGreaterEqual(by_tier.get('negation', 0), 0.2)
 
+    def test_phase3_demotion_floors(self):
+        # Phase-3 demotion upgrade (phrase-negation signal + all-demoted
+        # window collapse) measured 2026-10-16: overall=1.00, exact=1.00,
+        # paraphrase=1.00, negation=1.00 (was 0.86/1.00/1.00/0.40).
+        # Floors are the approved GATE-3 targets, not the achieved values:
+        # future tuning has room, but cannot silently regress past the gate.
+        overall, by_tier = self.precision_at(k=3)
+        self.assertGreaterEqual(overall, 0.86)
+        self.assertGreaterEqual(by_tier.get('exact', 0), 1.00)
+        self.assertGreaterEqual(by_tier.get('paraphrase', 0), 1.00)
+        self.assertGreaterEqual(by_tier.get('negation', 0), 0.60)
+
 
 class TestHybridRecallEvaluation(RecallBaselineBase):
     def setUp(self):

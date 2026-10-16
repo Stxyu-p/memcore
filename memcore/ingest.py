@@ -12,6 +12,7 @@ import re
 import sqlite3
 
 from . import core
+from . import store
 
 EVENT_TYPES = {'turn', 'memory_write', 'delegation', 'session_end', 'manual'}
 MAX_FIELD_CHARS = 65536
@@ -67,58 +68,88 @@ def _payload_hash(event_type, user_content, assistant_content, metadata):
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
-def append_event(conn, project_id, agent_id, event_type, *, session_id='',
-                 user_content='', assistant_content='', metadata=None):
-    """Durably append one raw ingress event; retry-safe within its session."""
-    if event_type not in EVENT_TYPES:
-        raise core.MemCoreError(f'invalid ingest event type: {event_type}')
+def _scrub_journal_pair(user_content, assistant_content):
+    """Validate + scrub both raw journal fields through one gate (R1/H6)."""
     raw_user_content = '' if user_content is None else user_content
     raw_assistant_content = '' if assistant_content is None else assistant_content
     if not isinstance(raw_user_content, str) or not isinstance(raw_assistant_content, str):
         raise core.MemCoreError('journal content must be a string')
-    # R1/H6: scrub BEFORE the payload hash so a retry of the same input keeps
-    # the same content_hash/event_id (idempotent) and raw secrets never reach
-    # disk or the semantic-review payload.
-    raw_user_content = core.scrub_secrets(raw_user_content)
-    raw_assistant_content = core.scrub_secrets(raw_assistant_content)
-    user_content = _clean_text(raw_user_content)
-    assistant_content = _clean_text(raw_assistant_content)
-    metadata = metadata if isinstance(metadata, dict) else {}
+    return (
+        core.scrub_secrets(raw_user_content),
+        core.scrub_secrets(raw_assistant_content),
+    )
+
+
+def _has_remove_reference(event_type, metadata):
+    """True when a memory_write/remove event carries its old_text reference."""
     memory_action = str(metadata.get('action') or '').strip().lower()
     builtin_metadata = metadata.get('builtin_metadata')
     old_text = metadata.get('old_text')
     if not old_text and isinstance(builtin_metadata, dict):
         old_text = builtin_metadata.get('old_text')
-    has_remove_reference = (
+    return (
         event_type == 'memory_write' and memory_action == 'remove'
         and isinstance(old_text, str) and bool(old_text.strip())
     )
-    if not user_content and not assistant_content and not has_remove_reference:
+
+
+def _event_identity(project_id, agent_id, session_id, content_hash):
+    """Deterministic event id over (project, agent, session, payload hash)."""
+    return 'evt-' + hashlib.sha256(
+        f'{project_id}\0{agent_id}\0{session_id}\0{content_hash}'.encode('utf-8')
+    ).hexdigest()[:24]
+
+
+def _normalize_event_input(project_id, agent_id, event_type, session_id,
+                           user_content, assistant_content, metadata):
+    """Validate + scrub + hash one event payload; returns the prepared tuple.
+
+    R1/H6 ordering is the contract: secrets are scrubbed BEFORE the payload
+    hash so a retry of the same input keeps the same content_hash/event_id
+    (idempotent) and raw secrets never reach disk or the semantic-review
+    payload. The hash covers the full source payload before bounded storage
+    truncation, so distinct long turns sharing the first MAX_FIELD_CHARS
+    never collapse together.
+    """
+    if event_type not in EVENT_TYPES:
+        raise core.MemCoreError(f'invalid ingest event type: {event_type}')
+    raw_user_content, raw_assistant_content = _scrub_journal_pair(
+        user_content, assistant_content)
+    user_content = _clean_text(raw_user_content)
+    assistant_content = _clean_text(raw_assistant_content)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if not user_content and not assistant_content and not _has_remove_reference(
+            event_type, metadata):
         raise core.MemCoreError(
             'journal event must contain user or assistant content, or a memory remove old_text'
         )
     session_id = _bounded_session_id(session_id)
-    # Hash the full source payload before bounded storage truncation. Otherwise
-    # distinct long turns sharing the first MAX_FIELD_CHARS collapse together.
     content_hash = _payload_hash(
         event_type, raw_user_content, raw_assistant_content, metadata
     )
-    event_id = 'evt-' + hashlib.sha256(
-        f'{project_id}\0{agent_id}\0{session_id}\0{content_hash}'.encode('utf-8')
-    ).hexdigest()[:24]
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    event_id = _event_identity(project_id, agent_id, session_id, content_hash)
+    return (event_id, session_id, user_content, assistant_content, metadata,
+            content_hash)
+
+
+def append_event(conn, project_id, agent_id, event_type, *, session_id='',
+                 user_content='', assistant_content='', metadata=None):
+    """Durably append one raw ingress event; retry-safe within its session."""
+    (event_id, session_id, user_content, assistant_content, metadata,
+     content_hash) = _normalize_event_input(
+        project_id, agent_id, event_type, session_id, user_content,
+        assistant_content, metadata)
+    with store.write_tx(conn):
         core._require_membership(conn, project_id, agent_id)
         now = core._now()
         # Phase 6a provenance seal: HMAC over the attribution triple with the
         # store-local key. Detects post-write tampering with who-wrote-what.
         # Pre-migration stores without the column accept unsealed rows; the
         # column check keeps old databases readable until migration 0014 runs.
-        from memcore import store as _store
         cols = {r[1] for r in conn.execute('PRAGMA table_info(ingest_event)')}
         if 'provenance_seal' in cols:
-            _key_id, _key_material = _store._active_provenance_key(conn)
-            _seal = _store.seal_event(
+            _key_id, _key_material = store._active_provenance_key(conn)
+            _seal = store.seal_event(
                 project_id, agent_id, content_hash, _key_material)
         else:
             _seal = None
@@ -135,14 +166,7 @@ def append_event(conn, project_id, agent_id, event_type, *, session_id='',
              content_hash, now) + ((_seal,) if _seal else ())
         )
         created = cur.rowcount == 1
-        conn.execute('COMMIT')
-        return event_id, created
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except Exception:
-            pass
-        raise
+    return event_id, created
 
 
 def classify_user_text(text):
@@ -162,23 +186,28 @@ def classify_user_text(text):
     return 'review', 'semantic_review_required', ''
 
 
+def _selected_queue_decisions(decisions):
+    """Validate + normalize the semantic queue decision filter."""
+    if decisions is None:
+        return sorted(SEMANTIC_QUEUE_DECISIONS)
+    if isinstance(decisions, str) or not isinstance(decisions, (list, tuple, set, frozenset)):
+        raise core.MemCoreError('semantic queue decisions must be a non-empty collection')
+    selected = sorted(set(decisions))
+    if not selected:
+        raise core.MemCoreError('semantic queue decisions must be a non-empty collection')
+    invalid = sorted(set(selected) - SEMANTIC_QUEUE_DECISIONS)
+    if invalid:
+        raise core.MemCoreError(
+            'invalid semantic queue decision(s): ' + ', '.join(invalid)
+        )
+    return selected
+
+
 def pending_semantic_events(conn, project_id, agent_id, *, limit=20, decisions=None):
     """Return this agent's pending semantic-review queue without cross-agent leakage."""
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 100:
         raise core.MemCoreError('semantic review limit must be an integer from 1 to 100')
-    if decisions is None:
-        selected_decisions = sorted(SEMANTIC_QUEUE_DECISIONS)
-    else:
-        if isinstance(decisions, str) or not isinstance(decisions, (list, tuple, set, frozenset)):
-            raise core.MemCoreError('semantic queue decisions must be a non-empty collection')
-        selected_decisions = sorted(set(decisions))
-        if not selected_decisions:
-            raise core.MemCoreError('semantic queue decisions must be a non-empty collection')
-        invalid = sorted(set(selected_decisions) - SEMANTIC_QUEUE_DECISIONS)
-        if invalid:
-            raise core.MemCoreError(
-                'invalid semantic queue decision(s): ' + ', '.join(invalid)
-            )
+    selected_decisions = _selected_queue_decisions(decisions)
     core._require_membership(conn, project_id, agent_id)
     rows = conn.execute(
         'SELECT id, event_type, user_content, assistant_content, metadata, decision, created_at '
@@ -218,14 +247,21 @@ def _semantic_analysis_id(event_id, analyzer, verdict, candidate_content, confid
     return 'ana-' + hashlib.sha256(payload.encode('utf-8')).hexdigest()[:24]
 
 
-def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
-                            candidate_content='', confidence=None, rationale='', metadata=None):
-    """Apply an external semantic verdict while MemCore keeps governance authority.
+def _coerce_confidence(confidence):
+    """Validate/normalize a semantic confidence value (None stays None)."""
+    if confidence is None:
+        return None
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        raise core.MemCoreError('semantic confidence must be a number from 0 to 1')
+    confidence = float(confidence)
+    if not 0.0 <= confidence <= 1.0:
+        raise core.MemCoreError('semantic confidence must be a number from 0 to 1')
+    return confidence
 
-    The analyzer may only say remember/ignore/defer. A remember verdict can create only
-    a private candidate owned by the event's agent; scope, lifecycle, tombstones,
-    duplicate handling, and durable derivation remain engine-controlled.
-    """
+
+def _validate_semantic_input(analyzer, verdict, candidate_content, confidence,
+                             rationale, metadata):
+    """Normalize + validate one semantic verdict payload (no conn, no writes)."""
     analyzer = str(analyzer or '').strip()[:128]
     verdict = str(verdict or '').strip().lower()
     candidate_content = core.scrub_secrets(_clean_text(candidate_content).strip())
@@ -239,18 +275,43 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
         raise core.MemCoreError('semantic verdict must be remember|ignore|defer')
     if verdict == 'remember' and not candidate_content:
         raise core.MemCoreError('remember verdict requires candidate_content')
-    if confidence is not None:
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-            raise core.MemCoreError('semantic confidence must be a number from 0 to 1')
-        confidence = float(confidence)
-        if not 0.0 <= confidence <= 1.0:
-            raise core.MemCoreError('semantic confidence must be a number from 0 to 1')
+    confidence = _coerce_confidence(confidence)
+    return analyzer, verdict, candidate_content, confidence, rationale, metadata
+
+
+def _finalized_event_result(conn, event_id, status, decision):
+    """Result dict for an event another path already finalized (+ its memory)."""
+    if not str(decision or '').startswith('semantic_'):
+        raise core.MemCoreError(
+            f'event is already finalized by another path (decision={decision or "none"})'
+        )
+    linked = conn.execute(
+        'SELECT memory_id FROM ingest_derivation WHERE event_id=? '
+        'ORDER BY created_at DESC LIMIT 1', (event_id,)
+    ).fetchone()
+    result = {'event_id': event_id, 'status': status, 'decision': decision}
+    if linked:
+        result['memory_id'] = linked[0]
+    return result
+
+
+def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
+                            candidate_content='', confidence=None, rationale='', metadata=None):
+    """Apply an external semantic verdict while MemCore keeps governance authority.
+
+    The analyzer may only say remember/ignore/defer. A remember verdict can create only
+    a private candidate owned by the event's agent; scope, lifecycle, tombstones,
+    duplicate handling, and durable derivation remain engine-controlled.
+    """
+    analyzer, verdict, candidate_content, confidence, rationale, metadata = (
+        _validate_semantic_input(
+            analyzer, verdict, candidate_content, confidence, rationale,
+            metadata))
 
     analysis_id = _semantic_analysis_id(
         event_id, analyzer, verdict, candidate_content, confidence, rationale, metadata
     )
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         row = conn.execute(
             'SELECT project_id, agent_id, status, decision FROM ingest_event WHERE id=?',
             (event_id,)
@@ -262,19 +323,7 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
         if event_agent_id != agent_id:
             raise core.PermissionDenied('semantic review event belongs to another agent')
         if status != 'pending':
-            if not str(decision or '').startswith('semantic_'):
-                raise core.MemCoreError(
-                    f'event is already finalized by another path (decision={decision or "none"})'
-                )
-            linked = conn.execute(
-                'SELECT memory_id FROM ingest_derivation WHERE event_id=? '
-                'ORDER BY created_at DESC LIMIT 1', (event_id,)
-            ).fetchone()
-            conn.execute('ROLLBACK')
-            result = {'event_id': event_id, 'status': status, 'decision': decision}
-            if linked:
-                result['memory_id'] = linked[0]
-            return result
+            return _finalized_event_result(conn, event_id, status, decision)
         if decision not in ('semantic_review_required', 'semantic_deferred'):
             raise core.MemCoreError(
                 f'event is not awaiting semantic review (decision={decision or "none"})'
@@ -293,7 +342,6 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
                 "UPDATE ingest_event SET decision='semantic_deferred', error=NULL WHERE id=?",
                 (event_id,)
             )
-            conn.execute('COMMIT')
             return {'event_id': event_id, 'status': 'pending',
                     'decision': 'semantic_deferred', 'analysis_id': analysis_id}
         if verdict == 'ignore':
@@ -301,92 +349,31 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
                 "UPDATE ingest_event SET status='ignored', decision='semantic_ignored', "
                 'error=NULL, processed_at=? WHERE id=?', (now, event_id)
             )
-            conn.execute('COMMIT')
             return {'event_id': event_id, 'status': 'ignored',
                     'decision': 'semantic_ignored', 'analysis_id': analysis_id}
 
-        claim_fp = core.fingerprint(candidate_content)
-        existing = _find_private_claim(conn, project_id, agent_id, claim_fp)
-        if existing:
-            conn.execute(
-                "INSERT OR IGNORE INTO ingest_derivation "
-                "(event_id,memory_id,relation,created_at) VALUES (?,?,'duplicate',?)",
-                (event_id, existing, now)
-            )
-            core._audit(conn, 'duplicate-merge', agent_id, existing,
-                        project_id, {'event_id': event_id})
-            conn.execute('UPDATE ingest_analysis SET memory_id=? WHERE id=?',
-                         (existing, analysis_id))
-            conn.execute(
-                "UPDATE ingest_event SET status='processed', decision='semantic_duplicate', "
-                'error=NULL, processed_at=? WHERE id=?', (now, event_id)
-            )
-            conn.execute('COMMIT')
-            return {'event_id': event_id, 'status': 'processed',
-                    'decision': 'semantic_duplicate', 'analysis_id': analysis_id,
-                    'memory_id': existing}
-
-        memory_id, _version_id = core.create_memory(
-            conn, project_id, agent_id, candidate_content,
-            scope='private', memory_type='observation', lifecycle='candidate',
-            idempotency_key=f'semantic:{event_id}',
-            reason=f'semantic analysis by {analyzer}', _manage_transaction=False
-        )
         # ADR-0019 high-confidence lane: confidence >= 0.95 self-accepts.
         # Below stays candidate. Tombstone-blocked claims refuse loudly.
         # core.auto_accept owns gate -> hold -> accept -> sweep; the lane
         # keeps only the event/analysis writes and its decision strings.
-        decision = 'semantic_private_candidate'
-        swept = False
-        if confidence is not None and float(confidence) >= core.HIGH_CONFIDENCE_ACCEPT:
-            outcome = core.auto_accept(
-                conn, memory_id, agent_id,
-                'high-confidence semantic auto-accept')
-            if outcome['held']:
-                now = core._now()
-                conn.execute(
-                    "INSERT INTO ingest_derivation "
-                    "(event_id,memory_id,relation,created_at) VALUES (?,?,'ignored',?)",
-                    (event_id, memory_id, now)
-                )
-                conn.execute('UPDATE ingest_analysis SET memory_id=? WHERE id=?',
-                             (memory_id, analysis_id))
-                conn.execute(
-                    "UPDATE ingest_event SET status='processed', decision=?, "
-                    "error=NULL, processed_at=? WHERE id=?",
-                    ('contradiction_hold', now, event_id)
-                )
-                conn.execute('COMMIT')
-                return {'event_id': event_id, 'status': 'processed',
-                        'decision': 'contradiction_hold', 'analysis_id': analysis_id,
-                        'memory_id': memory_id, 'held': True}
-            decision = 'semantic_private_accepted'
-            swept = True
-        if not swept:
-            # The low-confidence candidate path still needs its own sweep:
-            # it may complete a corroboration set started by other agents.
-            core.maybe_auto_corrob(conn, project_id, claim_fp, agent_id)
-        conn.execute(
-            "INSERT INTO ingest_derivation "
-            "(event_id,memory_id,relation,created_at) VALUES (?,?,'created',?)",
-            (event_id, memory_id, now)
+        high_confidence = (
+            confidence is not None
+            and float(confidence) >= core.HIGH_CONFIDENCE_ACCEPT
         )
-        conn.execute('UPDATE ingest_analysis SET memory_id=? WHERE id=?',
-                     (memory_id, analysis_id))
-        conn.execute(
-            "UPDATE ingest_event SET status='processed', decision=?, "
-            "error=NULL, processed_at=? WHERE id=?", (decision, now, event_id)
+        return _admit_journal_candidate(
+            conn, event_id, project_id, agent_id, candidate_content,
+            idempotency_key=f'semantic:{event_id}',
+            reason=f'semantic analysis by {analyzer}',
+            analysis_id=analysis_id,
+            decision_created='semantic_private_candidate',
+            decision_duplicate='semantic_duplicate',
+            decision_accepted=(
+                'semantic_private_accepted' if high_confidence else None),
+            auto_accept_reason=(
+                'high-confidence semantic auto-accept'
+                if high_confidence else None),
+            extra_sweep=not high_confidence,
         )
-        conn.execute('COMMIT')
-        return {'event_id': event_id, 'status': 'processed',
-                'decision': decision, 'analysis_id': analysis_id,
-                'memory_id': memory_id}
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except Exception:
-            pass
-        raise
 
 
 def semantic_analysis_history(conn, event_id, agent_id):
@@ -467,6 +454,104 @@ def _private_claim_ids(conn, project_id, agent_id, claim_fp, *, active_only=Fals
 def _find_private_claim(conn, project_id, agent_id, claim_fp):
     matches = _private_claim_ids(conn, project_id, agent_id, claim_fp)
     return matches[0] if matches else None
+
+
+def _admit_journal_candidate(conn, event_id, project_id, agent_id,
+                             candidate_content, *, idempotency_key, reason,
+                             decision_created, decision_accepted=None,
+                             decision_duplicate='duplicate',
+                             auto_accept_reason=None, extra_sweep=False,
+                             analysis_id=None):
+    """Duplicate-merge → create → auto-accept/hold → derivation → event update.
+
+    The single admission bridge shared by the semantic verdict lane and the
+    explicit durable-signal lane (C4). Runs inside the caller's transaction;
+    the caller owns COMMIT/ROLLBACK. Returns the event result dict.
+
+    - decision_created: the event decision when the memory stays a candidate
+      (or the only decision, when no auto-accept ran).
+    - decision_accepted: the decision when auto_accept transitioned the row.
+    - auto_accept_reason: when set, run core.auto_accept (gate → hold →
+      accept → sweep) and handle its hold outcome.
+    - extra_sweep: run one maybe_auto_corrob sweep when auto_accept did NOT
+      run (the low-confidence candidate path may complete a corroboration
+      set started by other agents).
+    """
+    now = core._now()
+    claim_fp = core.fingerprint(candidate_content)
+    existing = _find_private_claim(conn, project_id, agent_id, claim_fp)
+    if existing:
+        conn.execute(
+            "INSERT OR IGNORE INTO ingest_derivation "
+            "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'duplicate', ?)",
+            (event_id, existing, now)
+        )
+        core._audit(conn, 'duplicate-merge', agent_id, existing,
+                    project_id, {'event_id': event_id})
+        if analysis_id is not None:
+            conn.execute('UPDATE ingest_analysis SET memory_id=? WHERE id=?',
+                         (existing, analysis_id))
+        conn.execute(
+            "UPDATE ingest_event SET status='processed', decision=?, "
+            'error=NULL, processed_at=? WHERE id=?',
+            (decision_duplicate, now, event_id)
+        )
+        result = {'event_id': event_id, 'status': 'processed',
+                  'decision': decision_duplicate, 'memory_id': existing}
+        if analysis_id is not None:
+            result['analysis_id'] = analysis_id
+        return result
+
+    memory_id, _version_id = core.create_memory(
+        conn, project_id, agent_id, candidate_content,
+        scope='private', memory_type='observation', lifecycle='candidate',
+        idempotency_key=idempotency_key, reason=reason,
+        _manage_transaction=False
+    )
+    decision = decision_created
+    if auto_accept_reason is not None:
+        outcome = core.auto_accept(conn, memory_id, agent_id,
+                                   auto_accept_reason)
+        if outcome['held']:
+            conn.execute(
+                "INSERT INTO ingest_derivation "
+                "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'ignored', ?)",
+                (event_id, memory_id, core._now())
+            )
+            if analysis_id is not None:
+                conn.execute('UPDATE ingest_analysis SET memory_id=? WHERE id=?',
+                             (memory_id, analysis_id))
+            conn.execute(
+                "UPDATE ingest_event SET status='processed', decision=?, "
+                'error=NULL, processed_at=? WHERE id=?',
+                ('contradiction_hold', now, event_id)
+            )
+            result = {'event_id': event_id, 'status': 'processed',
+                      'decision': 'contradiction_hold',
+                      'memory_id': memory_id, 'held': True}
+            if analysis_id is not None:
+                result['analysis_id'] = analysis_id
+            return result
+        decision = decision_accepted or decision_created
+    elif extra_sweep:
+        core.maybe_auto_corrob(conn, project_id, claim_fp, agent_id)
+    conn.execute(
+        "INSERT INTO ingest_derivation "
+        "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'created', ?)",
+        (event_id, memory_id, now)
+    )
+    if analysis_id is not None:
+        conn.execute('UPDATE ingest_analysis SET memory_id=? WHERE id=?',
+                     (memory_id, analysis_id))
+    conn.execute(
+        "UPDATE ingest_event SET status='processed', decision=?, "
+        'error=NULL, processed_at=? WHERE id=?', (decision, now, event_id)
+    )
+    result = {'event_id': event_id, 'status': 'processed',
+              'decision': decision, 'memory_id': memory_id}
+    if analysis_id is not None:
+        result['analysis_id'] = analysis_id
+    return result
 
 
 def _memory_write_reference(metadata):
@@ -552,8 +637,7 @@ def _mutation_audit_memory(conn, project_id, agent_id, event_id, action):
 
 def _finish_builtin_mutation(conn, event_id, memory_id, decision):
     now = core._now()
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         conn.execute(
             "INSERT OR IGNORE INTO ingest_derivation "
             "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'corrected', ?)",
@@ -564,15 +648,59 @@ def _finish_builtin_mutation(conn, event_id, memory_id, decision):
             'WHERE id=?',
             (decision, now, event_id)
         )
-        conn.execute('COMMIT')
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except Exception:
-            pass
-        raise
     return {'event_id': event_id, 'status': 'processed',
             'decision': decision, 'memory_id': memory_id}
+
+
+def _await_builtin_decision(conn, event_id, decision):
+    """Record why a builtin mutation still waits; report it as pending."""
+    conn.execute(
+        'UPDATE ingest_event SET decision=? WHERE id=?', (decision, event_id))
+    return {'event_id': event_id, 'status': 'pending', 'decision': decision}
+
+
+def _resolve_builtin_target(conn, project_id, agent_id, event_id, metadata,
+                            action):
+    """Resolve which memory a builtin replace/remove targets.
+
+    Returns (memory_id, decision, recovered): a recovered mutation carries
+    its memory id + final decision; an unresolved target carries a pending
+    decision and no memory id.
+    """
+    audit_action = 'supersede' if action == 'replace' else 'reject'
+    recovered = _mutation_audit_memory(
+        conn, project_id, agent_id, event_id, audit_action
+    )
+    if recovered:
+        return recovered, f'builtin_memory_{action}d', True
+    old_text = _memory_write_reference(metadata)
+    if not old_text:
+        return None, f'builtin_memory_{action}_missing_old_text', False
+    target = str(metadata.get('target') or '').strip().lower()
+    memory_id = _find_builtin_memory_target(
+        conn, project_id, agent_id, old_text, target=target
+    )
+    if not memory_id:
+        return None, f'builtin_memory_{action}_unresolved_target', False
+    return memory_id, None, False
+
+
+def _apply_builtin_action(conn, action, memory_id, agent_id, user_content,
+                          marker):
+    """Apply a resolved replace/remove mutation; returns the decision string."""
+    if action == 'replace':
+        new_content = (user_content or '').strip()
+        if not new_content:
+            return 'builtin_memory_replace_missing_content'
+        core.supersede(
+            conn, memory_id, agent_id, new_content,
+            reason=marker, write_key=marker
+        )
+        return 'builtin_memory_replaced'
+    # A durable remove is a refusal to retain this claim. Rejecting leaves only
+    # its fingerprint tombstone, preventing later journal replay from resurrecting it.
+    core.reject(conn, memory_id, agent_id, marker, write_key=marker)
+    return 'builtin_memory_removed'
 
 
 def _process_builtin_mutation(conn, event_id):
@@ -583,10 +711,7 @@ def _process_builtin_mutation(conn, event_id):
     if row is None:
         raise core.MemCoreError(f'ingest event not found: {event_id}')
     project_id, agent_id, user_content, metadata_raw, status = row
-    try:
-        metadata = json.loads(metadata_raw or '{}')
-    except (TypeError, ValueError, json.JSONDecodeError):
-        metadata = {}
+    metadata = _parse_metadata(metadata_raw)
     core._require_membership(conn, project_id, agent_id)
     if status != 'pending':
         return {'event_id': event_id, 'status': status}
@@ -603,47 +728,126 @@ def _process_builtin_mutation(conn, event_id):
         return {'event_id': event_id, 'status': 'ignored',
                 'decision': 'builtin_memory_write_failed_upstream'}
 
-    audit_action = 'supersede' if action == 'replace' else 'reject'
-    recovered = _mutation_audit_memory(
-        conn, project_id, agent_id, event_id, audit_action
-    )
+    memory_id, decision, recovered = _resolve_builtin_target(
+        conn, project_id, agent_id, event_id, metadata, action)
     if recovered:
-        return _finish_builtin_mutation(
-            conn, event_id, recovered, f'builtin_memory_{action}d'
-        )
-
-    old_text = _memory_write_reference(metadata)
-    if not old_text:
-        decision = f'builtin_memory_{action}_missing_old_text'
-        conn.execute('UPDATE ingest_event SET decision=? WHERE id=?', (decision, event_id))
-        return {'event_id': event_id, 'status': 'pending', 'decision': decision}
-    target = str(metadata.get('target') or '').strip().lower()
-    memory_id = _find_builtin_memory_target(
-        conn, project_id, agent_id, old_text, target=target
-    )
-    if not memory_id:
-        decision = f'builtin_memory_{action}_unresolved_target'
-        conn.execute('UPDATE ingest_event SET decision=? WHERE id=?', (decision, event_id))
-        return {'event_id': event_id, 'status': 'pending', 'decision': decision}
+        return _finish_builtin_mutation(conn, event_id, memory_id, decision)
+    if memory_id is None:
+        return _await_builtin_decision(conn, event_id, decision)
 
     marker = f'ingest:{event_id}'
-    if action == 'replace':
-        new_content = (user_content or '').strip()
-        if not new_content:
-            decision = 'builtin_memory_replace_missing_content'
-            conn.execute('UPDATE ingest_event SET decision=? WHERE id=?', (decision, event_id))
-            return {'event_id': event_id, 'status': 'pending', 'decision': decision}
-        core.supersede(
-            conn, memory_id, agent_id, new_content,
-            reason=marker, write_key=marker
-        )
-        decision = 'builtin_memory_replaced'
-    else:
-        # A durable remove is a refusal to retain this claim. Rejecting leaves only
-        # its fingerprint tombstone, preventing later journal replay from resurrecting it.
-        core.reject(conn, memory_id, agent_id, marker, write_key=marker)
-        decision = 'builtin_memory_removed'
+    decision = _apply_builtin_action(
+        conn, action, memory_id, agent_id, user_content, marker)
+    if decision == 'builtin_memory_replace_missing_content':
+        return _await_builtin_decision(conn, event_id, decision)
     return _finish_builtin_mutation(conn, event_id, memory_id, decision)
+
+
+def _parse_metadata(raw):
+    """Parse a stored JSON metadata blob; parse failures degrade to {}."""
+    try:
+        return json.loads(raw or '{}')
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _classify_event(event_type, user_content, metadata):
+    """Deterministic event classification: (decision, reason, candidate)."""
+    if event_type == 'delegation':
+        # Delegation task/result payloads are operational history, not trusted
+        # user instructions. Keep the raw journal row but never admit it.
+        return 'ignore', 'delegation_operational_event', ''
+    if event_type == 'memory_write' and metadata.get('success') is False:
+        return 'ignore', 'builtin_memory_write_failed_upstream', ''
+    if event_type == 'memory_write' and user_content.strip():
+        action = str(metadata.get('action') or 'add').strip().lower()
+        if action == 'add':
+            return ('candidate', 'explicit_memory_write_add',
+                    user_content.strip()[:4000])
+        return ('review',
+                f'builtin_memory_{action or "unknown"}_requires_review', '')
+    return classify_user_text(user_content)
+
+
+def _mark_event_failed(conn, event_id, exc):
+    """Record a processing failure on the event row (best-effort, own tx)."""
+    try:
+        with store.write_tx(conn):
+            conn.execute(
+                "UPDATE ingest_event SET status='failed', error=?, processed_at=? WHERE id=?",
+                (f'{type(exc).__name__}: {exc}'[:2000], core._now(), event_id)
+            )
+    except Exception:
+        pass
+
+
+def _process_pending_event(conn, event_id):
+    """Classify + admit one pending event inside one transaction.
+
+    Returns (result, needs_builtin_mutation). Built-in replace/remove events
+    return (None, True) with the classification transaction released: they
+    call core write APIs that own their own lifetime.
+    """
+    with store.write_tx(conn):
+        row = conn.execute(
+            'SELECT project_id, agent_id, event_type, user_content, metadata, status, decision '
+            'FROM ingest_event WHERE id=?', (event_id,)
+        ).fetchone()
+        if row is None:
+            raise core.MemCoreError(f'ingest event not found: {event_id}')
+        project_id, agent_id, event_type, user_content, metadata_raw, status, decision = row
+        metadata = _parse_metadata(metadata_raw)
+        if status != 'pending':
+            linked = conn.execute(
+                'SELECT memory_id FROM ingest_derivation WHERE event_id=? '
+                'ORDER BY CASE relation WHEN \'created\' THEN 0 WHEN \'duplicate\' THEN 1 '
+                'ELSE 2 END, created_at DESC LIMIT 1', (event_id,)
+            ).fetchone()
+            result = {'event_id': event_id, 'status': status}
+            if decision:
+                result['decision'] = decision
+            if linked:
+                result['memory_id'] = linked[0]
+            return result, False
+        if event_type == 'memory_write':
+            action = str(metadata.get('action') or '').strip().lower()
+            if action in ('replace', 'remove'):
+                # Built-in mutations call core write APIs that own their own
+                # transactions. Leave this classification transaction first.
+                return None, True
+        core._require_membership(conn, project_id, agent_id)
+        decision, reason, candidate = _classify_event(
+            event_type, user_content, metadata)
+        now = core._now()
+        if decision == 'ignore':
+            conn.execute(
+                "UPDATE ingest_event SET status='ignored', decision=?, processed_at=? WHERE id=?",
+                (reason, now, event_id)
+            )
+            return {'event_id': event_id, 'status': 'ignored',
+                    'decision': reason}, False
+        if decision == 'review':
+            conn.execute(
+                'UPDATE ingest_event SET decision=? WHERE id=?', (reason, event_id)
+            )
+            return {'event_id': event_id, 'status': 'pending',
+                    'decision': reason}, False
+        # ADR-0019 explicit lane: a deliberate durable signal self-accepts
+        # instead of parking in candidate. Tombstone-blocked claims refuse
+        # loudly. core.auto_accept owns gate -> hold -> accept -> sweep;
+        # the lane keeps only the event writes and its decision strings.
+        # ponytail: hold is audit-only on every lane; the removed
+        # mark_contradiction demoted the established row from an explicit
+        # write, so one bad signal could bury a good fact with no recovery.
+        result = _admit_journal_candidate(
+            conn, event_id, project_id, agent_id, candidate,
+            idempotency_key=f'ingest:{event_id}',
+            reason='native provider journal analysis',
+            decision_created='private_accepted',
+            decision_accepted='private_accepted',
+            auto_accept_reason='explicit durable signal auto-accept',
+        )
+        return result, False
 
 
 def process_event(conn, event_id):
@@ -653,158 +857,16 @@ def process_event(conn, event_id):
     events stay pending for a future semantic analyzer or operator review.
     """
     mutation_path = False
-    conn.execute('BEGIN IMMEDIATE')
     try:
-        row = conn.execute(
-            'SELECT project_id, agent_id, event_type, user_content, metadata, status, decision '
-            'FROM ingest_event WHERE id=?', (event_id,)
-        ).fetchone()
-        if row is None:
-            raise core.MemCoreError(f'ingest event not found: {event_id}')
-        project_id, agent_id, event_type, user_content, metadata_raw, status, decision = row
-        try:
-            metadata = json.loads(metadata_raw or '{}')
-        except (TypeError, ValueError, json.JSONDecodeError):
-            metadata = {}
-        if status != 'pending':
-            linked = conn.execute(
-                'SELECT memory_id FROM ingest_derivation WHERE event_id=? '
-                'ORDER BY CASE relation WHEN \'created\' THEN 0 WHEN \'duplicate\' THEN 1 '
-                'ELSE 2 END, created_at DESC LIMIT 1', (event_id,)
-            ).fetchone()
-            conn.execute('ROLLBACK')
-            result = {'event_id': event_id, 'status': status}
-            if decision:
-                result['decision'] = decision
-            if linked:
-                result['memory_id'] = linked[0]
-            return result
-        if event_type == 'memory_write':
-            action = str(metadata.get('action') or '').strip().lower()
-            if action in ('replace', 'remove'):
-                # Built-in mutations call core write APIs that own their own
-                # transactions. Release this event-classification transaction
-                # before entering that path.
-                conn.execute('ROLLBACK')
-                mutation_path = True
-                return _process_builtin_mutation(conn, event_id)
-        core._require_membership(conn, project_id, agent_id)
-
-        if event_type == 'delegation':
-            # Delegation task/result payloads are operational history, not trusted
-            # user instructions. Keep the raw journal row but never admit it.
-            decision, reason, candidate = 'ignore', 'delegation_operational_event', ''
-        elif event_type == 'memory_write' and metadata.get('success') is False:
-            decision, reason, candidate = (
-                'ignore', 'builtin_memory_write_failed_upstream', ''
-            )
-        elif event_type == 'memory_write' and user_content.strip():
-            action = str(metadata.get('action') or 'add').strip().lower()
-            if action == 'add':
-                decision, reason, candidate = (
-                    'candidate', 'explicit_memory_write_add', user_content.strip()[:4000]
-                )
-            else:
-                decision, reason, candidate = (
-                    'review', f'builtin_memory_{action or "unknown"}_requires_review', ''
-                )
-        else:
-            decision, reason, candidate = classify_user_text(user_content)
-        now = core._now()
-        if decision == 'ignore':
-            conn.execute(
-                "UPDATE ingest_event SET status='ignored', decision=?, processed_at=? WHERE id=?",
-                (reason, now, event_id)
-            )
-            conn.execute('COMMIT')
-            return {'event_id': event_id, 'status': 'ignored', 'decision': reason}
-        if decision == 'review':
-            conn.execute(
-                'UPDATE ingest_event SET decision=? WHERE id=?', (reason, event_id)
-            )
-            conn.execute('COMMIT')
-            return {'event_id': event_id, 'status': 'pending', 'decision': reason}
-        claim_fp = core.fingerprint(candidate)
-        existing = _find_private_claim(conn, project_id, agent_id, claim_fp)
-        if existing:
-            conn.execute(
-                "INSERT OR IGNORE INTO ingest_derivation "
-                "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'duplicate', ?)",
-                (event_id, existing, now)
-            )
-            core._audit(conn, 'duplicate-merge', agent_id, existing,
-                        project_id, {'event_id': event_id})
-            conn.execute(
-                "UPDATE ingest_event SET status='processed', decision='duplicate', processed_at=? "
-                'WHERE id=?', (now, event_id)
-            )
-            conn.execute('COMMIT')
-            return {'event_id': event_id, 'status': 'processed',
-                    'decision': 'duplicate', 'memory_id': existing}
-
-        memory_id, _version_id = core.create_memory(
-            conn, project_id, agent_id, candidate,
-            scope='private', memory_type='observation', lifecycle='candidate',
-            idempotency_key=f'ingest:{event_id}',
-            reason='native provider journal analysis', _manage_transaction=False
-        )
-        # ADR-0019 explicit lane: a deliberate durable signal self-accepts
-        # instead of parking in candidate. Tombstone-blocked claims refuse
-        # loudly. core.auto_accept owns gate -> hold -> accept -> sweep;
-        # the lane keeps only the event writes and its decision strings.
-        # ponytail: hold is audit-only on every lane; the removed
-        # mark_contradiction demoted the established row from an explicit
-        # write, so one bad signal could bury a good fact with no recovery.
-        outcome = core.auto_accept(
-            conn, memory_id, agent_id,
-            'explicit durable signal auto-accept')
-        if outcome['held']:
-            conn.execute(
-                "INSERT INTO ingest_derivation "
-                "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'ignored', ?)",
-                (event_id, memory_id, now)
-            )
-            conn.execute(
-                "UPDATE ingest_event SET status='processed', decision=?, processed_at=? "
-                'WHERE id=?', ('contradiction_hold', now, event_id)
-            )
-            conn.execute('COMMIT')
-            return {'event_id': event_id, 'status': 'processed',
-                    'decision': 'contradiction_hold', 'memory_id': memory_id,
-                    'held': True}
-        decision = 'private_accepted'
-        conn.execute(
-            "INSERT INTO ingest_derivation "
-            "(event_id, memory_id, relation, created_at) VALUES (?, ?, 'created', ?)",
-            (event_id, memory_id, now)
-        )
-        conn.execute(
-            "UPDATE ingest_event SET status='processed', decision=?, processed_at=? "
-            'WHERE id=?', (decision, now, event_id)
-        )
-        conn.execute('COMMIT')
-        return {'event_id': event_id, 'status': 'processed',
-                'decision': decision, 'memory_id': memory_id}
+        result, mutation_path = _process_pending_event(conn, event_id)
+        if mutation_path:
+            return _process_builtin_mutation(conn, event_id)
     except Exception as exc:
-        try:
-            conn.execute('ROLLBACK')
-        except Exception:
-            pass
         if mutation_path:
             raise
-        try:
-            conn.execute('BEGIN IMMEDIATE')
-            conn.execute(
-                "UPDATE ingest_event SET status='failed', error=?, processed_at=? WHERE id=?",
-                (f'{type(exc).__name__}: {exc}'[:2000], core._now(), event_id)
-            )
-            conn.execute('COMMIT')
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except Exception:
-                pass
+        _mark_event_failed(conn, event_id, exc)
         raise
+    return result
 
 
 def record(conn, project_id, agent_id, event_type, *, session_id='',
@@ -845,77 +907,56 @@ def record(conn, project_id, agent_id, event_type, *, session_id='',
     return proc
 
 
-def journal_stats(conn, project_id=None, agent_id=None):
-    """Return a content-free operational snapshot of the ingest journal.
-
-    The snapshot deliberately aggregates metadata only. It never returns raw user,
-    assistant, candidate, rationale, or event metadata content, making it suitable
-    for health checks and dashboards that should not expose historical prompts.
-    """
-    filters = []
-    params = []
+def _journal_filters(project_id, agent_id):
+    """WHERE fragments + params for an optional (project, agent) scope."""
+    filters, params = [], []
     if project_id is not None:
         filters.append('project_id=?')
         params.append(project_id)
     if agent_id is not None:
         filters.append('agent_id=?')
         params.append(agent_id)
-    if project_id is not None and agent_id is not None:
-        core._require_membership(conn, project_id, agent_id)
+    return filters, params
 
-    where = (' WHERE ' + ' AND '.join(filters)) if filters else ''
 
-    def grouped(column, *, extra=''):
-        clauses = list(filters)
-        local_params = list(params)
-        if extra:
-            clauses.append(extra)
-        local_where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
-        return dict(conn.execute(
-            f'SELECT {column}, COUNT(*) FROM ingest_event{local_where} '
-            f'GROUP BY {column} ORDER BY {column}', local_params
-        ).fetchall())
+def _journal_grouped(conn, filters, params, column, *, extra=''):
+    """One GROUP BY census with the optional scope filters applied."""
+    clauses = list(filters)
+    if extra:
+        clauses.append(extra)
+    local_where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    return dict(conn.execute(
+        f'SELECT {column}, COUNT(*) FROM ingest_event{local_where} '
+        f'GROUP BY {column} ORDER BY {column}', list(params)
+    ).fetchall())
 
-    total = conn.execute(
-        'SELECT COUNT(*) FROM ingest_event' + where, params
-    ).fetchone()[0]
-    by_status = grouped('status')
-    pending_by_decision = grouped(
-        "COALESCE(decision, 'unclassified')", extra="status='pending'"
-    )
-    pending_by_event_type = grouped('event_type', extra="status='pending'")
 
-    pending_clauses = list(filters) + ["status='pending'"]
-    pending_where = ' WHERE ' + ' AND '.join(pending_clauses)
-    pending_params = list(params)
+def _journal_pending_counts(conn, pending_where, pending_params):
+    """Pending-queue census: semantic backlog, builtin noise, oldest age."""
     semantic_pending = conn.execute(
         'SELECT COUNT(*) FROM ingest_event' + pending_where +
         " AND decision IN ('semantic_review_required','semantic_deferred')",
         pending_params
     ).fetchone()[0]
-    unresolved_builtin = conn.execute(
-        'SELECT COUNT(*) FROM ingest_event' + pending_where +
-        " AND decision LIKE 'builtin_memory_%' "
-        "AND (decision LIKE '%_unresolved_target' "
-        "OR decision LIKE '%_missing_old_text' "
-        "OR decision='builtin_memory_replace_missing_content' "
-        "OR decision LIKE '%_requires_review')",
-        pending_params
-    ).fetchone()[0]
     # v0.7 hygiene (spec Part 5): old unresolved builtin rows are sweepable
     # via `journal-sweep`, not alarming. Only YOUNG (<7d) builtin noise
     # escalates to operator_attention.
-    unresolved_builtin_young = conn.execute(
-        'SELECT COUNT(*) FROM ingest_event' + pending_where +
+    builtin_noise = (
         " AND decision LIKE 'builtin_memory_%' "
         "AND (decision LIKE '%_unresolved_target' "
         "OR decision LIKE '%_missing_old_text' "
         "OR decision='builtin_memory_replace_missing_content' "
-        "OR decision LIKE '%_requires_review') "
-        "AND datetime(created_at) >= datetime('now', '-7 days')",
+        "OR decision LIKE '%_requires_review')"
+    )
+    unresolved_builtin = conn.execute(
+        'SELECT COUNT(*) FROM ingest_event' + pending_where + builtin_noise,
         pending_params
     ).fetchone()[0]
-    sweepable_builtin = unresolved_builtin - unresolved_builtin_young
+    unresolved_builtin_young = conn.execute(
+        'SELECT COUNT(*) FROM ingest_event' + pending_where + builtin_noise +
+        " AND datetime(created_at) >= datetime('now', '-7 days')",
+        pending_params
+    ).fetchone()[0]
     oldest = conn.execute(
         'SELECT MIN(created_at) FROM ingest_event' + pending_where,
         pending_params
@@ -928,40 +969,84 @@ def journal_stats(conn, project_id=None, agent_id=None):
             (oldest,)
         ).fetchone()[0]
         oldest_age_seconds = int(age) if age is not None else None
+    return {
+        'semantic_review_pending': semantic_pending,
+        'unresolved_builtin_mutations': unresolved_builtin,
+        'unresolved_builtin_young': unresolved_builtin_young,
+        'sweepable_builtin': unresolved_builtin - unresolved_builtin_young,
+        'oldest_pending_at': oldest,
+        'oldest_pending_age_seconds': oldest_age_seconds,
+    }
 
-    analysis_filters = []
-    analysis_params = []
+
+def _journal_analysis_counts(conn, project_id, agent_id):
+    """(total, by_verdict) for the ingest_analysis table under one scope."""
+    filters, params = [], []
     if project_id is not None:
-        analysis_filters.append('e.project_id=?')
-        analysis_params.append(project_id)
+        filters.append('e.project_id=?')
+        params.append(project_id)
     if agent_id is not None:
-        analysis_filters.append('e.agent_id=?')
-        analysis_params.append(agent_id)
-    analysis_where = (
-        ' WHERE ' + ' AND '.join(analysis_filters) if analysis_filters else ''
-    )
-    analysis_total = conn.execute(
+        filters.append('e.agent_id=?')
+        params.append(agent_id)
+    where = (' WHERE ' + ' AND '.join(filters)) if filters else ''
+    total = conn.execute(
         'SELECT COUNT(*) FROM ingest_analysis a '
-        'JOIN ingest_event e ON e.id=a.event_id' + analysis_where,
-        analysis_params
+        'JOIN ingest_event e ON e.id=a.event_id' + where, params
     ).fetchone()[0]
-    analysis_by_verdict = dict(conn.execute(
+    by_verdict = dict(conn.execute(
         'SELECT a.verdict, COUNT(*) FROM ingest_analysis a '
-        'JOIN ingest_event e ON e.id=a.event_id' + analysis_where +
-        ' GROUP BY a.verdict ORDER BY a.verdict',
-        analysis_params
+        'JOIN ingest_event e ON e.id=a.event_id' + where +
+        ' GROUP BY a.verdict ORDER BY a.verdict', params
     ).fetchall())
+    return total, by_verdict
 
+
+def _journal_health(by_status, unresolved_builtin_young, semantic_pending,
+                    unresolved_builtin):
+    """Health ladder: failed > young builtin noise > semantic > sweep > ok."""
     if by_status.get('failed', 0):
-        health = 'failed'
-    elif unresolved_builtin_young:
-        health = 'operator_attention'
-    elif semantic_pending:
-        health = 'review_pending'
-    elif unresolved_builtin:
-        health = 'sweepable'
-    else:
-        health = 'ok'
+        return 'failed'
+    if unresolved_builtin_young:
+        return 'operator_attention'
+    if semantic_pending:
+        return 'review_pending'
+    if unresolved_builtin:
+        return 'sweepable'
+    return 'ok'
+
+
+def journal_stats(conn, project_id=None, agent_id=None):
+    """Return a content-free operational snapshot of the ingest journal.
+
+    The snapshot deliberately aggregates metadata only. It never returns raw user,
+    assistant, candidate, rationale, or event metadata content, making it suitable
+    for health checks and dashboards that should not expose historical prompts.
+    """
+    filters, params = _journal_filters(project_id, agent_id)
+    if project_id is not None and agent_id is not None:
+        core._require_membership(conn, project_id, agent_id)
+
+    where = (' WHERE ' + ' AND '.join(filters)) if filters else ''
+    total = conn.execute(
+        'SELECT COUNT(*) FROM ingest_event' + where, params
+    ).fetchone()[0]
+    by_status = _journal_grouped(conn, filters, params, 'status')
+    pending_by_decision = _journal_grouped(
+        conn, filters, params, "COALESCE(decision, 'unclassified')",
+        extra="status='pending'"
+    )
+    pending_by_event_type = _journal_grouped(
+        conn, filters, params, 'event_type', extra="status='pending'")
+
+    pending_where = ' WHERE ' + ' AND '.join(
+        list(filters) + ["status='pending'"])
+    pending = _journal_pending_counts(conn, pending_where, list(params))
+    analysis_total, analysis_by_verdict = _journal_analysis_counts(
+        conn, project_id, agent_id)
+    health = _journal_health(
+        by_status, pending['unresolved_builtin_young'],
+        pending['semantic_review_pending'],
+        pending['unresolved_builtin_mutations'])
 
     return {
         'health': health,
@@ -969,12 +1054,12 @@ def journal_stats(conn, project_id=None, agent_id=None):
         'by_status': by_status,
         'pending_by_decision': pending_by_decision,
         'pending_by_event_type': pending_by_event_type,
-        'semantic_review_pending': semantic_pending,
-        'unresolved_builtin_mutations': unresolved_builtin,
-        'unresolved_builtin_young': unresolved_builtin_young,
-        'sweepable_builtin': sweepable_builtin,
-        'oldest_pending_at': oldest,
-        'oldest_pending_age_seconds': oldest_age_seconds,
+        'semantic_review_pending': pending['semantic_review_pending'],
+        'unresolved_builtin_mutations': pending['unresolved_builtin_mutations'],
+        'unresolved_builtin_young': pending['unresolved_builtin_young'],
+        'sweepable_builtin': pending['sweepable_builtin'],
+        'oldest_pending_at': pending['oldest_pending_at'],
+        'oldest_pending_age_seconds': pending['oldest_pending_age_seconds'],
         'analysis': {
             'total': analysis_total,
             'by_verdict': analysis_by_verdict,
@@ -1056,8 +1141,7 @@ def _dismissable_pending_decision(decision):
 
 def dismiss_unresolved_event(conn, event_id, actor_agent_id, rationale='operator_dismissed'):
     """Dismiss an owned/operator-approved pending review event, with audit."""
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         row = conn.execute(
             'SELECT project_id, agent_id, status, decision FROM ingest_event WHERE id=?',
             (event_id,)
@@ -1093,18 +1177,11 @@ def dismiss_unresolved_event(conn, event_id, actor_agent_id, rationale='operator
                     'previous_decision': decision,
                     'rationale': core.scrub_secrets(str(rationale or ''))[:1000]}
         )
-        conn.execute('COMMIT')
         return {
             'event_id': event_id,
             'status': 'ignored',
             'decision': dismissed_decision
         }
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except Exception:
-            pass
-        raise
 
 
 #: Pending decisions a builtin stale-mutation sweep may auto-dismiss.
@@ -1148,8 +1225,7 @@ def auto_dismiss_stale_builtin(conn, days=7, actor_agent_id=None, *,
             dismissed.append(event_id)
             continue
         now = core._now()
-        conn.execute('BEGIN IMMEDIATE')
-        try:
+        with store.write_tx(conn):
             cur = conn.execute(
                 "UPDATE ingest_event SET status='ignored', "
                 "decision='builtin_memory_mutation_auto_dismissed', "
@@ -1157,7 +1233,6 @@ def auto_dismiss_stale_builtin(conn, days=7, actor_agent_id=None, *,
                 (now, event_id),
             )
             if cur.rowcount != 1:
-                conn.execute('ROLLBACK')
                 continue
             core._audit(
                 conn, 'journal_auto_dismiss', actor_agent_id,
@@ -1166,14 +1241,7 @@ def auto_dismiss_stale_builtin(conn, days=7, actor_agent_id=None, *,
                         'event_agent_id': event_agent_id,
                         'previous_decision': decision,
                         'rationale': f'stale builtin unresolved > {days}d'})
-            conn.execute('COMMIT')
-            dismissed.append(event_id)
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except Exception:
-                pass
-            raise
+        dismissed.append(event_id)
     return dismissed
 
 
@@ -1209,8 +1277,7 @@ def auto_resolve_defer_cap(conn, max_defers=3, actor_agent_id=None, *,
             dismissed.append(event_id)
             continue
         now = core._now()
-        conn.execute('BEGIN IMMEDIATE')
-        try:
+        with store.write_tx(conn):
             cur = conn.execute(
                 "UPDATE ingest_event SET status='ignored', "
                 "decision='semantic_defer_cap_reached', "
@@ -1218,7 +1285,6 @@ def auto_resolve_defer_cap(conn, max_defers=3, actor_agent_id=None, *,
                 (now, event_id),
             )
             if cur.rowcount != 1:
-                conn.execute('ROLLBACK')
                 continue
             core._audit(
                 conn, 'journal_auto_dismiss', actor_agent_id,
@@ -1228,14 +1294,7 @@ def auto_resolve_defer_cap(conn, max_defers=3, actor_agent_id=None, *,
                         'previous_decision': decision,
                         'defer_count': defers,
                         'rationale': f'defer cap reached ({defers}>={max_defers})'})
-            conn.execute('COMMIT')
-            dismissed.append(event_id)
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except Exception:
-                pass
-            raise
+        dismissed.append(event_id)
     return dismissed
 
 
@@ -1292,12 +1351,10 @@ def prune_journal(conn, days=30, statuses=('ignored', 'processed'), project_id=N
         sql += ' AND project_id = ?'
         params.append(project_id)
 
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         cur = conn.execute(sql, params)
         event_ids = [row[0] for row in cur.fetchall()]
         if not event_ids:
-            conn.execute('COMMIT')
             return 0
         for i in range(0, len(event_ids), 500):
             chunk = event_ids[i:i+500]
@@ -1305,11 +1362,4 @@ def prune_journal(conn, days=30, statuses=('ignored', 'processed'), project_id=N
             conn.execute(f'DELETE FROM ingest_derivation WHERE event_id IN ({marks})', chunk)
             conn.execute(f'DELETE FROM ingest_analysis WHERE event_id IN ({marks})', chunk)
             conn.execute(f'DELETE FROM ingest_event WHERE id IN ({marks})', chunk)
-        conn.execute('COMMIT')
-        return len(event_ids)
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except Exception:
-            pass
-        raise
+    return len(event_ids)

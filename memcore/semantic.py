@@ -59,8 +59,8 @@ def _safe_event(event):
     }
 
 
-def normalize_analysis_result(result):
-    """Validate one provider result without allowing governance fields through."""
+def _require_analysis_mapping(result):
+    """Reject non-objects, governance fields, and unsupported fields."""
     if not isinstance(result, Mapping):
         raise SemanticAnalyzerError('semantic analyzer result must be an object')
 
@@ -76,11 +76,16 @@ def normalize_analysis_result(result):
             'semantic analyzer returned unsupported fields: ' + ', '.join(unknown)
         )
 
-    verdict = str(result.get('verdict') or '').strip().lower()
+
+def _normalize_verdict(raw):
+    verdict = str(raw or '').strip().lower()
     if verdict not in ingest.SEMANTIC_VERDICTS:
         raise SemanticAnalyzerError('semantic verdict must be remember|ignore|defer')
+    return verdict
 
-    candidate = result.get('candidate_content', '')
+
+def _normalize_candidate(verdict, raw):
+    candidate = raw
     if candidate is None:
         candidate = ''
     if not isinstance(candidate, str):
@@ -90,22 +95,31 @@ def normalize_analysis_result(result):
         raise SemanticAnalyzerError('remember verdict requires candidate_content')
     if verdict != 'remember' and candidate:
         raise SemanticAnalyzerError('candidate_content is allowed only for remember verdicts')
+    return candidate
 
-    confidence = result.get('confidence')
-    if confidence is not None:
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-            raise SemanticAnalyzerError('semantic confidence must be a number from 0 to 1')
-        confidence = float(confidence)
-        if not 0.0 <= confidence <= 1.0:
-            raise SemanticAnalyzerError('semantic confidence must be a number from 0 to 1')
 
-    rationale = result.get('rationale', '')
+def _normalize_confidence(raw):
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise SemanticAnalyzerError('semantic confidence must be a number from 0 to 1')
+    confidence = float(raw)
+    if not 0.0 <= confidence <= 1.0:
+        raise SemanticAnalyzerError('semantic confidence must be a number from 0 to 1')
+    return confidence
+
+
+def _normalize_rationale(raw):
+    rationale = raw
     if rationale is None:
         rationale = ''
     if not isinstance(rationale, str):
         raise SemanticAnalyzerError('semantic rationale must be a string')
+    return rationale
 
-    metadata = result.get('metadata') or {}
+
+def _normalize_analyzer_metadata(raw):
+    metadata = raw or {}
     if not isinstance(metadata, Mapping):
         raise SemanticAnalyzerError('semantic analyzer metadata must be an object')
     metadata = dict(metadata)
@@ -119,13 +133,50 @@ def normalize_analysis_result(result):
         raise SemanticAnalyzerError(
             f'semantic analyzer metadata exceeds {MAX_ANALYZER_METADATA_CHARS} characters'
         )
+    return metadata
 
+
+def normalize_analysis_result(result):
+    """Validate one provider result without allowing governance fields through."""
+    _require_analysis_mapping(result)
+
+    verdict = _normalize_verdict(result.get('verdict'))
     return {
         'verdict': verdict,
-        'candidate_content': candidate,
-        'confidence': confidence,
-        'rationale': rationale,
-        'metadata': metadata,
+        'candidate_content': _normalize_candidate(
+            verdict, result.get('candidate_content', '')),
+        'confidence': _normalize_confidence(result.get('confidence')),
+        'rationale': _normalize_rationale(result.get('rationale', '')),
+        'metadata': _normalize_analyzer_metadata(result.get('metadata')),
+    }
+
+
+def _analyze_one_event(conn, event, agent_id, analyzer, analyzer_name,
+                       base_metadata):
+    """Run the analyzer on one event and apply its normalized verdict."""
+    safe_event = _safe_event(event)
+    raw_result = _call_analyzer(analyzer, safe_event)
+    normalized = normalize_analysis_result(raw_result)
+    audit_metadata = dict(base_metadata)
+    if normalized['metadata']:
+        audit_metadata['analyzer'] = normalized['metadata']
+    audit_metadata['adapter'] = 'memcore.semantic.analyze_pending_events'
+    applied = ingest.apply_semantic_analysis(
+        conn,
+        event['event_id'],
+        agent_id,
+        analyzer=analyzer_name,
+        verdict=normalized['verdict'],
+        candidate_content=normalized['candidate_content'],
+        confidence=normalized['confidence'],
+        rationale=normalized['rationale'],
+        metadata=audit_metadata,
+    )
+    return {
+        'event_id': event['event_id'],
+        'ok': True,
+        'verdict': normalized['verdict'],
+        'result': applied,
     }
 
 
@@ -155,39 +206,16 @@ def analyze_pending_events(conn, project_id, agent_id, analyzer, *, analyzer_nam
     )
     results = []
     for event in events:
-        safe_event = _safe_event(event)
         try:
-            raw_result = _call_analyzer(analyzer, safe_event)
-            normalized = normalize_analysis_result(raw_result)
-            audit_metadata = dict(base_metadata)
-            if normalized['metadata']:
-                audit_metadata['analyzer'] = normalized['metadata']
-            audit_metadata['adapter'] = 'memcore.semantic.analyze_pending_events'
-            applied = ingest.apply_semantic_analysis(
-                conn,
-                event['event_id'],
-                agent_id,
-                analyzer=analyzer_name,
-                verdict=normalized['verdict'],
-                candidate_content=normalized['candidate_content'],
-                confidence=normalized['confidence'],
-                rationale=normalized['rationale'],
-                metadata=audit_metadata,
-            )
-            results.append({
-                'event_id': event['event_id'],
-                'ok': True,
-                'verdict': normalized['verdict'],
-                'result': applied,
-            })
+            results.append(_analyze_one_event(
+                conn, event, agent_id, analyzer, analyzer_name, base_metadata))
         except Exception as exc:
-            failure = {
+            results.append({
                 'event_id': event['event_id'],
                 'ok': False,
                 'error_type': type(exc).__name__,
                 'error': str(exc),
-            }
-            results.append(failure)
+            })
             if not continue_on_error:
                 raise
 

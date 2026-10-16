@@ -685,8 +685,7 @@ def tool_memory_feedback(args, ctx=None):
                         reason='rejected via memory_feedback: ' + memory_id)
             return _tool_ok(memory_id=memory_id, outcome=outcome)
 
-        conn.execute('BEGIN IMMEDIATE')
-        try:
+        with store.write_tx(conn):
             pid, aid = _require_bound_memory(conn, project, agent_name, memory_id)
             # Enforce private ownership and re-check lifecycle inside the write tx.
             _project_id, _scope, _owner, lifecycle, _role = (
@@ -707,7 +706,6 @@ def tool_memory_feedback(args, ctx=None):
                     reason='accepted via memory_feedback tool',
                 )
                 if result['held']:
-                    conn.execute('COMMIT')
                     return _tool_ok(memory_id=memory_id, outcome='held',
                                     held=True,
                                     reason='contradiction hold: claim contradicts live memory',
@@ -721,13 +719,6 @@ def tool_memory_feedback(args, ctx=None):
                     (core._now(), memory_id))
                 store_audit(conn, 'feedback', aid, memory_id, pid,
                             {'outcome': outcome, 'source': 'memory_feedback tool'})
-            conn.execute('COMMIT')
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except Exception:
-                pass
-            raise
         return _tool_ok(memory_id=memory_id, outcome=outcome)
     except Exception as e:
         return _tool_error('%s: %s' % (type(e).__name__, e))
@@ -796,54 +787,50 @@ def auto_join(ctx):
     except Exception:
         return
     try:
-        conn.execute('BEGIN IMMEDIATE')
-        aid = 'agent-' + agent_name
-        existing_agent = conn.execute(
-            'SELECT name, profile_key FROM agent WHERE id=?', (aid,)
-        ).fetchone()
-        if existing_agent is None:
-            by_profile = conn.execute(
-                'SELECT id, name FROM agent WHERE profile_key=?', (agent_name,)
+        with store.write_tx(conn):
+            aid = 'agent-' + agent_name
+            existing_agent = conn.execute(
+                'SELECT name, profile_key FROM agent WHERE id=?', (aid,)
             ).fetchone()
-            if by_profile is not None:
-                raise ConfigError(
-                    'profile_key %s already belongs to %s' %
-                    (agent_name, by_profile[0])
+            if existing_agent is None:
+                by_profile = conn.execute(
+                    'SELECT id, name FROM agent WHERE profile_key=?', (agent_name,)
+                ).fetchone()
+                if by_profile is not None:
+                    raise ConfigError(
+                        'profile_key %s already belongs to %s' %
+                        (agent_name, by_profile[0])
+                    )
+                conn.execute(
+                    'INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)',
+                    (aid, agent_name, agent_name)
                 )
-            conn.execute(
-                'INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)',
-                (aid, agent_name, agent_name)
-            )
-        elif existing_agent != (agent_name, agent_name):
-            raise ConfigError(
-                'agent id %s has different identity (name=%s, profile_key=%s)' %
-                (aid, existing_agent[0], existing_agent[1])
-            )
-        pid = _resolve_project_id(conn, project)
-        if pid is None:
-            # auto_join may create a slug-based project for convenience, but a
-            # UUID is an exact durable reference and must never be rewritten as
-            # proj-<uuid> when the referenced project is missing.
-            try:
-                uuid.UUID(project)
-            except (ValueError, AttributeError, TypeError):
-                pid = project if project.startswith('proj-') else 'proj-' + project
-                conn.execute('INSERT INTO project (id, name) VALUES (?, ?)',
-                             (pid, project.removeprefix('proj-')))
-            else:
-                raise ConfigError('configured project UUID does not exist: %s' % project)
-        cur = conn.execute('INSERT OR IGNORE INTO project_membership '
-                           '(project_id, agent_id, role) VALUES (?, ?, ?)',
-                           (pid, aid, 'member'))
-        if cur.rowcount:
-            store_audit(conn, 'agent_joined', aid, None, pid,
-                        {'source': 'memcore auto_join'})
-        conn.execute('COMMIT')
+            elif existing_agent != (agent_name, agent_name):
+                raise ConfigError(
+                    'agent id %s has different identity (name=%s, profile_key=%s)' %
+                    (aid, existing_agent[0], existing_agent[1])
+                )
+            pid = _resolve_project_id(conn, project)
+            if pid is None:
+                # auto_join may create a slug-based project for convenience, but a
+                # UUID is an exact durable reference and must never be rewritten as
+                # proj-<uuid> when the referenced project is missing.
+                try:
+                    uuid.UUID(project)
+                except (ValueError, AttributeError, TypeError):
+                    pid = project if project.startswith('proj-') else 'proj-' + project
+                    conn.execute('INSERT INTO project (id, name) VALUES (?, ?)',
+                                 (pid, project.removeprefix('proj-')))
+                else:
+                    raise ConfigError('configured project UUID does not exist: %s' % project)
+            cur = conn.execute('INSERT OR IGNORE INTO project_membership '
+                               '(project_id, agent_id, role) VALUES (?, ?, ?)',
+                               (pid, aid, 'member'))
+            if cur.rowcount:
+                store_audit(conn, 'agent_joined', aid, None, pid,
+                            {'source': 'memcore auto_join'})
     except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except Exception:
-            pass
+        pass
 
 
 # -- Tool schemas (NO identity/scope params anywhere) -------------------------

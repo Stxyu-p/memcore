@@ -48,6 +48,27 @@ PROVIDERS = {
 }
 
 
+def _preset_key(preset):
+    """First non-empty API key among the preset's key_env vars, else None."""
+    for env_var in preset.get('key_env', ()):
+        val = os.environ.get(env_var)
+        if val:
+            return val
+    return None
+
+
+def _preset_targets(preset, model):
+    """(url, model) resolution: explicit flag > env > preset > default."""
+    url = (os.environ.get('MEMCORE_EMBEDDING_URL')
+           or preset.get('url')
+           or DEFAULT_ENDPOINT)
+    resolved_model = (model
+                      or os.environ.get('MEMCORE_EMBEDDING_MODEL')
+                      or preset.get('default_model')
+                      or DEFAULT_MODEL)
+    return url, resolved_model
+
+
 def resolve_config(
     provider: str | None = None,
     endpoint: str | None = None,
@@ -67,26 +88,10 @@ def resolve_config(
         return 'in-process', model or 'BAAI/bge-small-en-v1.5', None
 
     preset = PROVIDERS.get(p_name, {})
-    target_url = (
-        os.environ.get('MEMCORE_EMBEDDING_URL')
-        or preset.get('url')
-        or DEFAULT_ENDPOINT
-    )
-    target_model = (
-        model
-        or os.environ.get('MEMCORE_EMBEDDING_MODEL')
-        or preset.get('default_model')
-        or DEFAULT_MODEL
-    )
-
+    target_url, target_model = _preset_targets(preset, model)
     target_key = api_key or os.environ.get('MEMCORE_EMBEDDING_KEY')
     if not target_key and preset:
-        for env_var in preset.get('key_env', ()):
-            val = os.environ.get(env_var)
-            if val:
-                target_key = val
-                break
-
+        target_key = _preset_key(preset)
     return target_url, target_model, target_key
 
 CIRCUIT_FAILURE_THRESHOLD = 3

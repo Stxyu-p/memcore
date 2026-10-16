@@ -4,6 +4,7 @@ MemCore — storage layer.
 open_store(): apply schema, run pending migrations under a lock, set pragmas.
 All operations use short transactions and WAL + busy_timeout.
 """
+import contextlib
 import hashlib
 import hmac
 import os
@@ -929,6 +930,52 @@ def _invalidate_core_schema_caches() -> None:
         pass
 
 
+@contextlib.contextmanager
+def write_tx(conn: sqlite3.Connection, manage: bool = True):
+    """Deep write-transaction lifetime: BEGIN IMMEDIATE / COMMIT / ROLLBACK.
+
+    The single definition every core/ingest write path shares, so the
+    transaction contract (immediate writer lock, rollback on any error,
+    never mask the original exception) is written once. ``manage=False``
+    joins the caller's already-open transaction and owns nothing: no BEGIN,
+    no COMMIT, no ROLLBACK — the caller keeps the lifetime.
+    """
+    if not manage:
+        yield
+        return
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        yield
+        conn.execute('COMMIT')
+    except Exception:
+        try:
+            conn.execute('ROLLBACK')
+        except sqlite3.OperationalError:
+            pass
+        raise
+
+
+@contextlib.contextmanager
+def _savepoint(conn, name: str):
+    """Per-item atomicity inside a caller-owned transaction.
+
+    Used by batch writers (import_memories) so one item's failure rolls
+    back only that item: RELEASE on success, ROLLBACK TO + RELEASE on
+    error, preserving the original exception either way.
+    """
+    conn.execute(f'SAVEPOINT {name}')
+    try:
+        yield
+        conn.execute(f'RELEASE {name}')
+    except Exception:
+        try:
+            conn.execute(f'ROLLBACK TO {name}')
+            conn.execute(f'RELEASE {name}')
+        except sqlite3.OperationalError:
+            pass
+        raise
+
+
 def _migration_lock_row(conn):
     return conn.execute(
         'SELECT lock_holder, lock_until FROM schema_migrations WHERE version=?',
@@ -1175,13 +1222,119 @@ def _repair_unicode_fingerprints(conn):
         )
 
 
-def _apply_migration(conn, name, sql):
-    """Apply one migration and its bookkeeping safely.
+def _ensure_column(conn, table: str, col: str, col_def: str) -> None:
+    """Idempotent ALTER TABLE ADD COLUMN (SQLite has no IF NOT EXISTS here)."""
+    cols = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+    if col not in cols:
+        conn.execute(f'ALTER TABLE {table} ADD COLUMN {col} {col_def}')
 
-    All migrations, including the frozen schema bootstrap, are executed
-    statement-by-statement inside one explicit transaction, with bookkeeping
-    committed atomically. Table-rebuild migration 0004 temporarily disables FK
-    enforcement and runs foreign_key_check before commit, per SQLite guidance.
+
+def _pre_0013_ownership_guard(conn):
+    """Refuse 0013 while rows still violate current-version ownership."""
+    violations = _current_version_ownership_violations(conn)
+    if violations:
+        raise StoreError(
+            'current-version ownership violations before migration: '
+            f'{violations[:5]}'
+        )
+
+
+def _pre_0015_reinforcement(conn):
+    _ensure_column(conn, 'memory', 'recall_count',
+                   'INTEGER NOT NULL DEFAULT 0')
+    _ensure_column(conn, 'memory', 'last_recalled', 'TEXT')
+
+
+def _pre_0017_bitemporal(conn):
+    _ensure_column(conn, 'memory_version', 'valid_until', 'TEXT')
+    # Backfill: every superseded version ends when its successor begins.
+    # Idempotent — only touches rows still open.
+    conn.execute(
+        'UPDATE memory_version SET valid_until = ('
+        '  SELECT s.created_at FROM memory_version s '
+        '  WHERE s.supersedes_version_id = memory_version.id'
+        ') WHERE valid_until IS NULL AND EXISTS ('
+        '  SELECT 1 FROM memory_version s '
+        '  WHERE s.supersedes_version_id = memory_version.id)')
+
+
+#: Declarative per-migration Python steps. Pre-hooks run inside the migration
+#: transaction before its SQL (ADD COLUMN is not idempotent in SQL, so the
+#: ALTERs live here behind _ensure_column); post-hooks run after the SQL and
+#: before bookkeeping. The retry loop in _apply_migration stays generic.
+_PRE_MIGRATION_HOOKS = {
+    '0013_current_version_ownership': _pre_0013_ownership_guard,
+    '0014_provenance_seal': lambda conn: _ensure_column(
+        conn, 'ingest_event', 'provenance_seal', 'TEXT'),
+    '0015_reinforcement_decay': _pre_0015_reinforcement,
+    '0016_scope_detail': lambda conn: _ensure_column(
+        conn, 'memory', 'scope_detail', 'TEXT'),
+    '0017_bitemporal_valid_until': _pre_0017_bitemporal,
+}
+_POST_MIGRATION_HOOKS = {
+    '0010_performance_fast_paths': _backfill_current_fingerprints,
+    '0012_unicode_fingerprint_repair': _repair_unicode_fingerprints,
+}
+
+
+def _run_migration_body(conn, name, sql, rebuild_fk: bool) -> None:
+    """One migration attempt in its own explicit transaction.
+
+    Commits bookkeeping atomically with the migration body. Table-rebuild
+    migration 0004 temporarily disables FK enforcement and runs
+    foreign_key_check before commit, per SQLite guidance.
+    """
+    if rebuild_fk:
+        conn.execute('PRAGMA foreign_keys = OFF')
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        if conn.execute(
+            'SELECT 1 FROM schema_migrations WHERE version=?', (name,)
+        ).fetchone():
+            conn.execute('ROLLBACK')
+            return
+        pre_hook = _PRE_MIGRATION_HOOKS.get(name)
+        if pre_hook is not None:
+            pre_hook(conn)
+        for stmt in _script_statements(sql):
+            conn.execute(stmt)
+        post_hook = _POST_MIGRATION_HOOKS.get(name)
+        if post_hook is not None:
+            post_hook(conn)
+        if rebuild_fk:
+            violations = conn.execute('PRAGMA foreign_key_check').fetchall()
+            if violations:
+                raise StoreError(
+                    f'foreign-key violations after {name}: {violations[:5]}'
+                )
+        conn.execute(
+            'INSERT INTO schema_migrations (version, applied_at) '
+            "VALUES (?, datetime('now'))", (name,)
+        )
+        conn.execute('COMMIT')
+    except sqlite3.OperationalError:
+        try:
+            conn.execute('ROLLBACK')
+        except sqlite3.OperationalError:
+            pass
+        raise
+    except Exception:
+        try:
+            conn.execute('ROLLBACK')
+        except sqlite3.OperationalError:
+            pass
+        raise
+    finally:
+        if rebuild_fk:
+            conn.execute('PRAGMA foreign_keys = ON')
+
+
+def _apply_migration(conn, name, sql):
+    """Apply one migration under a bounded retry loop.
+
+    Bookkeeping and body are committed atomically by _run_migration_body;
+    OperationalError retries up to 5 times with a short backoff, any other
+    failure propagates immediately.
     """
     already = conn.execute(
         'SELECT 1 FROM schema_migrations WHERE version = ?', (name,)
@@ -1194,96 +1347,13 @@ def _apply_migration(conn, name, sql):
 
     rebuild_fk = name == '0004_schema_revision'
     for attempt in range(5):
-        if rebuild_fk:
-            conn.execute('PRAGMA foreign_keys = OFF')
         try:
-            conn.execute('BEGIN IMMEDIATE')
-            if conn.execute(
-                'SELECT 1 FROM schema_migrations WHERE version=?', (name,)
-            ).fetchone():
-                conn.execute('ROLLBACK')
-                return
-            if name == '0017_bitemporal_valid_until':
-                cols = {r[1] for r in conn.execute(
-                    'PRAGMA table_info(memory_version)')}
-                if 'valid_until' not in cols:
-                    conn.execute(
-                        'ALTER TABLE memory_version '
-                        'ADD COLUMN valid_until TEXT')
-                # Backfill: every superseded version ends when its successor
-                # begins. Idempotent — only touches rows still open.
-                conn.execute(
-                    'UPDATE memory_version SET valid_until = ('
-                    '  SELECT s.created_at FROM memory_version s '
-                    '  WHERE s.supersedes_version_id = memory_version.id'
-                    ') WHERE valid_until IS NULL AND EXISTS ('
-                    '  SELECT 1 FROM memory_version s '
-                    '  WHERE s.supersedes_version_id = memory_version.id)')
-            if name == '0016_scope_detail':
-                cols = {r[1] for r in conn.execute(
-                    'PRAGMA table_info(memory)')}
-                if 'scope_detail' not in cols:
-                    conn.execute(
-                        'ALTER TABLE memory ADD COLUMN scope_detail TEXT')
-            if name == '0015_reinforcement_decay':
-                cols = {r[1] for r in conn.execute(
-                    'PRAGMA table_info(memory)')}
-                if 'recall_count' not in cols:
-                    conn.execute(
-                        'ALTER TABLE memory '
-                        'ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0')
-                if 'last_recalled' not in cols:
-                    conn.execute(
-                        'ALTER TABLE memory ADD COLUMN last_recalled TEXT')
-            if name == '0014_provenance_seal':
-                cols = {r[1] for r in conn.execute(
-                    'PRAGMA table_info(ingest_event)')}
-                if 'provenance_seal' not in cols:
-                    conn.execute(
-                        'ALTER TABLE ingest_event '
-                        'ADD COLUMN provenance_seal TEXT')
-            if name == '0013_current_version_ownership':
-                ownership_violations = _current_version_ownership_violations(conn)
-                if ownership_violations:
-                    raise StoreError(
-                        'current-version ownership violations before migration: '
-                        f'{ownership_violations[:5]}'
-                    )
-            for stmt in _script_statements(sql):
-                conn.execute(stmt)
-            if name == '0010_performance_fast_paths':
-                _backfill_current_fingerprints(conn)
-            elif name == '0012_unicode_fingerprint_repair':
-                _repair_unicode_fingerprints(conn)
-            if rebuild_fk:
-                violations = conn.execute('PRAGMA foreign_key_check').fetchall()
-                if violations:
-                    raise StoreError(
-                        f'foreign-key violations after {name}: {violations[:5]}'
-                    )
-            conn.execute(
-                'INSERT INTO schema_migrations (version, applied_at) '
-                "VALUES (?, datetime('now'))", (name,)
-            )
-            conn.execute('COMMIT')
+            _run_migration_body(conn, name, sql, rebuild_fk)
             return
         except sqlite3.OperationalError:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
             if attempt == 4:
                 raise
             time.sleep(0.2)
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-            raise
-        finally:
-            if rebuild_fk:
-                conn.execute('PRAGMA foreign_keys = ON')
 
 
 def check_migration_lock(conn):
@@ -1297,3 +1367,77 @@ def check_migration_lock(conn):
         return cur.fetchall()
     except sqlite3.OperationalError:
         return []
+
+
+def _fts_sync_report(conn) -> dict:
+    """FTS rowid count vs version count; in_sync is the health contract."""
+    fts_rows = conn.execute(
+        'SELECT COUNT(*) FROM memory_version_fts').fetchone()[0]
+    ver_rows = conn.execute(
+        'SELECT COUNT(*) FROM memory_version').fetchone()[0]
+    return {'fts_rows': fts_rows, 'version_rows': ver_rows,
+            'in_sync': fts_rows == ver_rows}
+
+
+def _orphan_counts(conn) -> dict:
+    """Referential integrity census: rows whose parents vanished."""
+    return {
+        'orphaned_memory_versions': conn.execute(
+            'SELECT COUNT(*) FROM memory_version v '
+            'LEFT JOIN memory m ON m.id = v.memory_id WHERE m.id IS NULL'
+        ).fetchone()[0],
+        'orphaned_audit_events': conn.execute(
+            'SELECT COUNT(*) FROM audit_event a '
+            'LEFT JOIN memory m ON m.id = a.memory_id '
+            'LEFT JOIN project p ON p.id = a.project_id '
+            'WHERE (a.memory_id IS NOT NULL AND m.id IS NULL) '
+            '   OR (a.project_id IS NOT NULL AND p.id IS NULL)'
+        ).fetchone()[0],
+    }
+
+
+def _idempotency_violation_count(conn) -> int:
+    """idempotency_key predates FKs: validate refs and cross-row identity."""
+    return conn.execute(
+        'SELECT COUNT(*) FROM idempotency_key ik '
+        'LEFT JOIN project p ON p.id=ik.project_id '
+        'LEFT JOIN memory m ON m.id=ik.memory_id '
+        'LEFT JOIN memory_version v ON v.id=ik.version_id '
+        'WHERE ik.project_id IS NULL OR p.id IS NULL '
+        '   OR m.id IS NULL OR v.id IS NULL '
+        '   OR (v.id IS NOT NULL AND v.memory_id != ik.memory_id) '
+        '   OR (m.id IS NOT NULL AND ik.project_id IS NOT NULL '
+        '       AND m.project_id != ik.project_id)'
+    ).fetchone()[0]
+
+
+def inspect_storage_health(conn, db_path) -> dict:
+    """Storage-layer health report for one open store (doctor's deep seam).
+
+    Structural/file concerns only: SQLite integrity, referential orphans,
+    FTS sync, migration locks, backup readiness, provenance seals. Governance
+    checks (claim fingerprints, tombstones, memberships) live in
+    ``core.inspect_governance_health``. Read-only; never mutates; the CLI
+    adapter decides which findings gate the exit status.
+    """
+    path = pathlib.Path(str(db_path)).expanduser()
+    return {
+        'integrity_check': conn.execute(
+            'PRAGMA integrity_check').fetchone()[0],
+        'foreign_key_violations': len(
+            conn.execute('PRAGMA foreign_key_check').fetchall()),
+        'journal_mode': conn.execute(
+            'PRAGMA journal_mode').fetchone()[0].lower(),
+        'wal_file': {
+            'exists': path.with_suffix(path.suffix + '-wal').exists(),
+            'shm_file': path.with_suffix(path.suffix + '-shm').exists(),
+        },
+        **_orphan_counts(conn),
+        'idempotency_violations': _idempotency_violation_count(conn),
+        'current_version_ownership_violations':
+            _current_version_ownership_violations(conn),
+        'fts_index': _fts_sync_report(conn),
+        'migration_locks': check_migration_lock(conn) or 'none',
+        'backups': verify_backups(str(db_path)),
+        'provenance': verify_all_seals(conn),
+    }

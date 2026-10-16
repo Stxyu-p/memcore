@@ -430,14 +430,13 @@ def _store_embedding_safe(conn, memory_id: str, version_id: str, vec) -> None:
             pass
 
 
-def create_memory(conn, project_id, agent_id, content, scope='private',
-                  memory_type='fact', lifecycle='candidate', idempotency_key=None,
-                  reason=None, scope_detail=None, source_file=None,
-                  source_commit=None, source_hash=None,
-                  _manage_transaction=True):
-    """Create a memory + first immutable version. Tombstone guard applies.
+def _prepare_memory_write(content, scope, lifecycle, reason, scope_detail,
+                          source_file, source_commit, source_hash):
+    """Validate + normalize one create payload (pure; no conn, no writes).
 
-    Returns (memory_id, version_id) or existing ids if idempotency_key replays.
+    Ordering is the compatibility contract: scope -> content shape ->
+    lifecycle -> scrub -> source provenance -> scope detail. Returns every
+    derived value the transactional section below needs.
     """
     if scope not in ('project', 'private'):
         raise MemCoreError(f'invalid scope: {scope}')
@@ -460,6 +459,135 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
     source_hash, source_commit, source_file = _source_metadata(
         source_file, source_commit, source_hash
     )
+    return {
+        'content': content,
+        'reason': reason,
+        'detail': _validate_scope_detail(scope, scope_detail),
+        'source_hash': source_hash,
+        'source_commit': source_commit,
+        'source_file': source_file,
+        'claim_fp': fingerprint(content),
+    }
+
+
+def _replay_idempotent_create(conn, idempotency_key, project_id, agent_id,
+                              role, scope, claim_fp):
+    """Resolve one idempotency replay; None when the key is new.
+
+    Re-raises exactly the guards a fresh create would: cross-project keys,
+    private-scope access, scope/content reuse, tombstone veto, conflict
+    replay and terminal targets. Policy changes after the original request
+    still apply to a replay — returning a stale success would undermine the
+    refusal fingerprint or the recorded conflict without creating a row.
+    """
+    row = conn.execute(
+        'SELECT ik.project_id, ik.memory_id, ik.version_id, '
+        '       m.scope, m.owner_agent_id, m.lifecycle, '
+        '       iv.content '
+        'FROM idempotency_key ik '
+        'JOIN memory m ON m.id=ik.memory_id '
+        'JOIN memory_version iv ON iv.id=ik.version_id '
+        'WHERE ik.key=?',
+        (idempotency_key,)
+    ).fetchone()
+    if row is None:
+        return None
+    (existing_project, existing_memory, existing_version,
+     existing_scope, existing_owner, existing_lifecycle,
+     original_content) = row
+    if existing_project != project_id:
+        raise PermissionDenied(
+            'idempotency key belongs to a different project'
+        )
+    if existing_scope == 'private' and agent_id != existing_owner and role != 'owner':
+        raise PermissionDenied('idempotency replay cannot access private memory')
+    if existing_scope != scope:
+        raise MemCoreError(
+            f'idempotency key reused with different scope '
+            f'({existing_scope} != {scope})'
+        )
+    if fingerprint(original_content) != claim_fp:
+        raise MemCoreError('idempotency key reused with different content')
+    blocked = _tombstone_active(
+        conn, claim_fp, project_id,
+        scope=existing_scope, agent_id=existing_owner
+    )
+    if blocked:
+        raise TombstoneBlocked(claim_fp, blocked[0])
+    if existing_lifecycle == 'conflict':
+        # A replay must not launder the refusal into a success. The first
+        # attempt committed the conflict row and this key before raising, so
+        # the retry took the replay path and returned OK for a row that can
+        # never be recalled as accepted. Re-raise so the caller keeps seeing
+        # the refusal; supersede/reject is the documented way to resolve it.
+        raise ContradictionHold(
+            [(existing_memory, 'replay_of_conflict')], existing_memory)
+    if existing_lifecycle in ('disabled', 'rejected', 'superseded'):
+        raise MemCoreError(
+            f'idempotent target is terminal (lifecycle={existing_lifecycle})'
+        )
+    return existing_memory, existing_version
+
+
+def _insert_memory_rows(conn, project_id, agent_id, content, scope, memory_type,
+                        lifecycle, claim_fp, reason, detail, source_hash,
+                        source_commit, source_file):
+    """Insert the memory header + first immutable version; returns (mem, ver, now).
+
+    Scope_detail is schema-conditional: the column only exists after
+    migration 0016, and an explicit detail tag on a pre-0016 store must
+    refuse loudly instead of being silently dropped.
+    """
+    mem_id = _new_id('mem')
+    ver_id = _new_id('ver')
+    now = _now()
+    mem_cols = _table_cols(conn, 'memory')
+    if detail is not None and 'scope_detail' not in mem_cols:
+        raise MemCoreError(
+            'scope_detail requires migration 0016; open the store normally first')
+    if 'scope_detail' in mem_cols:
+        conn.execute(
+            'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
+            '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
+            '  created_at, updated_at, scope_detail) '
+            "VALUES (?, ?, ?, ?, ?, ?, 'unverified', 'current', ?, ?, ?, ?, ?)",
+            (mem_id, project_id, scope, agent_id, memory_type,
+             lifecycle, ver_id, claim_fp, now, now, detail)
+        )
+    else:
+        conn.execute(
+            'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
+            '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
+            '  created_at, updated_at) '
+            "VALUES (?, ?, ?, ?, ?, ?, 'unverified', 'current', ?, ?, ?, ?)",
+            (mem_id, project_id, scope, agent_id, memory_type,
+             lifecycle, ver_id, claim_fp, now, now)
+        )
+    conn.execute(
+        'INSERT INTO memory_version (id, memory_id, content, reason, '
+        '  created_by_agent_id, created_at, valid_from, source_hash, '
+        '  source_commit, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (ver_id, mem_id, content, reason, agent_id, now, now,
+         source_hash, source_commit, source_file)
+    )
+    return mem_id, ver_id, now
+
+
+def create_memory(conn, project_id, agent_id, content, scope='private',
+                  memory_type='fact', lifecycle='candidate', idempotency_key=None,
+                  reason=None, scope_detail=None, source_file=None,
+                  source_commit=None, source_hash=None,
+                  _manage_transaction=True):
+    """Create a memory + first immutable version. Tombstone guard applies.
+
+    Returns (memory_id, version_id) or existing ids if idempotency_key replays.
+    """
+    prepared = _prepare_memory_write(
+        content, scope, lifecycle, reason, scope_detail,
+        source_file, source_commit, source_hash
+    )
+    content = prepared['content']
+    claim_fp = prepared['claim_fp']
 
     # H1: embedding fetch is network/model I/O and runs OUTSIDE the write
     # lock. Batched callers (manage=False) already hold a transaction and
@@ -472,70 +600,20 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         except Exception:
             embed_vec = None
 
-    if _manage_transaction:
-        conn.execute('BEGIN IMMEDIATE')
-    try:
+    conflict_hits = []
+    with store.write_tx(conn, manage=_manage_transaction):
         # Membership is the first project-boundary gate. Do not reveal
         # idempotency/tombstone state to a non-member by varying the error.
         role = _require_membership(conn, project_id, agent_id)
 
         if idempotency_key:
-            row = conn.execute(
-                'SELECT ik.project_id, ik.memory_id, ik.version_id, '
-                '       m.scope, m.owner_agent_id, m.lifecycle, '
-                '       iv.content '
-                'FROM idempotency_key ik '
-                'JOIN memory m ON m.id=ik.memory_id '
-                'JOIN memory_version iv ON iv.id=ik.version_id '
-                'WHERE ik.key=?',
-                (idempotency_key,)
-            ).fetchone()
-            if row:
-                (existing_project, existing_memory, existing_version,
-                 existing_scope, existing_owner, existing_lifecycle,
-                 original_content) = row
-                if existing_project != project_id:
-                    raise PermissionDenied(
-                        'idempotency key belongs to a different project'
-                    )
-                if existing_scope == 'private' and agent_id != existing_owner and role != 'owner':
-                    raise PermissionDenied('idempotency replay cannot access private memory')
-                if existing_scope != scope:
-                    raise MemCoreError(
-                        f'idempotency key reused with different scope '
-                        f'({existing_scope} != {scope})'
-                    )
-                original_fp = fingerprint(original_content)
-                if original_fp != fingerprint(content):
-                    raise MemCoreError('idempotency key reused with different content')
-                # Policy changes after the original request still apply to a
-                # replay. In particular, correction/rejection may tombstone the
-                # original claim; returning a stale success would undermine the
-                # refusal fingerprint without creating a new row.
-                blocked = _tombstone_active(
-                    conn, original_fp, project_id,
-                    scope=existing_scope, agent_id=existing_owner
-                )
-                if blocked:
-                    raise TombstoneBlocked(original_fp, blocked[0])
-                if existing_lifecycle == 'conflict':
-                    # A replay must not launder the refusal into a success. The
-                    # first attempt committed the conflict row and this key
-                    # before raising, so the retry took the replay path and
-                    # returned OK for a row that can never be recalled as
-                    # accepted. Re-raise so the caller keeps seeing the refusal;
-                    # supersede/reject is the documented way to resolve it.
-                    raise ContradictionHold(
-                        [(existing_memory, 'replay_of_conflict')], existing_memory)
-                if existing_lifecycle in ('disabled', 'rejected', 'superseded'):
-                    raise MemCoreError(
-                        f'idempotent target is terminal (lifecycle={existing_lifecycle})'
-                    )
-                if _manage_transaction:
-                    conn.execute('ROLLBACK')
-                return existing_memory, existing_version
+            replayed = _replay_idempotent_create(
+                conn, idempotency_key, project_id, agent_id, role, scope,
+                claim_fp
+            )
+            if replayed is not None:
+                return replayed
 
-        claim_fp = fingerprint(content)
         blocked = _tombstone_active(
             conn, claim_fp, project_id, scope=scope, agent_id=agent_id
         )
@@ -547,44 +625,16 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         # explicit memory_remember lane created 'accepted' rows that could
         # silently disagree with live memory and were never marked conflict.
         # Candidates keep the old behaviour (a later accept runs the gate).
-        conflict_hits = []
         if lifecycle == 'accepted':
             conflict_hits = pre_accept_conflict_check(conn, project_id, content)
             if conflict_hits:
                 lifecycle = 'conflict'
 
-        mem_id = _new_id('mem')
-        ver_id = _new_id('ver')
-        now = _now()
-        detail = _validate_scope_detail(scope, scope_detail)
-        mem_cols = _table_cols(conn, 'memory')
-        if detail is not None and 'scope_detail' not in mem_cols:
-            raise MemCoreError(
-                'scope_detail requires migration 0016; open the store normally first')
-        if 'scope_detail' in mem_cols:
-            conn.execute(
-                'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
-                '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
-                '  created_at, updated_at, scope_detail) '
-                "VALUES (?, ?, ?, ?, ?, ?, 'unverified', 'current', ?, ?, ?, ?, ?)",
-                (mem_id, project_id, scope, agent_id, memory_type,
-                 lifecycle, ver_id, claim_fp, now, now, detail)
-            )
-        else:
-            conn.execute(
-                'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
-                '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
-                '  created_at, updated_at) '
-                "VALUES (?, ?, ?, ?, ?, ?, 'unverified', 'current', ?, ?, ?, ?)",
-                (mem_id, project_id, scope, agent_id, memory_type,
-                 lifecycle, ver_id, claim_fp, now, now)
-            )
-        conn.execute(
-            'INSERT INTO memory_version (id, memory_id, content, reason, '
-            '  created_by_agent_id, created_at, valid_from, source_hash, '
-            '  source_commit, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (ver_id, mem_id, content, reason, agent_id, now, now,
-             source_hash, source_commit, source_file)
+        mem_id, ver_id, now = _insert_memory_rows(
+            conn, project_id, agent_id, content, scope, memory_type,
+            lifecycle, claim_fp, prepared['reason'], prepared['detail'],
+            prepared['source_hash'], prepared['source_commit'],
+            prepared['source_file']
         )
         _store_embedding_safe(conn, mem_id, ver_id, embed_vec)
         _audit(conn, 'create', agent_id, mem_id, project_id,
@@ -607,28 +657,13 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             # auto-accepts); this lane refused the write, so it owes nothing.
             _audit(conn, 'contradiction-hold', agent_id, mem_id, project_id,
                    {'hits': [list(h) for h in conflict_hits]})
-        if _manage_transaction:
-            conn.execute('COMMIT')
-        if conflict_hits:
-            raise ContradictionHold(conflict_hits, mem_id)
-        return mem_id, ver_id
-    except Exception:
-        if _manage_transaction:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-        raise
+    if conflict_hits:
+        raise ContradictionHold(conflict_hits, mem_id)
+    return mem_id, ver_id
 
 
-def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=None,
-              source_file=None, source_commit=None, source_hash=None):
-    """Correct a memory in place while preserving immutable version history.
-
-    The old claim receives a scope-appropriate refusal fingerprint, its
-    validity interval closes, and the replacement returns to candidate /
-    unverified so trust is never inherited across changed content.
-    """
+def _validate_supersede_content(new_content):
+    """Validate + scrub replacement content; same contract as create content."""
     if not isinstance(new_content, str) or not new_content.strip():
         raise MemCoreError('new_content must be a non-empty string')
     try:
@@ -640,6 +675,50 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
         raise MemCoreError('new_content must be a non-empty string')
     if '\x00' in new_content:
         raise MemCoreError('new_content must not contain null bytes')
+    return new_content
+
+
+def _close_and_insert_version(conn, memory_id, agent_id, new_content, reason,
+                              old_ver, new_fp, source_hash, source_commit,
+                              source_file):
+    """Close the old validity window, insert the new version, reset trust.
+
+    The changed claim does not inherit acceptance/verification from the old
+    version; it must earn trust again through feedback/evidence.
+    """
+    now = _now()
+    new_ver = _new_id('ver')
+    conn.execute(
+        'UPDATE memory_version SET valid_until=? '
+        'WHERE id=? AND valid_until IS NULL',
+        (now, old_ver)
+    )
+    conn.execute(
+        'INSERT INTO memory_version (id, memory_id, content, reason, '
+        '  created_by_agent_id, supersedes_version_id, created_at, valid_from, '
+        '  source_hash, source_commit, source_file) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (new_ver, memory_id, new_content, reason, agent_id, old_ver, now, now,
+         source_hash, source_commit, source_file)
+    )
+    conn.execute(
+        "UPDATE memory SET current_version_id=?, claim_fingerprint=?, lifecycle='candidate', "
+        "verification='unverified', freshness='current', updated_at=? "
+        'WHERE id=?',
+        (new_ver, new_fp, now, memory_id)
+    )
+    return new_ver, now
+
+
+def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=None,
+              source_file=None, source_commit=None, source_hash=None):
+    """Correct a memory in place while preserving immutable version history.
+
+    The old claim receives a scope-appropriate refusal fingerprint, its
+    validity interval closes, and the replacement returns to candidate /
+    unverified so trust is never inherited across changed content.
+    """
+    new_content = _validate_supersede_content(new_content)
     reason = scrub_secrets(reason) if isinstance(reason, str) else reason
     source_hash, source_commit, source_file = _source_metadata(
         source_file, source_commit, source_hash
@@ -651,8 +730,7 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
             embed_vec = _fetch_embedding_safe(new_content)
     except Exception:
         embed_vec = None
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
             conn, memory_id, agent_id
         )
@@ -672,34 +750,11 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
         old_ver, old_fp = _current_claim_identity(conn, memory_id)
         if old_fp == new_fp:
             raise MemCoreError('new_content is equivalent to the current claim')
-        now = _now()
-        new_ver = _new_id('ver')
 
-        # Close the old world-validity interval at the same instant the new
-        # version begins. Evidence remains version-specific and is NOT copied.
-        conn.execute(
-            'UPDATE memory_version SET valid_until=? '
-            'WHERE id=? AND valid_until IS NULL',
-            (now, old_ver)
-        )
-        conn.execute(
-            'INSERT INTO memory_version (id, memory_id, content, reason, '
-            '  created_by_agent_id, supersedes_version_id, created_at, valid_from, '
-            '  source_hash, source_commit, source_file) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (new_ver, memory_id, new_content, reason, agent_id, old_ver, now, now,
-             source_hash, source_commit, source_file)
-        )
+        new_ver, now = _close_and_insert_version(
+            conn, memory_id, agent_id, new_content, reason, old_ver, new_fp,
+            source_hash, source_commit, source_file)
         _store_embedding_safe(conn, memory_id, new_ver, embed_vec)
-
-        # A changed claim does not inherit acceptance/verification from the old
-        # version. It must earn trust again through feedback/evidence.
-        conn.execute(
-            "UPDATE memory SET current_version_id=?, claim_fingerprint=?, lifecycle='candidate', "
-            "verification='unverified', freshness='current', updated_at=? "
-            'WHERE id=?',
-            (new_ver, new_fp, now, memory_id)
-        )
 
         tombstone_created = False
         if old_fp != new_fp and not _tombstone_active(
@@ -718,14 +773,7 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
                 'reason': reason, 'old_claim_tombstoned': tombstone_created,
                 'lifecycle_reset': 'candidate',
                 'verification_reset': 'unverified'}, write_key=write_key)
-        conn.execute('COMMIT')
-        return new_ver
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except sqlite3.OperationalError:
-            pass
-        raise
+    return new_ver
 
 
 def supersede_memory(conn, old_memory_id, agent_id, new_content, reason=None,
@@ -753,14 +801,12 @@ def supersede_memory(conn, old_memory_id, agent_id, new_content, reason=None,
 
 def promote(conn, memory_id, agent_id):
     """Promote private -> project scope. Audited. Owner or project owner only."""
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
             conn, memory_id, agent_id
         )
         _current_version_id, claim_fp = _current_claim_identity(conn, memory_id)
         if scope != 'private':
-            conn.execute('ROLLBACK')
             raise MemCoreError('memory is not private')
         if lifecycle in ('rejected', 'disabled', 'superseded'):
             raise MemCoreError(
@@ -768,7 +814,6 @@ def promote(conn, memory_id, agent_id):
             )
 
         if agent_id != owner and role != 'owner':
-            conn.execute('ROLLBACK')
             raise PermissionDenied(
                 f'only the owner or a project owner may promote {memory_id}'
             )
@@ -786,20 +831,12 @@ def promote(conn, memory_id, agent_id):
         )
         _audit(conn, 'promote', agent_id, memory_id, project_id,
                {'from_scope': 'private', 'to_scope': 'project'})
-        conn.execute('COMMIT')
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except sqlite3.OperationalError:
-            pass
-        raise
 
 
 def deactivate(conn, memory_id, agent_id, reason=None):
     """Soft delete: lifecycle -> disabled. Audited. Reversible via restore."""
     reason = scrub_secrets(reason) if isinstance(reason, str) else reason
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
             conn, memory_id, agent_id
         )
@@ -815,24 +852,15 @@ def deactivate(conn, memory_id, agent_id, reason=None):
         )
         _audit(conn, 'deactivate', agent_id, memory_id, project_id,
                {'reason': reason, 'previous_lifecycle': lifecycle})
-        conn.execute('COMMIT')
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except sqlite3.OperationalError:
-            pass
-        raise
 
 
 def restore(conn, memory_id, agent_id):
     """Undo disable, restoring the lifecycle that was disabled when known."""
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
             conn, memory_id, agent_id
         )
         if lifecycle != 'disabled':
-            conn.execute('ROLLBACK')
             raise MemCoreError(f'memory is not disabled (lifecycle={lifecycle})')
         cur_ver = conn.execute(
             'SELECT current_version_id FROM memory WHERE id=?', (memory_id,)
@@ -866,13 +894,6 @@ def restore(conn, memory_id, agent_id):
         )
         _audit(conn, 'restore', agent_id, memory_id, project_id,
                {'restored_lifecycle': target_lifecycle})
-        conn.execute('COMMIT')
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except sqlite3.OperationalError:
-            pass
-        raise
 
 
 def reject(conn, memory_id, agent_id, reason, create_tombstone=True, write_key=None):
@@ -889,8 +910,7 @@ def reject(conn, memory_id, agent_id, reason, create_tombstone=True, write_key=N
         raise MemCoreError('rejection requires a tombstone refusal guard')
     _require_nonempty_reason(reason)
     reason = scrub_secrets(reason)
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
             conn, memory_id, agent_id
         )
@@ -919,15 +939,11 @@ def reject(conn, memory_id, agent_id, reason, create_tombstone=True, write_key=N
                 _audit(conn, 'reject_tombstone_repair', agent_id, memory_id, project_id,
                        {'reason': reason, 'scope': refusal_scope,
                         'swept': len(swept), 'swept_ids': swept})
-                conn.execute('COMMIT')
             elif swept:
                 _audit(conn, 'reject', agent_id, memory_id, project_id,
                        {'reason': reason, 'tombstoned': False, 'swept': len(swept),
                         'swept_ids': swept, 'repair_sweep': True},
                        write_key=write_key)
-                conn.execute('COMMIT')
-            else:
-                conn.execute('ROLLBACK')
             return RejectResult(rejected=False, tombstone_created=tombstone_created,
                                 tombstone_id=tombstone_id, swept=len(swept),
                                 swept_ids=swept)
@@ -959,16 +975,9 @@ def reject(conn, memory_id, agent_id, reason, create_tombstone=True, write_key=N
                 'tombstone_id': tombstone_id,
                 'swept': len(swept), 'swept_ids': swept},
                write_key=write_key)
-        conn.execute('COMMIT')
         return RejectResult(rejected=True, tombstone_created=tombstone_created,
                             tombstone_id=tombstone_id, swept=len(swept),
                             swept_ids=swept)
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except sqlite3.OperationalError:
-            pass
-        raise
 
 
 def reject_value(conn, project_id, agent_id, content, reason):
@@ -996,8 +1005,7 @@ def reject_value(conn, project_id, agent_id, content, reason):
     if not unicodedata.normalize('NFC', ' '.join(content.lower().strip().split())):
         raise MemCoreError('reject-value content must be a non-empty string')
     _require_membership(conn, project_id, agent_id)
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         existing = _active_tombstone_row(conn, claim_fp, project_id)
         tombstone_created = False
         if existing is None:
@@ -1017,17 +1025,10 @@ def reject_value(conn, project_id, agent_id, content, reason):
                {'fingerprint': claim_fp, 'tombstone_id': tombstone_id,
                 'tombstone_created': tombstone_created,
                 'swept': len(swept), 'swept_ids': swept})
-        conn.execute('COMMIT')
         return {'tombstone_id': tombstone_id,
                 'tombstone_created': tombstone_created,
                 'swept': len(swept), 'swept_ids': swept,
                 'fingerprint': claim_fp}
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except sqlite3.OperationalError:
-            pass
-        raise
 
 
 def list_tombstones(conn, project_id, agent_id):
@@ -1110,8 +1111,7 @@ def override_tombstone(conn, tombstone_id, agent_id):
     because there is no global-admin identity model. Returns False if already
     overridden, True when this call performs the override.
     """
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         row = conn.execute(
             'SELECT claim_fingerprint, scope, reason, overridden_by '
             'FROM tombstone WHERE id=?', (tombstone_id,)
@@ -1120,7 +1120,6 @@ def override_tombstone(conn, tombstone_id, agent_id):
             raise NotFound(f'tombstone {tombstone_id} not found')
         claim_fp, refusal_scope, reason, overridden_by = row
         if overridden_by is not None:
-            conn.execute('ROLLBACK')
             return False
         if refusal_scope == 'global':
             raise PermissionDenied('global tombstone override requires an admin identity')
@@ -1148,14 +1147,7 @@ def override_tombstone(conn, tombstone_id, agent_id):
         _audit(conn, 'tombstone_override', agent_id, None, project_id, {
             'tombstone_id': tombstone_id, 'fingerprint': claim_fp,
             'scope': refusal_scope, 'reason': reason})
-        conn.execute('COMMIT')
         return True
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except sqlite3.OperationalError:
-            pass
-        raise
 
 
 def scan_contradictions(conn, project_id, limit_pairs: int = 200) -> list:
@@ -1207,9 +1199,7 @@ def mark_contradiction(conn, memory_id_a, memory_id_b, agent_id,
     or reject by a human or governed tool. Returns True.
     """
     reason = scrub_secrets(reason) if isinstance(reason, str) else reason
-    if _manage_transaction:
-        conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn, manage=_manage_transaction):
         if memory_id_a == memory_id_b:
             raise MemCoreError(
                 'contradiction pair requires two distinct memories')
@@ -1231,16 +1221,7 @@ def mark_contradiction(conn, memory_id_a, memory_id_b, agent_id,
         for mem_id in (memory_id_a, memory_id_b):
             _audit(conn, 'mark_conflict', agent_id, mem_id, project_id,
                    {'reason': reason, 'pair': [memory_id_a, memory_id_b]})
-        if _manage_transaction:
-            conn.execute('COMMIT')
-        return True
-    except Exception:
-        if _manage_transaction:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-        raise
+    return True
 
 
 def pre_accept_conflict_check(conn, project_id, content, exclude_memory_id=None):
@@ -1334,9 +1315,7 @@ def accept_memory(conn, memory_id, agent_id, reason, _manage_transaction=True):
     return, so re-accepting a row whose fingerprint was tombstoned elsewhere
     still refuses loudly instead of silently succeeding.
     """
-    if _manage_transaction:
-        conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn, manage=_manage_transaction):
         project_id, scope, owner, lifecycle, _role = _require_memory_write_access(
             conn, memory_id, agent_id
         )
@@ -1351,8 +1330,6 @@ def accept_memory(conn, memory_id, agent_id, reason, _manage_transaction=True):
         if blocked:
             raise TombstoneBlocked(claim_fp, blocked[0])
         if lifecycle == 'accepted':
-            if _manage_transaction:
-                conn.execute('ROLLBACK')
             return False
         conn.execute(
             "UPDATE memory SET lifecycle='accepted', updated_at=? WHERE id=?",
@@ -1360,16 +1337,7 @@ def accept_memory(conn, memory_id, agent_id, reason, _manage_transaction=True):
         )
         _audit(conn, 'auto_accept', agent_id, memory_id, project_id,
                {'reason': reason, 'previous_lifecycle': lifecycle})
-        if _manage_transaction:
-            conn.execute('COMMIT')
-        return True
-    except Exception:
-        if _manage_transaction:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-        raise
+    return True
 
 
 def auto_accept(conn, memory_id, agent_id, reason):
@@ -1418,9 +1386,7 @@ def auto_accept(conn, memory_id, agent_id, reason):
 def set_golden(
 conn, memory_id, agent_id, golden=True, _manage_transaction=True):
     """Pin/unpin a memory as Golden Rule (pinned+critical). Audited."""
-    if _manage_transaction:
-        conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn, manage=_manage_transaction):
         project_id, _scope, _owner, _lifecycle, _role = _require_memory_write_access(
             conn, memory_id, agent_id
         )
@@ -1430,16 +1396,81 @@ conn, memory_id, agent_id, golden=True, _manage_transaction=True):
         )
         _audit(conn, 'auto_golden_promote' if golden else 'auto_golden_demote',
                agent_id, memory_id, project_id, {'golden': golden})
-        if _manage_transaction:
-            conn.execute('COMMIT')
-        return True
-    except Exception:
-        if _manage_transaction:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-        raise
+    return True
+
+
+def _corrob_conflict_hits(conn, project_id, member_ids):
+    """Task-2 gate: a live contradiction against any member holds promotion."""
+    for mid in member_ids:
+        row = conn.execute(
+            'SELECT v.content FROM memory m '
+            'JOIN memory_version v ON v.id = m.current_version_id '
+            'AND v.memory_id = m.id WHERE m.id=?',
+            (mid,),
+        ).fetchone()
+        if not row:
+            continue
+        hits = pre_accept_conflict_check(
+            conn, project_id, row[0], exclude_memory_id=mid)
+        if hits:
+            return hits
+    return []
+
+
+def _corrob_veto(conn, project_id, claim_fp, members):
+    """Tombstone veto: the project guard plus every member's private guard.
+
+    A private rejection must also stop a later project-wide coronation of
+    the same claim, so each member lane is checked before promotion.
+    """
+    veto = _tombstone_active(conn, claim_fp, project_id)
+    if veto:
+        return veto[0]
+    for _mid, _scope, owner, _lc, _ts in members:
+        priv = _tombstone_active(
+            conn, claim_fp, project_id, scope='private', agent_id=owner)
+        if priv:
+            return priv[0]
+    return None
+
+
+def _promote_canonical(conn, canonical_id, actor_agent_id, project_id,
+                       claim_fp, members, agents):
+    """Accept (and maybe crown) the canonical copy; returns the action name."""
+    row = conn.execute(
+        'SELECT scope, lifecycle, verification FROM memory WHERE id=?',
+        (canonical_id,),
+    ).fetchone()
+    scope, lifecycle, verification = row
+    if scope != 'project':
+        conn.execute(
+            "UPDATE memory SET scope='project', updated_at=? WHERE id=?",
+            (_now(), canonical_id),
+        )
+    if lifecycle != 'accepted':
+        conn.execute(
+            "UPDATE memory SET lifecycle='accepted', updated_at=? WHERE id=?",
+            (_now(), canonical_id),
+        )
+    if verification not in ('source_backed', 'runtime_verified',
+                             'user_authoritative'):
+        conn.execute(
+            "UPDATE memory SET verification='source_backed', updated_at=? "
+            'WHERE id=?',
+            (_now(), canonical_id),
+        )
+    _audit(conn, 'auto_corrob_accept', actor_agent_id, canonical_id,
+           project_id, {'fingerprint': claim_fp, 'sources': agents,
+                        'member_ids': [m[0] for m in members]})
+    if len(agents) < GOLDEN_N:
+        return 'accepted'
+    conn.execute(
+        'UPDATE memory SET pinned=1, critical=1, updated_at=? WHERE id=?',
+        (_now(), canonical_id),
+    )
+    _audit(conn, 'auto_golden_promote', actor_agent_id, canonical_id,
+           project_id, {'fingerprint': claim_fp, 'sources': agents})
+    return 'golden'
 
 
 def maybe_auto_corrob(conn, project_id, claim_fp, actor_agent_id):
@@ -1454,22 +1485,8 @@ def maybe_auto_corrob(conn, project_id, claim_fp, actor_agent_id):
     agents = sorted({m[2] for m in members})
     if not members:
         return {'fingerprint': claim_fp, 'sources': 0, 'action': 'none'}
-    # Task 2 gate: a live contradiction against this claim holds the
-    # promotion even when corroboration counts are met. Never resolves —
-    # audit contradiction-hold and return without accepting.
-    gate_hits = []
-    for mid in [m[0] for m in members]:
-        row = conn.execute(
-            'SELECT v.content FROM memory m '
-            'JOIN memory_version v ON v.id = m.current_version_id '
-            'AND v.memory_id = m.id WHERE m.id=?',
-            (mid,),
-        ).fetchone()
-        if row:
-            gate_hits = pre_accept_conflict_check(
-                conn, project_id, row[0], exclude_memory_id=mid)
-            if gate_hits:
-                break
+    gate_hits = _corrob_conflict_hits(
+        conn, project_id, [m[0] for m in members])
     if gate_hits:
         _audit(conn, 'contradiction-hold', actor_agent_id, members[0][0],
                project_id, {'fingerprint': claim_fp,
@@ -1478,77 +1495,20 @@ def maybe_auto_corrob(conn, project_id, claim_fp, actor_agent_id):
             conn.commit()
         return {'fingerprint': claim_fp, 'sources': len(agents),
                 'action': 'contradiction_hold', 'hits': gate_hits}
-    # Tombstone veto: a blocked claim never auto-promotes. Check the project
-    # guard plus every member's private guard — a private rejection must also
-    # stop a later project-wide coronation of the same claim.
-    veto = _tombstone_active(conn, claim_fp, project_id)
-    veto_by = None
-    if veto:
-        veto_by = veto[0]
-    else:
-        for _mid, _scope, owner, _lc, _ts in members:
-            priv = _tombstone_active(
-                conn, claim_fp, project_id, scope='private', agent_id=owner)
-            if priv:
-                veto_by = priv[0]
-                break
+    veto_by = _corrob_veto(conn, project_id, claim_fp, members)
     if veto_by:
         return {'fingerprint': claim_fp, 'sources': len(agents),
                 'action': 'vetoed', 'tombstone_id': veto_by}
     if len(agents) < CORROBORATE_ACCEPT_N:
         return {'fingerprint': claim_fp, 'sources': len(agents),
                 'action': 'none'}
-    canonical_id = members[0][0]
     result = {'fingerprint': claim_fp, 'sources': len(agents),
-              'canonical': canonical_id}
-    outer_tx = conn.in_transaction
-    if not outer_tx:
-        conn.execute('BEGIN IMMEDIATE')
-    try:
-        row = conn.execute(
-            'SELECT scope, lifecycle, verification FROM memory WHERE id=?',
-            (canonical_id,),
-        ).fetchone()
-        scope, lifecycle, verification = row
-        if scope != 'project':
-            conn.execute(
-                "UPDATE memory SET scope='project', updated_at=? WHERE id=?",
-                (_now(), canonical_id),
-            )
-        if lifecycle != 'accepted':
-            conn.execute(
-                "UPDATE memory SET lifecycle='accepted', updated_at=? WHERE id=?",
-                (_now(), canonical_id),
-            )
-        if verification not in ('source_backed', 'runtime_verified',
-                                 'user_authoritative'):
-            conn.execute(
-                "UPDATE memory SET verification='source_backed', updated_at=? "
-                'WHERE id=?',
-                (_now(), canonical_id),
-            )
-        _audit(conn, 'auto_corrob_accept', actor_agent_id, canonical_id,
-               project_id, {'fingerprint': claim_fp, 'sources': agents,
-                            'member_ids': [m[0] for m in members]})
-        result['action'] = 'accepted'
-        if len(agents) >= GOLDEN_N:
-            conn.execute(
-                'UPDATE memory SET pinned=1, critical=1, updated_at=? WHERE id=?',
-                (_now(), canonical_id),
-            )
-            _audit(conn, 'auto_golden_promote', actor_agent_id, canonical_id,
-                   project_id, {'fingerprint': claim_fp, 'sources': agents})
-            result['action'] = 'golden'
-        if not outer_tx:
-            conn.execute('COMMIT')
-        return result
-    except Exception:
-        if not outer_tx:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-        raise
+              'canonical': members[0][0]}
+    with store.write_tx(conn, manage=not conn.in_transaction):
+        result['action'] = _promote_canonical(
+            conn, members[0][0], actor_agent_id, project_id, claim_fp,
+            members, agents)
+    return result
 
 
 def _scan_freshness_decay(conn, now, aging_days, stale_days):
@@ -1605,8 +1565,7 @@ def apply_freshness_decay(conn, aging_days=30, stale_days=90, now=None, *,
     now = _coerce_now(now)
     if dry_run:
         return _scan_freshness_decay(conn, now, aging_days, stale_days)
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         aged, staled = _scan_freshness_decay(conn, now, aging_days, stale_days)
         for mem_id in aged:
             conn.execute(
@@ -1622,14 +1581,35 @@ def apply_freshness_decay(conn, aging_days=30, stale_days=90, now=None, *,
             )
             _audit(conn, 'auto_decay_stale', None, mem_id, None,
                    {'stale_days': stale_days})
-        conn.execute('COMMIT')
-        return aged, staled
-    except Exception:
+    return aged, staled
+
+
+def _changed_source_rows(conn, ids):
+    """Rowed tracked-source files whose content changed; best-effort per row."""
+    marks = ','.join('?' for _ in ids)
+    rows = conn.execute(
+        'SELECT m.id, m.current_version_id, v.source_hash, v.source_file '
+        'FROM memory m JOIN memory_version v '
+        'ON v.id = m.current_version_id AND v.memory_id = m.id '
+        f"WHERE m.id IN ({marks}) AND m.freshness != 'stale' "
+        'AND v.source_hash IS NOT NULL AND v.source_file IS NOT NULL',
+        ids,
+    ).fetchall()
+    changed = []
+    for mem_id, version_id, saved_hash, source_file in rows:
         try:
-            conn.execute('ROLLBACK')
-        except sqlite3.OperationalError:
-            pass
-        raise
+            path = pathlib.Path(source_file).expanduser()
+            if not path.is_absolute():
+                continue
+            if not path.is_file():
+                continue
+            current_hash = _sha256_file(path)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if str(saved_hash).lower() != current_hash:
+            changed.append((mem_id, version_id, source_file,
+                            str(saved_hash), current_hash))
+    return changed
 
 
 def check_source_staleness(conn, memory_ids, get_head=None, repo_root=None):
@@ -1645,35 +1625,12 @@ def check_source_staleness(conn, memory_ids, get_head=None, repo_root=None):
     if not ids:
         return []
     try:
-        marks = ','.join('?' for _ in ids)
-        rows = conn.execute(
-            'SELECT m.id, m.current_version_id, v.source_hash, v.source_file '
-            'FROM memory m JOIN memory_version v '
-            'ON v.id = m.current_version_id AND v.memory_id = m.id '
-            f"WHERE m.id IN ({marks}) AND m.freshness != 'stale' "
-            'AND v.source_hash IS NOT NULL AND v.source_file IS NOT NULL',
-            ids,
-        ).fetchall()
-        changed = []
-        for mem_id, version_id, saved_hash, source_file in rows:
-            try:
-                path = pathlib.Path(source_file).expanduser()
-                if not path.is_absolute():
-                    continue
-                if not path.is_file():
-                    continue
-                current_hash = _sha256_file(path)
-            except (OSError, RuntimeError, TypeError, ValueError):
-                continue
-            if str(saved_hash).lower() != current_hash:
-                changed.append((mem_id, version_id, source_file,
-                                str(saved_hash), current_hash))
+        changed = _changed_source_rows(conn, ids)
         if not changed:
             return []
 
         flipped = []
-        conn.execute('BEGIN IMMEDIATE')
-        try:
+        with store.write_tx(conn):
             for mem_id, version_id, source_file, saved_hash, current_hash in changed:
                 cur = conn.execute(
                     "UPDATE memory SET freshness='stale' "
@@ -1686,13 +1643,6 @@ def check_source_staleness(conn, memory_ids, get_head=None, repo_root=None):
                                   'source_hash': saved_hash,
                                   'current_source_hash': current_hash})
                     flipped.append(mem_id)
-            conn.execute('COMMIT')
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-            raise
         return flipped
     except Exception:
         return []
@@ -2293,12 +2243,18 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
     return [c[:9] for c in candidates[:limit]]
 
 
-def _merge_exact_fallback(base_rows, exact_rows, limit, user_query):
+def _merge_exact_fallback(base_rows, exact_rows, limit, user_query,
+                          query_tok=None, query_numbers=None,
+                          query_tokens=None):
     """Merge ranked primary candidates with exact substring fallback rows.
 
-    C3: collapse across the whole overfetch window, demote numeric
-    mismatches, and only THEN slice to ``limit`` — a compatible row from the
-    overfetch window can replace a demoted row instead of being cut early.
+    C3: collapse across the whole overfetch window, demote contradictory
+    rows (numbers, exclusive choices, negated phrases), and only THEN slice
+    to ``limit`` — a compatible row from the overfetch window can replace a
+    demoted row instead of being cut early.
+    ``query_tok``/``query_numbers``/``query_tokens`` may be precomputed by
+    search() so the query side of the incompatibility check is analyzed
+    exactly once (C2).
     """
     merged = list(base_rows)
     if exact_rows:
@@ -2311,7 +2267,147 @@ def _merge_exact_fallback(base_rows, exact_rows, limit, user_query):
                 if len(merged) >= merge_cap:
                     break
     collapsed = _collapse_duplicate_claims(merged, limit=None)
-    return _demote_numeric_mismatch(user_query, collapsed)[:limit]
+    return _demote_numeric_mismatch(
+        user_query, collapsed, query_tok=query_tok,
+        query_numbers=query_numbers, query_tokens=query_tokens)[:limit]
+
+
+def _extract_non_ascii_substr_terms(user_query: str) -> list[str]:
+    """Match terms for the Unicode substring fallback lane (single pass).
+
+    unicode61 never segments glued Thai, so non-ASCII queries need a
+    substring fallback. Match terms = NON-ASCII word tokens of the
+    PRE-expansion query + their char bigrams. ASCII tokens are deliberately
+    excluded — FTS already handles them, and instr-ORing them (e.g. 'agent'
+    matching 'agents') flips negation guards. Alias expansion can never break
+    the verbatim check (pre-expansion query only); glued->spaced still
+    bridges via bigrams. Capped at MAX_SUBSTR_TERMS.
+    """
+    if not any(ord(ch) > 127 for ch in user_query):
+        return []
+    terms: list[str] = []
+    seen_terms: set[str] = set()
+    for token in _query_tokens(user_query):
+        if all(ord(ch) <= 127 for ch in token) or token in seen_terms:
+            continue
+        seen_terms.add(token)
+        terms.append(token)
+        for bg in _thai_bigrams(token):
+            if bg in seen_terms:
+                continue
+            seen_terms.add(bg)
+            terms.append(bg)
+            if len(terms) >= MAX_SUBSTR_TERMS:
+                break
+        if len(terms) >= MAX_SUBSTR_TERMS:
+            break
+    return terms
+
+
+def _search_detail_filter(conn, scope_detail):
+    """(sql, params) for a scope_detail narrowing.
+
+    Returns (None, ()) when the column is absent (pre-0016 store): the
+    caller must then refuse the narrowed query rather than silently run it
+    unscoped.
+    """
+    if scope_detail is None:
+        return '', ()
+    if 'scope_detail' not in _table_cols(conn, 'memory'):
+        return None, ()
+    return '  AND m.scope_detail = ? ', (str(scope_detail),)
+
+
+def _run_fts_lane(conn, project_id, agent_id, match_expr, detail_filter,
+                  detail_params, retention_tail, retention_params, now_iso,
+                  fts_limit):
+    """FTS5 bm25 lane: ranked primary candidates as 9-tuple rows."""
+    cur = conn.execute(
+        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
+        '       v.content, m.owner_agent_id, '
+        '       bm25(memory_version_fts) AS rank, m.claim_fingerprint '
+        'FROM memory_version_fts fts '
+        'JOIN memory_version v ON v.rowid = fts.rowid '
+        'JOIN memory m ON m.id = v.memory_id '
+        'WHERE memory_version_fts MATCH ? '
+        '  AND v.id = m.current_version_id '
+        '  AND m.project_id = ? '
+        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
+        '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter +
+        'ORDER BY m.pinned DESC, ' +
+        "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
+        "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
+        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
+        retention_tail + ', ' +
+        'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
+        _freshness_params(now_iso) +
+        (match_expr, project_id, agent_id) + detail_params +
+        tuple(retention_params) + (fts_limit,)
+    )
+    return cur.fetchall()
+
+
+def _fuse_rrf_candidates(fts_rows, vec_rows, k_rrf=60):
+    """Reciprocal Rank Fusion over the FTS and vector lanes (id-deduped)."""
+    fts_rank_map = {row[0]: idx for idx, row in enumerate(fts_rows)}
+    vec_rank_map = {row[0]: idx for idx, row in enumerate(vec_rows)}
+    doc_map = {}
+    for row in fts_rows:
+        doc_map[row[0]] = row
+    for row in vec_rows:
+        if row[0] not in doc_map:
+            doc_map[row[0]] = row
+    fused = []
+    for mid in set(fts_rank_map) | set(vec_rank_map):
+        score = 0.0
+        if mid in fts_rank_map:
+            score += 1.0 / (k_rrf + fts_rank_map[mid])
+        if mid in vec_rank_map:
+            score += 1.0 / (k_rrf + vec_rank_map[mid])
+        r = doc_map[mid]
+        # (id, scope, lifecycle, verification, freshness, content, owner, -score, fp)
+        fused.append((r[0], r[1], r[2], r[3], r[4], r[5], r[6], -score, r[8]))
+
+    def _fused_sort_key(c):
+        lifecycle_order = _LIFECYCLE_ORDER.get(c[2], 2)
+        verif_order = _VERIF_ORDER.get(c[3], 3)
+        return (lifecycle_order, verif_order, c[7])
+
+    fused.sort(key=_fused_sort_key)
+    return fused
+
+
+def _decay_ablated() -> bool:
+    """MEMCORE_ABLATE_DECAY flag (ablation is eval-only); never raises."""
+    try:
+        return bool(_ablation.is_decay_ablated())
+    except Exception:
+        return False
+
+
+def _fetch_query_vector(user_query):
+    """Best-effort query embedding for the vector lane; None when unavailable."""
+    try:
+        return embedding.get_embedding(user_query, timeout=0.15)
+    except Exception:
+        return None
+
+
+def _run_vector_lane(conn, project_id, agent_id, query_vec, limit,
+                     detail_filter, detail_params):
+    """Vector lane wrapper: never raises — degraded search beats no search."""
+    if not query_vec:
+        return []
+    try:
+        return _vector_search_lane(
+            conn, project_id, agent_id, query_vec,
+            limit=limit * DISTINCT_OVERFETCH,
+            detail_filter=detail_filter, detail_params=detail_params
+        )
+    except Exception:
+        return []
 
 
 def search(conn, project_id, agent_id, query, limit=20,
@@ -2344,17 +2440,10 @@ def search(conn, project_id, agent_id, query, limit=20,
     # simulated clock (fake else real) for age computation only; it never
     # reorders except through that age term. Junk FAKE_NOW falls back to the
     # real clock and never raises.
-    decay_ablated = False
-    try:
-        decay_ablated = bool(_ablation.is_decay_ablated())
-    except Exception:
-        decay_ablated = False
     now_iso = _eval_now_iso()
     retention_expr, retention_params = _retention_order(
-        conn, not decay_ablated, alias='m')
-    retention_tail_exact = (
-        (', ' + retention_expr + ' DESC') if retention_expr else '')
-    retention_tail_fts = (
+        conn, not _decay_ablated(), alias='m')
+    retention_tail = (
         (', ' + retention_expr + ' DESC') if retention_expr else '')
     # Lane 3.2: expand fleet aliases before any matching (FTS lane).
     # The exact-fallback below keeps using user_query (pre-expansion) so
@@ -2362,135 +2451,56 @@ def search(conn, project_id, agent_id, query, limit=20,
     raw_query = _expand_aliases(user_query)
     if _membership_role(conn, project_id, agent_id) is None:
         return []
-    detail_filter = ''
-    detail_params: tuple = ()
-    if scope_detail is not None:
-        cols = _table_cols(conn, 'memory')
-        if 'scope_detail' not in cols:
-            return []
-        detail_filter = '  AND m.scope_detail = ? '
-        detail_params = (str(scope_detail),)
-    exact_rows = []
-    # Lane 3.1: non-ASCII queries try a Unicode substring fallback first
-    # (unicode61 never segments glued Thai). Match terms = NON-ASCII word
-    # tokens of the PRE-expansion query + their char bigrams. ASCII tokens
-    # are deliberately excluded — FTS already handles them, and instr-ORing
-    # them (e.g. 'agent' matching 'agents') flips negation guards.
-    # Alias expansion can never break the verbatim check (pre-expansion
-    # query only) and glued->spaced still bridges via bigrams.
-    substr_terms: list[str] = []
-    if any(ord(ch) > 127 for ch in user_query):
-        seen_terms: set[str] = set()
-        for token in _query_tokens(user_query):
-            if all(ord(ch) <= 127 for ch in token):
-                continue
-            if token in seen_terms:
-                continue
-            seen_terms.add(token)
-            substr_terms.append(token)
-            for bg in _thai_bigrams(token):
-                if bg in seen_terms:
-                    continue
-                seen_terms.add(bg)
-                substr_terms.append(bg)
-                if len(substr_terms) >= MAX_SUBSTR_TERMS:
-                    break
-            if len(substr_terms) >= MAX_SUBSTR_TERMS:
-                break
+    detail_filter, detail_params = _search_detail_filter(conn, scope_detail)
+    if detail_filter is None:
+        return []
+    substr_terms = _extract_non_ascii_substr_terms(user_query)
 
     # Lane 3.3: Local vector search lane (semantic similarity)
     if query_vec is None:
-        try:
-            query_vec = embedding.get_embedding(user_query, timeout=0.15)
-        except Exception:
-            query_vec = None
-
-    vec_rows = []
-    if query_vec:
-        try:
-            vec_rows = _vector_search_lane(
-                conn, project_id, agent_id, query_vec,
-                limit=limit * DISTINCT_OVERFETCH,
-                detail_filter=detail_filter, detail_params=detail_params
-            )
-        except Exception:
-            vec_rows = []
+        query_vec = _fetch_query_vector(user_query)
+    vec_rows = _run_vector_lane(
+        conn, project_id, agent_id, query_vec, limit,
+        detail_filter, detail_params)
 
     match_expr = _fts_query(raw_query)
     fts_rows = []
     if match_expr:
-        fts_limit = min(500, (limit + len(exact_rows)) * DISTINCT_OVERFETCH)
-        cur = conn.execute(
-            'SELECT m.id, m.scope, m.lifecycle, m.verification, '
-            '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
-            '       v.content, m.owner_agent_id, '
-            '       bm25(memory_version_fts) AS rank, m.claim_fingerprint '
-            'FROM memory_version_fts fts '
-            'JOIN memory_version v ON v.rowid = fts.rowid '
-            'JOIN memory m ON m.id = v.memory_id '
-            'WHERE memory_version_fts MATCH ? '
-            '  AND v.id = m.current_version_id '
-            '  AND m.project_id = ? '
-            "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-            "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-            '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter +
-            'ORDER BY m.pinned DESC, ' +
-            "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
-            "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
-            "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
-            retention_tail_fts + ', ' +
-            'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
-            _freshness_params(now_iso) +
-            (match_expr, project_id, agent_id) + detail_params +
-            tuple(retention_params) + (fts_limit,)
+        fts_rows = _run_fts_lane(
+            conn, project_id, agent_id, match_expr, detail_filter,
+            detail_params, retention_tail, retention_params, now_iso,
+            min(500, limit * DISTINCT_OVERFETCH)
         )
-        fts_rows = cur.fetchall()
 
     # Substring lane runs ONLY as a fallback, and only when the ranked lane did
     # not already supply enough DISTINCT claims.
+    exact_rows = []
     if substr_terms and len({row[8] for row in fts_rows}) < limit:
         exact_rows = _run_substring_lane(
             conn, project_id, agent_id, substr_terms, detail_filter,
-            detail_params, retention_tail_exact, retention_params, now_iso, limit)
+            detail_params, retention_tail, retention_params, now_iso, limit)
+
+    if not vec_rows and not fts_rows and not exact_rows:
+        return []
+    # Query-side analysis for the demotion pass: computed once here, so the
+    # incompatibility check never re-tokenizes the query per row (C2). The
+    # ordered token list feeds the phrase-negation signal; the set feeds
+    # anchor/choice checks.
+    from memcore import contradiction as _qd
+    query_tokens = _qd._tokens(user_query)
+    query_tok = set(query_tokens)
+    query_numbers = _qd.numbers(user_query)
 
     if not vec_rows:
-        if not fts_rows and not exact_rows:
-            return []
-        return _merge_exact_fallback(fts_rows, exact_rows, limit, user_query)
-
-    # Reciprocal Rank Fusion (RRF, k=60)
-    k_rrf = 60
-    fts_rank_map = {row[0]: idx for idx, row in enumerate(fts_rows)}
-    vec_rank_map = {row[0]: idx for idx, row in enumerate(vec_rows)}
-
-    all_ids = set(fts_rank_map.keys()) | set(vec_rank_map.keys())
-    doc_map = {}
-    for r in fts_rows:
-        doc_map[r[0]] = r
-    for r in vec_rows:
-        if r[0] not in doc_map:
-            doc_map[r[0]] = r
-
-    fused_candidates = []
-    for mid in all_ids:
-        score = 0.0
-        if mid in fts_rank_map:
-            score += 1.0 / (k_rrf + fts_rank_map[mid])
-        if mid in vec_rank_map:
-            score += 1.0 / (k_rrf + vec_rank_map[mid])
-        r = doc_map[mid]
-        # (id, scope, lifecycle, verification, freshness, content, owner, -score, fp)
-        fused_candidates.append(
-            (r[0], r[1], r[2], r[3], r[4], r[5], r[6], -score, r[8])
-        )
-
-    def _fused_sort_key(c):
-        lifecycle_order = _LIFECYCLE_ORDER.get(c[2], 2)
-        verif_order = _VERIF_ORDER.get(c[3], 3)
-        return (lifecycle_order, verif_order, c[7])
-
-    fused_candidates.sort(key=_fused_sort_key)
-    return _merge_exact_fallback(fused_candidates, exact_rows, limit, user_query)
+        return _merge_exact_fallback(
+            fts_rows, exact_rows, limit, user_query,
+            query_tok=query_tok, query_numbers=query_numbers,
+            query_tokens=query_tokens)
+    fused = _fuse_rrf_candidates(fts_rows, vec_rows)
+    return _merge_exact_fallback(
+        fused, exact_rows, limit, user_query,
+        query_tok=query_tok, query_numbers=query_numbers,
+        query_tokens=query_tokens)
 
 
 def finalize_recall(conn, rows):
@@ -2599,42 +2609,72 @@ FRESHNESS_AGING_DAYS = 30
 FRESHNESS_STALE_DAYS = 90
 
 
-def _demote_numeric_mismatch(query, rows):
-    """Stable-partition hits whose standalone numbers contradict the query.
+def _demote_numeric_mismatch(query, rows, query_tok=None, query_numbers=None,
+                             query_tokens=None):
+    """Stable-partition hits whose content contradicts the query's values.
 
     A query naming a concrete value ("port 8080", "page size 100") should not
     lead with a memory stating a different value for the same subject. Lexical
-    recall has no polarity, so this is the one negation signal available
-    without a semantic model: both sides carry numbers and they are disjoint.
+    recall has no polarity, so demotion uses three surface signals: disjoint
+    standalone numbers, exclusive-choice members, and a contiguous phrase the
+    fact explicitly negates ("A B does not ...") while the query affirms it.
 
     Only reorders rows it actually demotes; ties keep their original order, so
     an unrelated hit can never be pushed above a row that merely mentions a
     number by accident (e.g. "9router", "v1") — those share no standalone
     digits with the query and stay put.
+
+    A window whose rows are ALL demoted has no compatible answer: leading (or
+    only) with a contradiction reads as confirmation of the wrong value, so
+    it collapses to [] instead. A single demoted candidate therefore yields
+    nothing rather than a wrong-value hit.
+
+    ``query_tok``/``query_numbers``/``query_tokens`` may be precomputed once
+    by the caller: the per-row check never re-tokenizes the query (C2).
     """
     rows = list(rows or [])
-    if len(rows) < 2:
+    if not rows:
         return rows
     from memcore import contradiction as _cd
-    query_numbers = _cd.numbers(query)
-    query_tok = set(_cd._tokens(query))
+    if query_tokens is None:
+        query_tokens = _cd._tokens(query)
+    if query_numbers is None:
+        query_numbers = _cd.numbers(query)
+    if query_tok is None:
+        query_tok = set(query_tokens)
+    phrase_pairs = _cd._query_phrase_pairs(query_tokens)
+    choice_sets = [excl for excl in _cd._EXCLUSIVE_SETS if query_tok & excl]
     # Numeric demotion needs numbers on the query side; the incompatibility
-    # check below additionally fires on exclusive-choice words, so a query
-    # without numbers still proceeds when it names a choice member.
-    if not query_numbers and not any(
-        query_tok & excl for excl in _cd._EXCLUSIVE_SETS
-    ):
+    # check below additionally fires on exclusive-choice words or a negated
+    # query phrase, so a query without numbers still proceeds when either of
+    # those signals is present. Phrase demotion only applies to affirmative
+    # queries (a negated query already states what it expects).
+    phrase_active = bool(phrase_pairs) and _cd.polarity(query) == 0
+    if not query_numbers and not choice_sets and not phrase_active:
         return rows
     keep, demoted = [], []
     for row in rows:
         content = row[5] if len(row) > 5 else row
-        row_numbers = _cd.numbers(content)
-        if query_numbers and row_numbers and not (row_numbers & query_numbers):
-            demoted.append(row)
-        elif _cd.query_fact_incompatible(query, content):
+        if query_numbers:
+            row_numbers = _cd.numbers(content)
+            if row_numbers and not (row_numbers & query_numbers):
+                demoted.append(row)
+                continue
+        # Cheap pre-screen before the token-level check: a row can only fire
+        # via an exclusive member substring or a negative marker; skipping
+        # the rest avoids tokenizing every candidate row.
+        if not _cd._row_may_contradict(content, bool(choice_sets), phrase_active):
+            keep.append(row)
+            continue
+        if _cd.query_fact_incompatible(
+                query, content, query_tok=query_tok,
+                query_numbers=query_numbers, phrase_pairs=phrase_pairs,
+                query_tokens=query_tokens, choice_sets=choice_sets):
             demoted.append(row)
         else:
             keep.append(row)
+    if not keep:
+        return []
     return keep + demoted
 
 
@@ -2728,8 +2768,7 @@ def gc_apply(conn, candidate_days=30, tombstone_days=90):
     disabled, purged = [], []
     for stale_row in candidates:
         mem_id = stale_row[0]
-        conn.execute('BEGIN IMMEDIATE')
-        try:
+        with store.write_tx(conn):
             # Re-evaluate every destructive predicate under the write lock.
             # A memory may gain evidence, be corrected, or age across the
             # scan/apply gap; GC must act on current state/content only.
@@ -2745,7 +2784,6 @@ def gc_apply(conn, candidate_days=30, tombstone_days=90):
                 (mem_id, cutoff_c)
             ).fetchone()
             if not row:
-                conn.execute('ROLLBACK')
                 continue
             project_id, content = row
             conn.execute(
@@ -2754,18 +2792,10 @@ def gc_apply(conn, candidate_days=30, tombstone_days=90):
             )
             _audit(conn, 'gc_disable', None, mem_id, project_id,
                    {'reason': 'retention', 'content': content})
-            conn.execute('COMMIT')
             disabled.append(mem_id)
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-            raise
     for stale_row in tombstones:
         tomb_id = stale_row[0]
-        conn.execute('BEGIN IMMEDIATE')
-        try:
+        with store.write_tx(conn):
             row = conn.execute(
                 'SELECT claim_fingerprint, scope, reason FROM tombstone '
                 'WHERE id=? AND overridden_by IS NOT NULL '
@@ -2773,22 +2803,110 @@ def gc_apply(conn, candidate_days=30, tombstone_days=90):
                 (tomb_id, cutoff_t)
             ).fetchone()
             if not row:
-                conn.execute('ROLLBACK')
                 continue
             claim_fp, scope, reason = row
             conn.execute('DELETE FROM tombstone WHERE id=?', (tomb_id,))
             _audit(conn, 'gc_purge_tombstone', None, None, None,
                    {'tombstone_id': tomb_id, 'claim_fingerprint': claim_fp,
                     'scope': scope, 'reason': reason})
-            conn.execute('COMMIT')
             purged.append(tomb_id)
-        except Exception:
-            try:
-                conn.execute('ROLLBACK')
-            except sqlite3.OperationalError:
-                pass
-            raise
     return disabled, purged
+
+
+def _tombstone_scope_reasons(claim_fp, scope, project_ids, agent_ids):
+    """Reasons one tombstone ref/scope pair is malformed; [] when valid."""
+    reasons = []
+    if len(claim_fp) != 16 or any(ch not in '0123456789abcdef' for ch in claim_fp):
+        reasons.append('invalid_fingerprint')
+    if scope == 'global' or scope in project_ids:
+        return reasons
+    if scope.startswith('private:'):
+        parts = scope.split(':', 2)
+        if len(parts) != 3 or parts[1] not in project_ids or parts[2] not in agent_ids:
+            reasons.append('invalid_private_scope')
+    else:
+        reasons.append('invalid_scope')
+    return reasons
+
+
+def _tombstone_scope_violations(conn):
+    """Validate tombstone.scope as an encoded reference (not an FK).
+
+    Both the reference shape and the fingerprint are checked so a typo can
+    never silently disable a refusal guard.
+    """
+    project_ids = {row[0] for row in conn.execute('SELECT id FROM project')}
+    agent_ids = {row[0] for row in conn.execute('SELECT id FROM agent')}
+    violations = []
+    for tomb_id, claim_fp, scope in conn.execute(
+        'SELECT id, claim_fingerprint, scope FROM tombstone ORDER BY id'
+    ):
+        reasons = _tombstone_scope_reasons(claim_fp, scope, project_ids, agent_ids)
+        if reasons:
+            violations.append((tomb_id, scope, reasons))
+    return violations
+
+
+def inspect_governance_health(conn) -> dict:
+    """Governance-layer health report for one open store (doctor's deep seam).
+
+    Claim fingerprints, refusal guards, memberships and identity collisions —
+    everything that depends on domain rules rather than SQLite structure.
+    Storage/file concerns live in ``store.inspect_storage_health``. Read-only;
+    never mutates; the CLI adapter decides which findings gate the exit.
+    """
+    report = {}
+    report['memory_fingerprint_violations'] = []
+    for memory_id, claim_fp, content in conn.execute(
+        'SELECT m.id, m.claim_fingerprint, v.content FROM memory m '
+        'JOIN memory_version v ON v.id=m.current_version_id AND v.memory_id=m.id '
+        'ORDER BY m.id'
+    ):
+        expected_fp = fingerprint(content)
+        if claim_fp != expected_fp:
+            report['memory_fingerprint_violations'].append(
+                (memory_id, claim_fp, expected_fp)
+            )
+    report['tombstones'] = {
+        'active': conn.execute(
+            'SELECT COUNT(*) FROM tombstone WHERE overridden_by IS NULL'
+        ).fetchone()[0],
+        'overridden': conn.execute(
+            'SELECT COUNT(*) FROM tombstone WHERE overridden_by IS NOT NULL'
+        ).fetchone()[0],
+    }
+    report['unguarded_rejected_memories'] = []
+    rejected_rows = conn.execute(
+        'SELECT m.id, m.project_id, m.scope, m.owner_agent_id, v.content '
+        'FROM memory m JOIN memory_version v ON v.id=m.current_version_id '
+        "WHERE m.lifecycle='rejected' ORDER BY m.id"
+    ).fetchall()
+    for memory_id, project_id, scope, owner_agent_id, content in rejected_rows:
+        if _tombstone_active(
+            conn, fingerprint(content), project_id,
+            scope=scope, agent_id=owner_agent_id
+        ) is None:
+            report['unguarded_rejected_memories'].append(memory_id)
+    report['tombstone_violations'] = _tombstone_scope_violations(conn)
+    report['memberships'] = conn.execute(
+        'SELECT p.name, a.name, pm.role FROM project_membership pm '
+        'JOIN project p ON p.id = pm.project_id '
+        'JOIN agent a ON a.id = pm.agent_id ORDER BY p.name, a.name'
+    ).fetchall()
+    report['agent_name_collisions'] = conn.execute(
+        'SELECT p.name, a.name, COUNT(*) FROM project_membership pm '
+        'JOIN project p ON p.id=pm.project_id '
+        'JOIN agent a ON a.id=pm.agent_id '
+        'GROUP BY pm.project_id, a.name HAVING COUNT(*) > 1 '
+        'ORDER BY p.name, a.name'
+    ).fetchall()
+    report['project_name_collisions'] = conn.execute(
+        'SELECT name, COUNT(*), GROUP_CONCAT(id, ",") FROM project '
+        'GROUP BY name HAVING COUNT(*) > 1 ORDER BY name'
+    ).fetchall()
+    report['corroboration'] = store.corroboration_funnel(
+        conn, accept_n=CORROBORATE_ACCEPT_N, golden_n=GOLDEN_N)
+    return report
 
 
 def stats(conn):
@@ -2830,6 +2948,19 @@ def stats(conn):
     }
 
 
+def _valid_evidence_entry(ev):
+    """True when one evidence dict has a known kind and string-ish fields."""
+    kind = ev.get('kind')
+    if kind is not None and kind not in ('file', 'commit', 'test', 'observation',
+                                         'user_input', 'external', 'source'):
+        return False
+    for field in ('source_uri', 'source_label'):
+        value = ev.get(field)
+        if value is not None and not isinstance(value, str):
+            return False
+    return True
+
+
 def _import_item_summary(item):
     """Validate one import item without mutating the store."""
     if not isinstance(item, dict):
@@ -2838,17 +2969,12 @@ def _import_item_summary(item):
     if not isinstance(summary, str) or not summary.strip():
         return None, 'empty_summary'
     evidence = item.get('evidence') or []
-    if not isinstance(evidence, list) or any(not isinstance(ev, dict) for ev in evidence):
+    if not isinstance(evidence, list) or any(
+            not isinstance(ev, dict) for ev in evidence):
         return None, 'invalid_evidence'
     for ev in evidence:
-        kind = ev.get('kind')
-        if kind is not None and kind not in ('file', 'commit', 'test', 'observation',
-                                             'user_input', 'external', 'source'):
+        if not _valid_evidence_entry(ev):
             return None, 'invalid_evidence'
-        for field in ('source_uri', 'source_label'):
-            value = ev.get(field)
-            if value is not None and not isinstance(value, str):
-                return None, 'invalid_evidence'
     return summary, None
 
 
@@ -2902,6 +3028,25 @@ def _import_idempotency_key(project_id, claim_fp, scope='project', agent_id=None
     raise MemCoreError(f'invalid scope: {scope}')
 
 
+def _classify_import_item(conn, item, project_id, scope, agent_id, seen):
+    """Classify one import item read-only: (fingerprint, reason_or_None)."""
+    summary, reason = _import_item_summary(item)
+    fp = fingerprint(summary) if summary is not None else None
+    if reason is None and fp in seen:
+        reason = 'duplicate_input'
+    if reason is None:
+        ikey = _import_idempotency_key(
+            project_id, fp, scope=scope, agent_id=agent_id
+        )
+        if conn.execute('SELECT 1 FROM idempotency_key WHERE key=?', (ikey,)).fetchone():
+            reason = 'already_imported'
+        elif _tombstone_active(conn, fp, project_id, scope=scope, agent_id=agent_id):
+            reason = 'tombstone_blocked'
+        elif _claim_already_present(conn, project_id, fp, scope=scope, agent_id=agent_id):
+            reason = 'already_present'
+    return fp, reason
+
+
 def plan_import(conn, items, project_id, scope='project', agent_id=None):
     """Read-only import preview: classify every item and perform zero writes."""
     if scope not in ('project', 'private'):
@@ -2912,24 +3057,8 @@ def plan_import(conn, items, project_id, scope='project', agent_id=None):
             'reasons': {}, 'items': []}
     seen = set()
     for index, item in enumerate(items):
-        summary, reason = _import_item_summary(item)
-        fp = fingerprint(summary) if summary is not None else None
-        if reason is None and fp in seen:
-            reason = 'duplicate_input'
-        if reason is None:
-            ikey = _import_idempotency_key(
-                project_id, fp, scope=scope, agent_id=agent_id
-            )
-            if conn.execute('SELECT 1 FROM idempotency_key WHERE key=?', (ikey,)).fetchone():
-                reason = 'already_imported'
-            elif _tombstone_active(
-                conn, fp, project_id, scope=scope, agent_id=agent_id
-            ):
-                reason = 'tombstone_blocked'
-            elif _claim_already_present(
-                conn, project_id, fp, scope=scope, agent_id=agent_id
-            ):
-                reason = 'already_present'
+        fp, reason = _classify_import_item(
+            conn, item, project_id, scope, agent_id, seen)
         if reason is None:
             seen.add(fp)
             plan['would_add'] += 1
@@ -2943,6 +3072,68 @@ def plan_import(conn, items, project_id, scope='project', agent_id=None):
         plan['items'].append({'index': index, 'status': status,
                               'fingerprint': fp})
     return plan
+
+
+class _SkipImport(Exception):
+    """Internal: one import item is ineligible; the batch continues."""
+
+    def __init__(self, fp=None):
+        super().__init__(fp or '')
+        self.fingerprint = fp
+
+
+def _insert_import_evidence(conn, version_id, ev):
+    """Insert one evidence row plus its support link for an imported version."""
+    raw_kind = ev.get('kind')
+    kind = 'external' if raw_kind in (None, 'source') else raw_kind
+    metadata = {'original_kind': raw_kind} if raw_kind == 'source' else {}
+    ev_id = _new_id('ev')
+    conn.execute(
+        'INSERT INTO evidence (id, kind, source_uri, source_label, metadata, captured_at) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        (ev_id, kind, ev.get('source_uri'), ev.get('source_label'),
+         json.dumps(metadata), _now())
+    )
+    conn.execute(
+        'INSERT INTO evidence_link (evidence_id, memory_version_id, relation, created_at) '
+        "VALUES (?, ?, 'supports', ?)",
+        (ev_id, version_id, _now())
+    )
+
+
+def _import_one_item(conn, item, summary, fp, project_id, agent_id, scope):
+    """Create one imported memory + its evidence inside the caller's savepoint.
+
+    Returns (memory_id, version_id); raises _SkipImport for ineligible items
+    (already imported / tombstone-blocked / claim already present) and lets
+    real write errors propagate for the caller's atomicity decision.
+    """
+    ikey = _import_idempotency_key(
+        project_id, fp, scope=scope, agent_id=agent_id
+    )
+    already = conn.execute(
+        'SELECT 1 FROM idempotency_key WHERE key = ?', (ikey,)
+    ).fetchone()
+    if already:
+        raise _SkipImport(fp)
+    if _tombstone_active(
+        conn, fp, project_id, scope=scope, agent_id=agent_id
+    ):
+        raise _SkipImport(fp)
+    if _claim_already_present(
+        conn, project_id, fp, scope=scope, agent_id=agent_id
+    ):
+        raise _SkipImport(fp)
+    mem_id, ver_id = create_memory(
+        conn, project_id, agent_id,
+        summary, scope=scope,
+        memory_type=item.get('type') or 'fact',
+        idempotency_key=ikey,
+        _manage_transaction=False,
+    )
+    for ev in item.get('evidence') or []:
+        _insert_import_evidence(conn, ver_id, ev)
+    return mem_id, ver_id
 
 
 def import_memories(conn, items, project_id, agent_id, scope='project',
@@ -2960,8 +3151,7 @@ def import_memories(conn, items, project_id, agent_id, scope='project',
     added, skipped, created = 0, 0, []
     seen = set()
     in_batch = 0
-    conn.execute('BEGIN IMMEDIATE')
-    try:
+    with store.write_tx(conn):
         for item in items:
             summary, invalid_reason = _import_item_summary(item)
             if invalid_reason is not None:
@@ -2971,88 +3161,24 @@ def import_memories(conn, items, project_id, agent_id, scope='project',
             if fp in seen:
                 skipped += 1
                 continue
-            ikey = _import_idempotency_key(
-                project_id, fp, scope=scope, agent_id=agent_id
-            )
-            conn.execute('SAVEPOINT item_sp')
             try:
-                already = conn.execute(
-                    'SELECT 1 FROM idempotency_key WHERE key = ?', (ikey,)
-                ).fetchone()
-                if already:
-                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
-                    conn.execute('RELEASE SAVEPOINT item_sp')
-                    seen.add(fp)
-                    skipped += 1
-                    continue
-                if _tombstone_active(
-                    conn, fp, project_id, scope=scope, agent_id=agent_id
-                ):
-                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
-                    conn.execute('RELEASE SAVEPOINT item_sp')
-                    seen.add(fp)
-                    skipped += 1
-                    continue
-                if _claim_already_present(
-                    conn, project_id, fp, scope=scope, agent_id=agent_id
-                ):
-                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
-                    conn.execute('RELEASE SAVEPOINT item_sp')
-                    seen.add(fp)
-                    skipped += 1
-                    continue
-                mem_id, ver_id = create_memory(
-                    conn, project_id, agent_id,
-                    summary, scope=scope,
-                    memory_type=item.get('type') or 'fact',
-                    idempotency_key=ikey,
-                    _manage_transaction=False,
-                )
-                for ev in item.get('evidence') or []:
-                    raw_kind = ev.get('kind')
-                    kind = 'external' if raw_kind in (None, 'source') else raw_kind
-                    metadata = {'original_kind': raw_kind} if raw_kind == 'source' else {}
-                    ev_id = _new_id('ev')
-                    conn.execute(
-                        'INSERT INTO evidence (id, kind, source_uri, source_label, metadata, captured_at) '
-                        'VALUES (?, ?, ?, ?, ?, ?)',
-                        (ev_id, kind, ev.get('source_uri'), ev.get('source_label'),
-                         json.dumps(metadata), _now())
-                    )
-                    conn.execute(
-                        'INSERT INTO evidence_link (evidence_id, memory_version_id, relation, created_at) '
-                        "VALUES (?, ?, 'supports', ?)",
-                        (ev_id, ver_id, _now())
-                    )
-                conn.execute('RELEASE SAVEPOINT item_sp')
-                seen.add(fp)
-                added += 1
-                created.append((mem_id, ver_id))
-                in_batch += 1
-                if batch_size and in_batch >= batch_size:
-                    conn.execute('COMMIT')
-                    conn.execute('BEGIN IMMEDIATE')
-                    in_batch = 0
-            except (TombstoneBlocked, PermissionDenied, MemCoreError):
-                try:
-                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
-                    conn.execute('RELEASE SAVEPOINT item_sp')
-                except sqlite3.OperationalError:
-                    pass
+                with store._savepoint(conn, 'item_sp'):
+                    mem_id, ver_id = _import_one_item(
+                        conn, item, summary, fp, project_id, agent_id, scope)
+            except _SkipImport as skip:
+                if skip.fingerprint:
+                    seen.add(skip.fingerprint)
                 skipped += 1
                 continue
-            except Exception:
-                try:
-                    conn.execute('ROLLBACK TO SAVEPOINT item_sp')
-                    conn.execute('RELEASE SAVEPOINT item_sp')
-                except sqlite3.OperationalError:
-                    pass
-                raise
-        conn.execute('COMMIT')
-    except Exception:
-        try:
-            conn.execute('ROLLBACK')
-        except sqlite3.OperationalError:
-            pass
-        raise
+            except (TombstoneBlocked, PermissionDenied, MemCoreError):
+                skipped += 1
+                continue
+            seen.add(fp)
+            added += 1
+            created.append((mem_id, ver_id))
+            in_batch += 1
+            if batch_size and in_batch >= batch_size:
+                conn.execute('COMMIT')
+                conn.execute('BEGIN IMMEDIATE')
+                in_batch = 0
     return {'added': added, 'skipped': skipped, 'created': created}

@@ -40,6 +40,15 @@ Token-efficient recall, write-lane secret scrubbing, in-process C-level vector m
 - `store.pack_vector` / `store.unpack_vector` are direct aliases of the embedding seam.
 - `BASELINE_{latency,token,resource,error}.md` refreshed to the post-sweep
   2026-10-16 measurements.
+- Phase 3 deep-module refactor: `store.write_tx()` transaction context manager
+  replaces the hand-rolled BEGIN/COMMIT/ROLLBACK blocks across write lanes;
+  `core.search`/`create_memory` and the ingest/semantic monoliths are split
+  behind deep seams; `store._apply_migration` uses declarative hook tables;
+  CLI dry-run lanes share the same scan implementation as `--apply`.
+- Recall classification quality (owner-approved tuning): phrase-negation
+  demotion signal + all-demoted window collapse + fuse-then-demote-then-slice
+  ordering — recall p@3 now 1.00 on every tier (was overall 0.86 / negation
+  0.40); floors pinned by `test_phase3_demotion_floors`.
 
 ### Fixed
 - H1: embedding I/O (network/ONNX) no longer runs inside `BEGIN IMMEDIATE`

@@ -185,6 +185,76 @@ class TestNumericNegationOrdering(AutonomyBase):
                             query, limit=3), list)
 
 
+class TestPhase3DemotionSignals(unittest.TestCase):
+    """Phase-3 demotion: phrase-negation signal and all-demoted windows.
+
+    Demotion gained a third surface signal: an affirmative query naming a
+    contiguous phrase ("A B") must not lead with a fact that negates that
+    same phrase ("A B does not ..."). And a window whose every row
+    contradicts the query collapses to [] instead of presenting a
+    contradiction as the answer. These are the behaviors that raised
+    negation p@3 from 0.40 to 1.00 (overall 0.86 -> 1.00); the recall
+    baseline pins the aggregate floors.
+    """
+
+    NEGATED = ('mem-neg',
+               'HERMES_PROFILE env does not switch profiles; '
+               'use hermes profile use NAME')
+    OTHER = ('mem-other',
+             'Direct Discord REST: token = DISCORD_BOT_TOKEN from the '
+             'Hermes .env file')
+
+    @staticmethod
+    def _row(mid_content):
+        mid, content = mid_content
+        return (mid, 'project', 'accepted', 'source_backed', 'current', content)
+
+    def test_negated_phrase_is_demoted_below_other_rows(self):
+        rows = [self._row(self.NEGATED), self._row(self.OTHER)]
+        out = core._demote_numeric_mismatch(
+            'ใช้ HERMES_PROFILE env เพื่อสลับ profile', rows)
+        self.assertEqual([r[0] for r in out], ['mem-other', 'mem-neg'])
+
+    def test_plain_query_does_not_demote_its_own_answer(self):
+        # "profile switch command" matches the fact's topic without naming
+        # a phrase the fact negates; the fact keeps its rank.
+        rows = [self._row(self.NEGATED), self._row(self.OTHER)]
+        out = core._demote_numeric_mismatch('profile switch command', rows)
+        self.assertEqual([r[0] for r in out], ['mem-neg', 'mem-other'])
+
+    def test_all_demoted_window_collapses_to_empty(self):
+        wrong = self._row(('mem-wrong',
+                           '9router local proxy answers at '
+                           'localhost:20128/v1 (provider custom Local)'))
+        self.assertEqual(
+            core._demote_numeric_mismatch('9router ใช้พอร์ต 8080', [wrong]),
+            [])
+
+    def test_all_demoted_window_with_two_rows_collapses_too(self):
+        rows = [self._row(('mem-a', 'gateway port 9090 only')),
+                self._row(('mem-b', 'gateway port 7070 only'))]
+        self.assertEqual(
+            core._demote_numeric_mismatch('gateway port 8080', rows), [])
+
+    def test_demoted_rows_still_fill_window_behind_compatible(self):
+        stale = self._row(('mem-20128', '9router gateway runs on port 20128'))
+        right = self._row(('mem-8080', '9router gateway runs on port 8080'))
+        out = core._demote_numeric_mismatch(
+            '9router gateway port 8080', [stale, right])
+        self.assertEqual([r[0] for r in out], ['mem-8080', 'mem-20128'])
+
+    def test_single_non_contradicting_row_passes_through(self):
+        row = self._row(self.NEGATED)
+        out = core._demote_numeric_mismatch('profile switch command', [row])
+        self.assertEqual([r[0] for r in out], ['mem-neg'])
+
+    def test_pre_screen_is_case_insensitive_and_conservative(self):
+        from memcore import contradiction as cd
+        self.assertTrue(cd._row_may_contradict('Uses Not-gated path', False, True))
+        self.assertFalse(cd._row_may_contradict('plain content', False, True))
+        self.assertFalse(cd._row_may_contradict('plain content', False, False))
+
+
 class TestDistinctClaimWindow(AutonomyBase):
     """The result window must carry distinct claims, not copies of one fact.
 

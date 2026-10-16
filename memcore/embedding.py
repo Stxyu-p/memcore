@@ -119,13 +119,23 @@ def is_circuit_open() -> bool:
 
 def pack_vector(floats: list[float]) -> bytes:
     """Pack a list of float numbers into an IEEE 754 float32 little-endian binary BLOB."""
+    if not floats:
+        return b''
     return struct.pack(f'<{len(floats)}f', *floats)
 
 
 def unpack_vector(blob: bytes) -> list[float]:
-    """Unpack an IEEE 754 float32 little-endian binary BLOB into a list of floats."""
+    """Unpack an IEEE 754 float32 little-endian binary BLOB into a list of floats.
+
+    Returns [] on None, non-bytes, or truncated/corrupted buffer.
+    """
+    if not isinstance(blob, (bytes, bytearray, memoryview)) or len(blob) < 4:
+        return []
     count = len(blob) // 4
-    return list(struct.unpack(f'<{count}f', blob))
+    try:
+        return list(struct.unpack(f'<{count}f', blob[:count * 4]))
+    except struct.error:
+        return []
 
 
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
@@ -136,14 +146,20 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     """
     if not vec_a or not vec_b or len(vec_a) != len(vec_b):
         return 0.0
-    arr_a = array.array('f', vec_a)
-    arr_b = array.array('f', vec_b)
+    try:
+        arr_a = array.array('f', vec_a)
+        arr_b = array.array('f', vec_b)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
     dot = sum(map(operator.mul, arr_a, arr_b))
     norm_a = sum(map(operator.mul, arr_a, arr_a))
     norm_b = sum(map(operator.mul, arr_b, arr_b))
     if norm_a <= 0.0 or norm_b <= 0.0:
         return 0.0
-    return dot / math.sqrt(norm_a * norm_b)
+    sim = dot / math.sqrt(norm_a * norm_b)
+    if math.isnan(sim) or math.isinf(sim):
+        return 0.0
+    return max(-1.0, min(1.0, sim))
 
 
 def reset_circuit_breaker() -> None:

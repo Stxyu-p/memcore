@@ -45,6 +45,32 @@ class VectorMathAndLaneTests(unittest.TestCase):
         self.assertAlmostEqual(core.cosine_similarity(v1, v4), -1.0)
         # Zero vector handling
         self.assertEqual(core.cosine_similarity([0.0, 0.0], [1.0, 1.0]), 0.0)
+        # Hostile / malformed inputs must return 0.0 without raising
+        self.assertEqual(core.cosine_similarity([], [1.0]), 0.0)
+        self.assertEqual(core.cosine_similarity(None, [1.0]), 0.0)
+        self.assertEqual(core.cosine_similarity([1.0], None), 0.0)
+        self.assertEqual(core.cosine_similarity([1.0, 2.0], [1.0]), 0.0)
+        self.assertEqual(core.cosine_similarity(['a', None], [1.0, 2.0]), 0.0)
+        self.assertEqual(core.cosine_similarity([float('nan')], [float('nan')]), 0.0)
+        self.assertEqual(core.cosine_similarity([float('inf')], [1.0]), 0.0)
+
+    def test_pack_and_unpack_vector_torture(self):
+        from memcore import embedding
+        # Normal round-trip
+        vec = [1.5, -2.25, 0.0]
+        blob = embedding.pack_vector(vec)
+        self.assertEqual(embedding.unpack_vector(blob), vec)
+
+        # Hostile unpack
+        self.assertEqual(embedding.unpack_vector(b''), [])
+        self.assertEqual(embedding.unpack_vector(None), [])
+        self.assertEqual(embedding.unpack_vector(123), [])
+        self.assertEqual(embedding.unpack_vector(b'123'), [])  # under 4 bytes
+        self.assertEqual(embedding.unpack_vector(b'12345'), [float(embedding.unpack_vector(b'1234')[0])])  # odd length sliced safely
+
+        # Hostile pack
+        self.assertEqual(embedding.pack_vector([]), b'')
+        self.assertEqual(embedding.pack_vector(None), b'')
 
     def test_vector_search_lane_returns_ordered_candidates(self):
         # Create 3 memories

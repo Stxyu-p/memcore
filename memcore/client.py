@@ -33,8 +33,8 @@ class MemCore:
         auto_provision: bool = True,
     ):
         self.db_path = db_path or DEFAULT_DB
-        self.project = project
-        self.agent = agent
+        self.project = project if isinstance(project, str) and project.strip() else "default"
+        self.agent = agent if isinstance(agent, str) and agent.strip() else "default"
         self.provider = provider
         self.endpoint = endpoint
         self.model = model
@@ -75,6 +75,10 @@ class MemCore:
             )
             self.conn.commit()
 
+    def _check_open(self) -> None:
+        if self.conn is None:
+            raise core.MemCoreError("client connection is closed")
+
     def remember(
         self,
         content: str,
@@ -85,6 +89,7 @@ class MemCore:
         source_hash: str | None = None,
     ) -> str:
         """Store a governed memory, optionally tied to a source file's SHA-256."""
+        self._check_open()
         mid, _ = core.create_memory(
             self.conn,
             self.project,
@@ -105,6 +110,7 @@ class MemCore:
         query_vec: list[float] | None = None,
     ) -> list[dict[str, Any]]:
         """Hybrid search memories with governance checks and RRF ranking."""
+        self._check_open()
         if query_vec is None:
             query_vec = embedding.get_embedding(
                 query,
@@ -146,6 +152,7 @@ class MemCore:
         source_hash: str | None = None,
     ) -> str:
         """Update a memory with bitemporal history and optional source provenance."""
+        self._check_open()
         return core.supersede(
             self.conn,
             memory_id,
@@ -159,6 +166,7 @@ class MemCore:
 
     def reject(self, memory_id: str, reason: str = "rejected") -> None:
         """Reject and tombstone a memory."""
+        self._check_open()
         core.reject(
             self.conn,
             memory_id,

@@ -75,6 +75,25 @@ class ClientSdkTests(unittest.TestCase):
                 'commit-two', str(source.resolve())
             ))
 
+    def test_closed_client_raises_typed_error(self):
+        from memcore.core import MemCoreError
+        mc = MemCore(db_path=self.db_path)
+        mc.close()
+        with self.assertRaises(MemCoreError):
+            mc.remember("foo")
+        with self.assertRaises(MemCoreError):
+            mc.search("foo")
+        with self.assertRaises(MemCoreError):
+            mc.supersede("mem-1", "bar")
+        with self.assertRaises(MemCoreError):
+            mc.reject("mem-1")
+
+    def test_client_hostile_project_agent_defaults(self):
+        for bad in (None, "", "   ", 123):
+            with MemCore(db_path=self.db_path, project=bad, agent=bad) as mc:
+                self.assertEqual(mc.project, "default")
+                self.assertEqual(mc.agent, "default")
+
 
 if __name__ == "__main__":
     unittest.main()

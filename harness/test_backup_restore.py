@@ -975,3 +975,25 @@ class TestCorroborationFunnel(unittest.TestCase):
             'SECRETCANARY funnel content probe', scope='private',
         )
         self.assertNotIn('SECRETCANARY', str(store.corroboration_funnel(self.conn)))
+
+
+class TestHostileBackupArgs(BackupBase):
+    """Wave-1: hostile keep/age/count values must never crash the backup API."""
+
+    def test_hostile_keep_values_do_not_crash_or_prune(self):
+        store.backup_store(self.db_path, keep='x')
+        store.backup_store(self.db_path, keep=None)
+        backup_dir = pathlib.Path(self.db_path).parent / store.BACKUP_DIRNAME
+        snapshots = store._managed_snapshots(
+            backup_dir, pathlib.Path(self.db_path).stem)
+        self.assertGreaterEqual(len(snapshots), 1)
+
+    def test_verify_backups_tolerates_hostile_age_and_count(self):
+        store.backup_store(self.db_path)
+        report = store.verify_backups(self.db_path, max_age_days=None)
+        self.assertTrue(report['recovery_ready'])
+        report = store.verify_backups(self.db_path, max_age_days='x')
+        self.assertTrue(report['recovery_ready'])
+        report = store.verify_backups(self.db_path, max_age_days=7, min_count='x')
+        self.assertIsInstance(report, dict)
+        self.assertIn('recovery_ready', report)

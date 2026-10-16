@@ -238,5 +238,94 @@ class TestConcurrencyAsyncTorture(SadistTestBase):
         self.assertEqual(integrity, [('ok',)])
 
 
+class TestSeamHardeningWave1(SadistTestBase):
+    """Wave-1 hardening: hostile types at public seams raise typed errors.
+
+    Every case below reproduced an unhandled crash (ProgrammingError,
+    IntegrityError, OverflowError, TypeError) or a silent skip; these tests
+    pin the graceful contract after the root-cause fix.
+    """
+
+    def test_create_memory_rejects_non_string_memory_type(self):
+        for bad in (None, [], {}, 1.5, True):
+            with self.assertRaises(MemCoreError):
+                core.create_memory(
+                    self.conn, self.project, self.alice,
+                    f'memory_type probe {bad!r}', memory_type=bad)
+        self.assertEqual(
+            self.conn.execute('SELECT count(*) FROM memory').fetchone()[0], 0)
+
+    def test_search_and_recall_infinite_limit_is_typed_error(self):
+        for lim in (float('inf'), float('-inf')):
+            with self.assertRaises(MemCoreError):
+                core.search(self.conn, self.project, self.alice, 'x', limit=lim)
+            with self.assertRaises(MemCoreError):
+                core.recall(self.conn, self.project, self.alice, 'x', limit=lim)
+
+    def test_plan_import_and_import_reject_non_list_items(self):
+        for bad in (None, 'x', 123, {'a': 1}):
+            with self.assertRaises(MemCoreError):
+                core.plan_import(self.conn, bad, self.project)
+            with self.assertRaises(MemCoreError):
+                core.import_memories(self.conn, bad, self.project, self.alice)
+
+    def test_import_memories_private_scope_requires_agent(self):
+        with self.assertRaises(MemCoreError):
+            core.import_memories(
+                self.conn, [{'summary': 'needs agent'}], self.project,
+                None, scope='private')
+
+    def test_import_normalizes_non_string_item_type(self):
+        result = core.import_memories(
+            self.conn, [{'summary': 'type normalization probe', 'type': 123}],
+            self.project, self.alice)
+        self.assertEqual(result['added'], 1)
+        stored = self.conn.execute(
+            'SELECT type FROM memory WHERE id=?', (result['created'][0][0],)
+        ).fetchone()[0]
+        self.assertEqual(stored, 'fact')
+
+    def test_record_recall_non_iterable_returns_zero(self):
+        self.assertEqual(core.record_recall(self.conn, 123), 0)
+        self.assertEqual(core.record_recall(self.conn, 0.5), 0)
+
+    def test_export_render_malformed_rows_raise_typed_error(self):
+        from memcore import export as export_mod
+        for rows in ([None], [{}], [123], ['x'], {'k': 'v'}, 123):
+            with self.assertRaises(MemCoreError):
+                export_mod.render(rows, 'title', 'proj')
+        # None and [] behave identically (the empty-store message)
+        self.assertEqual(
+            export_mod.render(None, 'title', 'proj'),
+            export_mod.render([], 'title', 'proj'))
+
+    def test_store_openers_typed_error_on_non_database_files(self):
+        junk = os.path.join(self.tmpdir, 'junk.db')
+        with open(junk, 'w', encoding='utf-8') as fh:
+            fh.write('this file is definitely not a sqlite database at all')
+        for opener in (store.open_store, store.open_store_readonly,
+                       store.open_runtime_store, store.open_runtime_store_readonly):
+            with self.assertRaises(store.StoreError):
+                opener(junk)
+        with self.assertRaises(store.StoreError):
+            store.open_store(self.tmpdir)
+
+    def test_open_store_readonly_file_needing_migration_is_typed(self):
+        # A read-only file with incomplete migrations cannot self-heal; the
+        # opener must say so with a typed error instead of leaking
+        # sqlite3.OperationalError('attempt to write a readonly database').
+        victim = os.path.join(self.tmpdir, 'ro-migrate.db')
+        conn = store.open_store(victim)
+        conn.execute('DROP TABLE schema_migrations')
+        conn.commit()
+        conn.close()
+        os.chmod(victim, 0o444)
+        try:
+            with self.assertRaises(store.StoreError):
+                store.open_store(victim)
+        finally:
+            os.chmod(victim, 0o666)
+
+
 if __name__ == '__main__':
     unittest.main()

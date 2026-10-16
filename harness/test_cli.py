@@ -713,5 +713,54 @@ class CliImportTests(unittest.TestCase):
             conn.close()
 
 
+class CliHostileArgTests(unittest.TestCase):
+    """Wave-1: hostile CLI arguments exit with `error:` — never a traceback."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='memcore_cli_hostile_')
+        self.db = os.path.join(self.tmp.name, 'memory.db')
+        conn = store.open_store(self.db)
+        conn.execute("INSERT INTO project (id, name) VALUES ('proj-demo', 'demo')")
+        conn.execute(
+            "INSERT INTO agent (id, name, profile_key) VALUES ('agent-a', 'a', 'a')")
+        conn.execute(
+            "INSERT INTO project_membership (project_id, agent_id, role) "
+            "VALUES ('proj-demo', 'agent-a', 'member')")
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _exit_message(self, argv):
+        with self.assertRaises(SystemExit) as cm:
+            cli.main(argv)
+        return str(cm.exception)
+
+    def test_search_negative_limit_is_clean_error(self):
+        msg = self._exit_message([
+            '--db', self.db, 'search', '--project', 'demo',
+            '--agent', 'a', 'x', '--limit', '-1'])
+        self.assertIn('error: search limit must be >= 1', msg)
+
+    def test_decay_invalid_days_is_clean_error(self):
+        msg = self._exit_message([
+            '--db', self.db, 'decay', '--aging-days', '30', '--stale-days', '10'])
+        self.assertIn('error: stale_days must be >= aging_days', msg)
+
+    def test_journal_sweep_invalid_defers_is_clean_error(self):
+        msg = self._exit_message([
+            '--db', self.db, 'journal-sweep', '--max-defers', '0'])
+        self.assertIn('error: max_defers must be an integer >= 1', msg)
+
+    def test_stats_zero_filled_store_is_clean_error(self):
+        zero = os.path.join(self.tmp.name, 'zeros.db')
+        with open(zero, 'wb') as fh:
+            fh.write(b'\x00' * 16384)
+        msg = self._exit_message(['--db', zero, 'stats'])
+        self.assertIn('error:', msg)
+        self.assertNotIn('Traceback', msg)
+
+
 if __name__ == '__main__':
     unittest.main()

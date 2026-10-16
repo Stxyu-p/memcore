@@ -877,5 +877,64 @@ class TestStabilizationAdditions(unittest.TestCase):
             tmp.cleanup()
 
 
+class TestRecallBlockHostileInputs(unittest.TestCase):
+    """Wave-1: malformed rows / counters must degrade, not crash the builder."""
+
+    @staticmethod
+    def row(i, content, scope='project'):
+        return (f'mem-{i}', scope, 'accepted', 'source_backed', 'current', content)
+
+    def test_hostile_budget_and_max_items_fall_back_to_defaults(self):
+        rows = [self.row(1, 'surviving fact one')]
+        for budget in (None, 'abc', float('inf'), float('nan')):
+            block = plugin.build_recall_block([], rows, budget_chars=budget)
+            self.assertIn('surviving fact one', block, budget)
+        for items in (None, 'x', float('inf')):
+            block = plugin.build_recall_block([], rows, max_items=items)
+            self.assertIn('surviving fact one', block, items)
+
+    def test_malformed_rows_are_skipped_without_crashing(self):
+        rows = [self.row(1, 'valid fact alpha'), None, 123, {'a': 1}, 'stringy']
+        block = plugin.build_recall_block([], rows)
+        self.assertIn('valid fact alpha', block)
+        self.assertNotIn('stringy', block)
+        self.assertEqual(plugin.build_recall_block([None, 123], None), '')
+        self.assertEqual(plugin.build_recall_block(123, None), '')
+
+
+class TestToolHostilePayloads(ToolTestBase):
+    """Wave-1: hostile tool payloads return error JSON — never raise."""
+
+    TOOLS = ('memory_remember', 'memory_search', 'memory_promote',
+             'memory_supersede', 'memory_reject', 'memory_feedback')
+
+    @staticmethod
+    def handler(name):
+        for item in plugin.TOOL_SCHEMAS:
+            if item['name'] == name:
+                return item['handler']
+        raise AssertionError(f'no handler for {name}')
+
+    def test_non_mapping_args_return_error_json(self):
+        for name in self.TOOLS:
+            handler = self.handler(name)
+            for bad in (None, [1, 2], 'x', 123):
+                out = json.loads(handler(bad, self.ctx('sora')))
+                self.assertFalse(out['success'], (name, bad))
+
+    def test_wrong_typed_string_args_return_error_json(self):
+        cases = {
+            'memory_remember': {'content': 123},
+            'memory_search': {'query': 123},
+            'memory_promote': {'memory_id': 123},
+            'memory_supersede': {'memory_id': 123, 'new_content': 'x'},
+            'memory_reject': {'memory_id': 123},
+            'memory_feedback': {'memory_id': 123, 'outcome': 'accepted'},
+        }
+        for name, args in cases.items():
+            out = json.loads(self.handler(name)(args, self.ctx('sora')))
+            self.assertFalse(out['success'], (name, args))
+
+
 if __name__ == '__main__':
     unittest.main()

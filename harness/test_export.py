@@ -392,5 +392,18 @@ class ExportSafetyTests(ExportBase):
             [r[0] for r in exported], [r[0] for r in recalled],
             'export and recall must agree on order')
 
+    def test_export_hostile_limit_and_dir_target(self):
+        from memcore.core import MemCoreError
+        # Hostile limit
+        for bad in (0, -1, 'bad', float('inf'), None):
+            with self.assertRaises(MemCoreError):
+                export_mod.rank_for_export(self.conn, 'proj-e', 'agent-mika', bad)
+
+        # Directory export target raises typed MemCoreError
+        with self.assertRaises(MemCoreError):
+            export_mod.export(
+                self.conn, 'proj-e', 'agent-mika', out_path=self.tmpdir, write=True
+            )
+
 if __name__ == '__main__':
     unittest.main()

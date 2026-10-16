@@ -25,6 +25,10 @@ import pathlib
 
 from . import core
 
+
+class ExportTargetError(core.MemCoreError, ValueError):
+    """Raised when an export target is invalid (e.g. directory target)."""
+
 #: One primary output path per agent alias. Most listed agents read AGENTS.md;
 #: vendor-specific files are kept where they are the native convention.
 #:
@@ -95,6 +99,12 @@ def rank_for_export(conn, project_id, agent_id, limit, include_private=False):
     keeps a single ranking definition — an export that ranked differently from
     recall would be worse than useless.
     """
+    try:
+        limit = int(limit)
+        if limit < 1:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise core.MemCoreError('export limit must be an integer >= 1')
     # Same gate every other read path has: a non-member agent must not read the
     # project at all, however the caller spelled the agent id.
     if core._membership_role(conn, project_id, agent_id) is None:
@@ -233,7 +243,7 @@ def export(conn, project_id, agent_id, out_path=None, limit=40,
                   'wrote': False}
         if write:
             if path.is_dir():
-                raise ValueError('export target is a directory: %s' % path)
+                raise ExportTargetError('export target is a directory: %s' % path)
             previous = path.read_text(encoding='utf-8') if path.is_file() else None
             # Only rewrite when the content actually changes, so agents (and git)
             # do not see a modified timestamp on every invocation.

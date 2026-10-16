@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memcore"
-version = "0.8.8"
+version = "1.0.0"
 description = "Governed, bitemporal, local-first memory engine for autonomous AI agent fleets"
 readme = "README.md"
 authors = [
@@ -15,7 +15,7 @@ requires-python = ">=3.10"
 dependencies = []
 keywords = ["memory", "ai-agents", "autonomous-agents", "sqlite", "hybrid-search", "bitemporal"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

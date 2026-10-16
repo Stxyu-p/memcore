@@ -4,7 +4,7 @@ All writes: tombstone admission guard -> short transaction -> audit event.
 All reads: scope enforced in SQL WHERE (never post-filtering).
 """
 
-__version__ = "0.8.8"
+__version__ = "1.0.0"
 import array
 import hashlib
 import json

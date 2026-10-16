@@ -6,7 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Token-efficient recall, write-lane secret scrubbing, in-process C-level vector math, short-circuit search.
+## [1.0.0] - 2026-10-16
+
+First stable release. Hardening & stabilization: H1–H9 mechanical fixes, deep-module
+refactor (`store.write_tx()` transaction context manager, split search/ingest
+monoliths, declarative migration hooks), and recall classification quality raised to
+p@3 1.00 on every tier (overall / exact / paraphrase / negation; was 0.86 overall and
+0.40 negation). Includes all prior Unreleased work — token-efficient preview recall,
+write-lane secret scrubbing, C-level vector math, short-circuit search.
 
 ### Added
 - `memory_search` returns 180-char previews by default (`content_truncated`,

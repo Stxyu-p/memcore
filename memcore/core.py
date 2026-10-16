@@ -582,6 +582,8 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
 
     Returns (memory_id, version_id) or existing ids if idempotency_key replays.
     """
+    if not isinstance(memory_type, str) or not memory_type.strip():
+        raise MemCoreError('memory_type must be a non-empty string')
     prepared = _prepare_memory_write(
         content, scope, lifecycle, reason, scope_detail,
         source_file, source_commit, source_hash
@@ -2080,7 +2082,13 @@ def record_recall(conn, memory_ids) -> int:
     """
     if not memory_ids:
         return 0
-    ids = [m for m in dict.fromkeys(memory_ids) if m]
+    if isinstance(memory_ids, (str, bytes)):
+        memory_ids = [memory_ids]
+    try:
+        raw_ids = list(memory_ids)
+    except (TypeError, ValueError):
+        return 0
+    ids = [m for m in dict.fromkeys(raw_ids) if m and isinstance(m, str)]
     if not ids:
         return 0
     try:
@@ -2427,7 +2435,7 @@ def search(conn, project_id, agent_id, query, limit=20,
     """
     try:
         limit = int(limit)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise MemCoreError('search limit must be an integer')
     if limit < 1:
         raise MemCoreError('search limit must be >= 1')
@@ -3049,6 +3057,8 @@ def _classify_import_item(conn, item, project_id, scope, agent_id, seen):
 
 def plan_import(conn, items, project_id, scope='project', agent_id=None):
     """Read-only import preview: classify every item and perform zero writes."""
+    if not isinstance(items, list):
+        raise MemCoreError('items must be a list')
     if scope not in ('project', 'private'):
         raise MemCoreError(f'invalid scope: {scope}')
     if scope == 'private' and not agent_id:
@@ -3124,10 +3134,12 @@ def _import_one_item(conn, item, summary, fp, project_id, agent_id, scope):
         conn, project_id, fp, scope=scope, agent_id=agent_id
     ):
         raise _SkipImport(fp)
+    raw_type = item.get('type')
+    mem_type = raw_type.strip() if isinstance(raw_type, str) and raw_type.strip() else 'fact'
     mem_id, ver_id = create_memory(
         conn, project_id, agent_id,
         summary, scope=scope,
-        memory_type=item.get('type') or 'fact',
+        memory_type=mem_type,
         idempotency_key=ikey,
         _manage_transaction=False,
     )
@@ -3146,8 +3158,12 @@ def import_memories(conn, items, project_id, agent_id, scope='project',
     back. Re-imports are idempotent by ``import:<project>:<fingerprint>`` and exact
     claims already present in the same visibility scope are not duplicated.
     """
+    if not isinstance(items, list):
+        raise MemCoreError('items must be a list')
     if scope not in ('project', 'private'):
         raise MemCoreError(f'invalid scope: {scope}')
+    if scope == 'private' and not agent_id:
+        raise MemCoreError('agent_id is required when importing private memories')
     added, skipped, created = 0, 0, []
     seen = set()
     in_batch = 0

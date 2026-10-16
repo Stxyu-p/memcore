@@ -126,6 +126,8 @@ class HermesSemanticAnalyzer:
         self._min_remember_confidence = float(min_remember_confidence)
 
     def _bounded_payload(self, event):
+        if not isinstance(event, dict):
+            event = {}
         # Prefer user evidence. Assistant text is useful only as limited context.
         user_budget = int(self._max_input_chars * 0.75)
         assistant_budget = self._max_input_chars - user_budget

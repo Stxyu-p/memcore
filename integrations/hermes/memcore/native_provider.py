@@ -413,6 +413,8 @@ class MemCoreMemoryProvider(MemoryProvider):
         # H9: reuse the per-thread cached handle (same pool every other hook
         # uses) instead of opening and closing a fresh store connection per
         # call — no repeated file open, PRAGMAs, or migration checks.
+        if not isinstance(args, dict):
+            return json.dumps({'success': False, 'error': 'arguments must be a JSON object'}, ensure_ascii=False)
         try:
             conn = self._write_conn()
             if tool_name == 'memory_review_queue':

@@ -935,6 +935,15 @@ class TestToolHostilePayloads(ToolTestBase):
             out = json.loads(self.handler(name)(args, self.ctx('sora')))
             self.assertFalse(out['success'], (name, args))
 
+    def test_native_provider_semantic_tool_hostile_args(self):
+        from native_provider import MemCoreMemoryProvider
+        provider = MemCoreMemoryProvider()
+        for tool in ('memory_review_queue', 'memory_review_decide'):
+            for bad in (None, 'not a dict', 123, []):
+                out = json.loads(provider.handle_tool_call(tool, bad))
+                self.assertFalse(out['success'])
+                self.assertIn('error', out)
+
 
 if __name__ == '__main__':
     unittest.main()

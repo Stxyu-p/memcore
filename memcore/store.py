@@ -1003,14 +1003,15 @@ def _savepoint(conn, name: str):
     back only that item: RELEASE on success, ROLLBACK TO + RELEASE on
     error, preserving the original exception either way.
     """
-    conn.execute(f'SAVEPOINT {name}')
+    safe_name = ''.join(c for c in str(name) if c.isalnum() or c == '_') or 'sp'
+    conn.execute(f'SAVEPOINT {safe_name}')
     try:
         yield
-        conn.execute(f'RELEASE {name}')
+        conn.execute(f'RELEASE {safe_name}')
     except Exception:
         try:
-            conn.execute(f'ROLLBACK TO {name}')
-            conn.execute(f'RELEASE {name}')
+            conn.execute(f'ROLLBACK TO {safe_name}')
+            conn.execute(f'RELEASE {safe_name}')
         except sqlite3.OperationalError:
             pass
         raise

@@ -53,6 +53,8 @@ def subject_key(content, max_tokens=4):
     claims with different keys are never paired. Precision over recall:
     missing a contradiction is cheaper than a false conflict.
     """
+    if not isinstance(max_tokens, int) or max_tokens <= 0:
+        max_tokens = 4
     particles = frozenset({
         'the', 'a', 'an', 'is', 'are', 'was', 'be', 'use', 'uses', 'used',
         'using', 'do', 'does', 'did', 'ต่อไปนี้', 'สำหรับ', 'นี้',
@@ -109,7 +111,8 @@ def polarity(content):
 
 def numbers(content):
     """Normalized number set for numeric-agreement comparison."""
-    return frozenset(_NUMBER_RE.findall(str(content or '')))
+    text = str(content or '')[:10000]
+    return frozenset(_NUMBER_RE.findall(text))
 
 
 # Exclusive-choice word sets: naming one member implicitly rejects the

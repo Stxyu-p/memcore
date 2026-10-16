@@ -38,7 +38,9 @@ _CACHE: dict | None = None
 
 def _is_on(name: str) -> bool:
     value = os.environ.get(name)
-    return value == '1' or value == 'true'
+    if value is None:
+        return False
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def _parse_fake_now(value: str | None):

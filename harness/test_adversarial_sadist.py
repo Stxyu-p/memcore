@@ -372,6 +372,27 @@ class TestSeamHardeningWave2(SadistTestBase):
             with self.assertRaises(core.NotFound):
                 ingest.dismiss_unresolved_event(self.conn, bad, self.alice)
 
+    def test_store_savepoint_sanitization_and_contradiction_bounds(self):
+        from memcore import contradiction, ablation
+        # Hostile savepoint names must not crash or execute injection SQL
+        for hostile_sp in ('sp 1', 'sp; DROP TABLE memory;', "sp' OR '1'='1", ''):
+            with store._savepoint(self.conn, hostile_sp):
+                self.conn.execute("SELECT 1")
+
+        # Contradiction bounds
+        self.assertEqual(contradiction.subject_key('hello world', max_tokens=-1), 'hello world')
+        self.assertEqual(contradiction.subject_key('hello world', max_tokens='bad'), 'hello world')
+        huge_str = 'test 123 ' * 20000  # 180KB string
+        nums = contradiction.numbers(huge_str)
+        self.assertEqual(nums, frozenset({'123'}))
+
+        # Ablation truthy variants
+        os.environ['MEMCORE_ABLATE_DECAY'] = ' YES '
+        ablation._reset_ablation_cache()
+        self.assertTrue(ablation.is_decay_ablated())
+        os.environ.pop('MEMCORE_ABLATE_DECAY', None)
+        ablation._reset_ablation_cache()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -516,8 +516,16 @@ def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connecti
                 time.sleep(0.05)
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('PRAGMA synchronous = NORMAL')
-        apply_migrations(conn)
+        try:
+            apply_migrations(conn)
+        except sqlite3.OperationalError as e:
+            if 'readonly' in str(e).lower() or 'read-only' in str(e).lower():
+                raise StoreError(f'read-only store needs migration but cannot write: {e}') from e
+            raise
         return conn
+    except sqlite3.OperationalError:
+        conn.close()
+        raise
     except Exception as e:
         conn.close()
         if isinstance(e, StoreError):

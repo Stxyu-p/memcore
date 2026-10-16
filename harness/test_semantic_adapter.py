@@ -209,6 +209,21 @@ class SemanticAdapterTests(unittest.TestCase):
             'SELECT status FROM ingest_event WHERE id=?', (event_id,)
         ).fetchone()[0], 'pending')
 
+    def test_semantic_hostile_result_inputs(self):
+        from memcore.semantic import normalize_analysis_result, SemanticAnalyzerError
+        # Hostile confidence
+        for bad_conf in (float('nan'), float('inf'), float('-inf'), 'high', [0.5], True, False):
+            with self.assertRaises(SemanticAnalyzerError):
+                normalize_analysis_result({'verdict': 'ignore', 'confidence': bad_conf})
+
+        # Oversized candidate content
+        with self.assertRaises(SemanticAnalyzerError):
+            normalize_analysis_result({'verdict': 'remember', 'candidate_content': 'x' * 5000})
+
+        # Oversized rationale
+        with self.assertRaises(SemanticAnalyzerError):
+            normalize_analysis_result({'verdict': 'ignore', 'rationale': 'y' * 5000})
+
 
 if __name__ == '__main__':
     unittest.main()

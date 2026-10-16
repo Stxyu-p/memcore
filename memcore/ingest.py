@@ -51,7 +51,7 @@ def _clean_text(value):
 
 
 def _bounded_session_id(value):
-    raw = str(value or '')
+    raw = str(value or '').replace('\x00', '')
     if len(raw) <= 512:
         return raw
     suffix = '~' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
@@ -303,6 +303,8 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
     a private candidate owned by the event's agent; scope, lifecycle, tombstones,
     duplicate handling, and durable derivation remain engine-controlled.
     """
+    if not isinstance(event_id, str) or not isinstance(agent_id, str):
+        raise core.MemCoreError('event_id and agent_id must be strings')
     analyzer, verdict, candidate_content, confidence, rationale, metadata = (
         _validate_semantic_input(
             analyzer, verdict, candidate_content, confidence, rationale,
@@ -378,6 +380,8 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
 
 def semantic_analysis_history(conn, event_id, agent_id):
     """Return semantic verdict history for one event, enforcing raw-event ownership."""
+    if not isinstance(event_id, str):
+        raise core.MemCoreError(f'ingest event not found: {event_id}')
     row = conn.execute(
         'SELECT project_id, agent_id FROM ingest_event WHERE id=?', (event_id,)
     ).fetchone()
@@ -1141,6 +1145,8 @@ def _dismissable_pending_decision(decision):
 
 def dismiss_unresolved_event(conn, event_id, actor_agent_id, rationale='operator_dismissed'):
     """Dismiss an owned/operator-approved pending review event, with audit."""
+    if not isinstance(event_id, str):
+        raise core.NotFound(f'ingest event not found: {event_id}')
     with store.write_tx(conn):
         row = conn.execute(
             'SELECT project_id, agent_id, status, decision FROM ingest_event WHERE id=?',

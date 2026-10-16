@@ -360,6 +360,18 @@ class TestSeamHardeningWave2(SadistTestBase):
             with self.assertRaises(core.PermissionDenied):
                 core.mark_contradiction(self.conn, bad, mid, self.alice, 'reason')
 
+    def test_ingest_event_seam_hostile_args(self):
+        from memcore import ingest
+        for bad in ([], {}, object()):
+            with self.assertRaises(core.MemCoreError):
+                ingest.apply_semantic_analysis(
+                    self.conn, bad, self.alice, analyzer='probe', verdict='ignore'
+                )
+            with self.assertRaises(core.MemCoreError):
+                ingest.semantic_analysis_history(self.conn, bad, self.alice)
+            with self.assertRaises(core.NotFound):
+                ingest.dismiss_unresolved_event(self.conn, bad, self.alice)
+
 
 if __name__ == '__main__':
     unittest.main()

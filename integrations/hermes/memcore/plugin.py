@@ -274,12 +274,16 @@ def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8,
             if r[0] in seen_ids:
                 continue
             seen_ids.add(r[0])
-            try:
-                from memcore import core as _core
-                fp = _core.fingerprint(
-                    ' '.join(str(r[5] if len(r) > 5 else r).split()))
-            except Exception:
-                fp = None
+            # Prefer the row's stored claim fingerprint (index 8); compute the
+            # SHA-256 fallback only for short rows or legacy NULL fingerprints.
+            fp = r[8] if len(r) > 8 and r[8] else None
+            if fp is None:
+                try:
+                    from memcore import core as _core
+                    fp = _core.fingerprint(
+                        ' '.join(str(r[5] if len(r) > 5 else r).split()))
+                except Exception:
+                    fp = None
             if fp is not None:
                 if fp in seen_fps:
                     continue

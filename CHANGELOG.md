@@ -22,9 +22,30 @@ Token-efficient recall, write-lane secret scrubbing, in-process C-level vector m
 - `core.scrub_secrets()`: high-precision credential redaction (sk-/ghp_/AKIA/
   xox-/Discord/AWS-secret/PEM) on every write lane — create, supersede,
   reject, semantic candidate/rationale — plus a null-byte guard.
-- `BASELINE_{latency,token,resource,error}.md`: frozen pre-sweep measurements.
+- `BASELINE_{latency,token,resource,error}.md`: baseline documents for this cycle.
+
+### Changed
+- Vector cosine similarity is a single implementation in `embedding.cosine_similarity`
+  (C-level `array.array('f')` + `operator.mul`, doc norms included); `core.cosine_similarity`
+  aliases it and `core._vector_search_lane` uses `sum(map(mul, v_arr, v_arr))` for doc norms.
+- Retention ORDER-BY fragments for the default alias are pre-assembled at import
+  (`_RETENTION_EXPR_WITH_RECALL_M` / `_RETENTION_EXPR_NO_RECALL_M`) instead of
+  %-formatted on every search call.
+- `plugin.build_recall_block` dedupes on the row's stored `claim_fingerprint`
+  (index 8) before falling back to a content SHA-256.
+- `store.pack_vector` / `store.unpack_vector` are direct aliases of the embedding seam.
+- `BASELINE_{latency,token,resource,error}.md` refreshed to the post-sweep
+  2026-10-16 measurements.
 
 ### Removed
+- `embedding.query_vector_candidates` and its private order dicts — orphaned by the
+  C-level vector rewrite; zero references repo-wide (verified by grep + vulture).
+- Dead `JOIN memory_version cv` and the `current_content` unpack in
+  `core.create_memory`'s idempotency replay; redundant explicit `ROLLBACK`s before
+  `raise` (the shared except handler owns rollback); a no-op `_ablation.fake_now()`
+  call in `core.search`; duplicated inner imports in `core.py` / `store.py`.
+- `.planning/memcore-sweep/` (935 LOC dev tooling) and stale build artifacts
+  `dist/`, `memcore.egg-info/`, `.pytest_cache/`.
 - `.github/workflows/ci.yml`: the live store is the only verification lane
   (harness 543 green locally, no remote CI dependency).
 

@@ -5,6 +5,7 @@ open_store(): apply schema, run pending migrations under a lock, set pragmas.
 All operations use short transactions and WAL + busy_timeout.
 """
 import hashlib
+import hmac
 import os
 import pathlib
 import re
@@ -12,6 +13,8 @@ import sqlite3
 import struct
 import time
 import unicodedata
+
+from . import embedding
 
 SCHEMA_PATH = pathlib.Path(__file__).resolve().parent.parent / 'schema' / 'schema.sql'
 _MIGRATION_LOCK_VERSION = '__migration_lock__'
@@ -762,17 +765,14 @@ def _active_provenance_key(conn) -> tuple:
     post-write attribution tampering detectable, which is the threat that
     matters here (a writer claiming another agent's identity after the fact).
     """
-    import hashlib as _hashlib
-    import hmac as _hmac
-    import os as _os
     row = conn.execute(
         'SELECT key_id, key_material FROM provenance_key '
         "ORDER BY created_at DESC LIMIT 1"
     ).fetchone()
     if row:
         return row[0], bytes.fromhex(row[1])
-    key_id = 'pk-' + _os.urandom(8).hex()
-    key_material = _os.urandom(32).hex()
+    key_id = 'pk-' + os.urandom(8).hex()
+    key_material = os.urandom(32).hex()
     conn.execute(
         'INSERT INTO provenance_key (key_id, key_material) VALUES (?, ?)',
         (key_id, key_material),
@@ -783,10 +783,8 @@ def _active_provenance_key(conn) -> tuple:
 def seal_event(project_id: str, agent_id: str, content_hash: str,
                key_material: bytes) -> str:
     """HMAC-SHA256 seal over the attribution triple. Stdlib only."""
-    import hashlib as _hashlib
-    import hmac as _hmac
     msg = f'{project_id}\0{agent_id}\0{content_hash}'.encode('utf-8')
-    return _hmac.new(key_material, msg, _hashlib.sha256).hexdigest()
+    return hmac.new(key_material, msg, hashlib.sha256).hexdigest()
 
 
 def verify_event_seal(conn, event_id: str) -> dict:
@@ -815,8 +813,7 @@ def verify_event_seal(conn, event_id: str) -> dict:
                 'reason': 'no_key'}
     key_id, key_material = key_row[0], bytes.fromhex(key_row[1])
     expected = seal_event(project_id, agent_id, content_hash, key_material)
-    import hmac as _hmac
-    valid = _hmac.compare_digest(expected, seal)
+    valid = hmac.compare_digest(expected, seal)
     return {'sealed': True, 'valid': valid, 'key_id': key_id,
             'reason': 'ok' if valid else 'mismatch'}
 
@@ -848,16 +845,11 @@ def verify_all_seals(conn, limit: int = 10000) -> dict:
     return report
 
 
-def pack_vector(floats: list[float]) -> bytes:
-    """Pack a list of float numbers into an IEEE 754 float32 little-endian binary BLOB."""
-    from . import embedding
-    return embedding.pack_vector(floats)
-
-
-def unpack_vector(blob: bytes) -> list[float]:
-    """Unpack an IEEE 754 float32 little-endian binary BLOB into a list of floats."""
-    from . import embedding
-    return embedding.unpack_vector(blob)
+#: Pass-through aliases kept on the public store surface (SDK and tests import
+#: ``store.pack_vector`` / ``store.unpack_vector``); the implementation lives in
+#: the embedding seam.
+pack_vector = embedding.pack_vector
+unpack_vector = embedding.unpack_vector
 
 
 def store_embedding(conn: sqlite3.Connection, memory_id: str, version_id: str,

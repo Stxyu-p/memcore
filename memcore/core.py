@@ -442,18 +442,17 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             row = conn.execute(
                 'SELECT ik.project_id, ik.memory_id, ik.version_id, '
                 '       m.scope, m.owner_agent_id, m.lifecycle, '
-                '       iv.content, cv.content '
+                '       iv.content '
                 'FROM idempotency_key ik '
                 'JOIN memory m ON m.id=ik.memory_id '
                 'JOIN memory_version iv ON iv.id=ik.version_id '
-                'JOIN memory_version cv ON cv.id=m.current_version_id '
                 'WHERE ik.key=?',
                 (idempotency_key,)
             ).fetchone()
             if row:
                 (existing_project, existing_memory, existing_version,
                  existing_scope, existing_owner, existing_lifecycle,
-                 original_content, current_content) = row
+                 original_content) = row
                 if existing_project != project_id:
                     raise PermissionDenied(
                         'idempotency key belongs to a different project'
@@ -485,8 +484,6 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
                     # returned OK for a row that can never be recalled as
                     # accepted. Re-raise so the caller keeps seeing the refusal;
                     # supersede/reject is the documented way to resolve it.
-                    if _manage_transaction:
-                        conn.execute('ROLLBACK')
                     raise ContradictionHold(
                         [(existing_memory, 'replay_of_conflict')], existing_memory)
                 if existing_lifecycle in ('disabled', 'rejected', 'superseded'):
@@ -502,8 +499,6 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             conn, claim_fp, project_id, scope=scope, agent_id=agent_id
         )
         if blocked:
-            if _manage_transaction:
-                conn.execute('ROLLBACK')
             raise TombstoneBlocked(claim_fp, blocked[0])
 
         # Gate every auto-accept at the single choke point. Previously only the
@@ -1745,7 +1740,6 @@ def _expand_aliases(query: str) -> str:
     Eval-only: MEMCORE_ABLATE_ALIAS_EXPANSION=1 returns query unchanged.
     """
     try:
-        from . import ablation as _ablation
         if _ablation.is_alias_expansion_ablated():
             return query
     except Exception:
@@ -1896,9 +1890,8 @@ def _decay_lambda_sql(alias='m'):
     """Per-type decay rate: CASE over memory_type, scalar default fallback."""
     if alias == 'm' and '_DECAY_LAMBDA_SQL_M' in globals():
         return _DECAY_LAMBDA_SQL_M
-    import math as _math
     whens = ' '.join(
-        "WHEN '%s' THEN %.17g" % (mem_type, _math.log(2) / half_life)
+        "WHEN '%s' THEN %.17g" % (mem_type, math.log(2) / half_life)
         for mem_type, half_life in sorted(_DECAY_HALF_LIFE_DAYS_BY_TYPE.items())
     )
     return '(CASE %s.type %s ELSE %.17g END)' % (alias, whens, _DECAY_LAMBDA_DEFAULT)
@@ -1924,6 +1917,28 @@ def _decay_salience_sql(alias='m'):
 
 _DECAY_LAMBDA_SQL_M = _decay_lambda_sql('m')
 _DECAY_SALIENCE_SQL_M = _decay_salience_sql('m')
+
+#: Pre-assembled retention ORDER-BY fragments for the default 'm' alias
+#: (the only alias search/export use). Hoisting the %-formatting here removes
+#: per-call string building from the search hot path; the fragment text is
+#: byte-identical to what _retention_order() used to assemble each call.
+_RETENTION_AGE_SQL_M = (
+    'max(0.0, COALESCE(julianday(?) - julianday(m.updated_at), 0.0))')
+_RETENTION_ACCESS_SQL_M = (
+    'CASE WHEN m.last_recalled IS NULL THEN 0.0 ELSE %.17g * '
+    'ln(1.0 + COALESCE(m.recall_count, 0)) * exp(-%.17g * '
+    'max(0.0, COALESCE(julianday(?) - julianday(m.last_recalled), 0.0))) END'
+    % (_DECAY_SIGMA, _DECAY_MU)
+)
+_RETENTION_EXPR_WITH_RECALL_M = (
+    'COALESCE(%s * exp(-%s * %s) + %s, 0.0)'
+    % (_DECAY_SALIENCE_SQL_M, _DECAY_LAMBDA_SQL_M,
+       _RETENTION_AGE_SQL_M, _RETENTION_ACCESS_SQL_M)
+)
+_RETENTION_EXPR_NO_RECALL_M = (
+    'COALESCE(%s * exp(-%s * %s) + 0.0, 0.0)'
+    % (_DECAY_SALIENCE_SQL_M, _DECAY_LAMBDA_SQL_M, _RETENTION_AGE_SQL_M)
+)
 
 _CONN_TABLE_COLS: dict[tuple[int, str], set[str]] = {}
 
@@ -1959,6 +1974,12 @@ def _retention_order(conn, enabled, alias='m'):
         return '', ()
     has_recall = _has_recall_cols(conn)
     now_iso = _eval_now_iso()
+    if alias == 'm':
+        # Hot path (search/export): pre-assembled constant fragments, no
+        # per-call %-formatting.
+        if has_recall:
+            return _RETENTION_EXPR_WITH_RECALL_M, (now_iso, now_iso)
+        return _RETENTION_EXPR_NO_RECALL_M, (now_iso,)
     age = ('max(0.0, COALESCE(julianday(?) - julianday(%s.updated_at), 0.0))'
            % alias)
     if has_recall:
@@ -2086,21 +2107,10 @@ def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
     ).fetchall()
 
 
-def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
-    """Compute cosine similarity between two float vectors.
-
-    Returns float in [-1.0, 1.0]. Zero-vectors or mismatched dims return 0.0.
-    """
-    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
-        return 0.0
-    arr_a = array.array('f', vec_a)
-    arr_b = array.array('f', vec_b)
-    dot = sum(map(operator.mul, arr_a, arr_b))
-    norm_a = sum(a * a for a in arr_a)
-    norm_b = sum(b * b for b in arr_b)
-    if norm_a <= 0.0 or norm_b <= 0.0:
-        return 0.0
-    return dot / math.sqrt(norm_a * norm_b)
+#: Vector cosine lives in the embedding seam (single implementation, C-level
+#: array/operator math). This module-level alias keeps the public name
+#: ``core.cosine_similarity`` working for callers and tests.
+cosine_similarity = embedding.cosine_similarity
 
 
 def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
@@ -2149,7 +2159,7 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
         if len(v_arr) != q_len:
             continue
         dot = sum(map(mul, q_arr, v_arr))
-        doc_norm_sq = sum(d * d for d in v_arr)
+        doc_norm_sq = sum(map(mul, v_arr, v_arr))
         if doc_norm_sq <= 0.0:
             sim = 0.0
         else:
@@ -2219,7 +2229,6 @@ def search(conn, project_id, agent_id, query, limit=20,
     decay_ablated = False
     try:
         decay_ablated = bool(_ablation.is_decay_ablated())
-        _ablation.fake_now()
     except Exception:
         decay_ablated = False
     now_iso = _eval_now_iso()

@@ -1,38 +1,47 @@
 <div align="center">
 
-  <h1>🧠 MemCore</h1>
-  <p><strong>Governed, local-first memory engine for autonomous AI agent fleets</strong></p>
-  <p><em>Capture broadly. Recall narrowly. Never trust raw history.</em></p>
+# MemCore
 
-  <p>
-    <a href="#-why-memcore"><img src="https://img.shields.io/badge/Architecture-Governed_Memory-0284c7?style=flat-square" alt="Governed Memory" /></a>
-    <a href="#-python-sdk"><img src="https://img.shields.io/badge/Python_SDK-Client-7B61FF?style=flat-square" alt="Python SDK" /></a>
-    <a href="#-hybrid-recall"><img src="https://img.shields.io/badge/Hybrid_Recall-FTS5_+_Vector-10b981?style=flat-square" alt="Hybrid Recall" /></a>
-    <a href="#-serving-multi-agent-fleets"><img src="https://img.shields.io/badge/Fleet_Export-AGENTS.md-blueviolet?style=flat-square" alt="Fleet Export" /></a>
-    <img src="https://img.shields.io/badge/Storage-SQLite_WAL_FTS5-07405E?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
-    <img src="https://img.shields.io/badge/Dependencies-Stdlib_Core-success?style=flat-square" alt="Stdlib Core" />
-    <img src="https://img.shields.io/badge/License-MIT-slate?style=flat-square" alt="License" />
-  </p>
+**Governed, local-first memory engine for autonomous AI agent fleets**
+
+<p><em>Capture broadly. Recall narrowly. Never trust raw conversational history.</em></p>
+
+[![Version v1.0.0](https://img.shields.io/badge/version-v1.0.0-0284c7?style=flat-square)](https://github.com/Stxyu-p/memcore/releases)
+![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB?style=flat-square)
+![SQLite WAL FTS5](https://img.shields.io/badge/storage-SQLite_WAL_FTS5-07405E?style=flat-square)
+![Zero Dependencies](https://img.shields.io/badge/dependencies-0_external-success?style=flat-square)
+[![MIT License](https://img.shields.io/badge/license-MIT-slate?style=flat-square)](https://github.com/Stxyu-p/memcore/blob/main/LICENSE)
 
 </div>
 
 ---
 
-## 🌟 What is MemCore?
+## What is MemCore?
 
-Most AI agent memory frameworks dump raw conversational logs directly into prompts or vector stores. Over time, this leads to prompt bloat, hallucinated facts, and state poisoning: when an agent makes an error, that mistake is permanently re-injected as truth.
+Most AI agent memory frameworks dump raw conversational logs directly into prompts or vector stores. Over time, this leads to prompt bloat, hallucinated facts, and state poisoning. When an agent makes a mistake, that mistake is re-injected as truth in subsequent turns.
 
 **MemCore solves this by introducing governed, bitemporal memory with hard trust boundaries for autonomous agent fleets.**
 
 It separates memory into two distinct zones:
 1. **Raw Ingest Journal (Untrusted):** An append-only ledger that captures turns, tool executions, and delegations. It is **never** injected directly into prompts.
-2. **Governed Canonical Memory (Authoritative):** Verified facts, decisions, and preferences that carry explicit trust, lifecycle, and freshness labels.
+2. **Governed Canonical Memory (Authoritative):** Verified facts, decisions, and constraints carrying explicit trust, lifecycle, and freshness labels.
 
-MemCore runs completely local-first on Python's standard library and SQLite WAL. It requires **zero background daemons**, open network ports, or external vector databases.
+MemCore runs local-first on Python standard library and SQLite WAL. It requires **zero background daemons**, open network ports, or external vector databases.
 
 ---
 
-## 🛡️ Why MemCore?
+## Installation Links
+
+| Distribution | Source / Target | Command / Link |
+| :--- | :--- | :--- |
+| **Standard Core** | PyPI Engine (0 Dependencies) | `pip install memcore` |
+| **Local CPU Embeddings** | FastEmbed (ONNX in-process) | `pip install "memcore[local-embed]"` |
+| **Git Source** | GitHub Repository | [Stxyu-p/memcore](https://github.com/Stxyu-p/memcore) |
+| **Release Archive** | Tagged Releases | [GitHub Releases](https://github.com/Stxyu-p/memcore/releases) |
+
+---
+
+## Why MemCore?
 
 | Capability | What It Does | Why It Matters |
 | :--- | :--- | :--- |
@@ -48,78 +57,43 @@ MemCore runs completely local-first on Python's standard library and SQLite WAL.
 
 ---
 
-## ⚡ Performance & Footprint
+## Measured Performance & Footprint
 
 Measured on local disk with SQLite WAL and hybrid RRF retrieval:
 
-| Metric | MemCore (In-Process SQLite WAL) | Typical Daemon / Vector DB Memory |
+| Metric | MemCore (In-Process SQLite WAL) | External Daemon / Remote Vector DB |
 | :--- | :--- | :--- |
-| **Daemon RAM Footprint** | **0 MB** *(100% in-process)* | 300 MB to 1 GB+ *(Docker / daemon process)* |
-| **Store Initialization** | **< 1.0 ms** *(0.9 ms p50)* | 2,000 to 5,000 ms *(container/service boot)* |
-| **Indexed Claim Lookup** | **0.03 ms** *(31 µs p50)* | 15 to 35 ms *(network round-trip)* |
-| **Hybrid Recall Latency (p50)** | **2.4 ms** *(2.42 ms on 1,000 calls)* | 25 to 60 ms *(HTTP/gRPC hop + vector query)* |
-| **Tail Recall Latency (p95)** | **5.2 ms** *(down from 8.75 ms baseline)* | 75 to 150 ms *(network/tail latency)* |
-| **Max Query Latency** | **12.1 ms** *(down from 52.80 ms baseline)* | 200 to 500 ms *(garbage collection / jitter)* |
-| **Batch Ingestion Rate** | **1,650 writes/sec** | 50 to 150 writes/sec *(network-bottlenecked)* |
-| **Network Attack Surface** | **Zero open ports** *(fully offline)* | Exposed HTTP/gRPC API ports |
+| **Daemon RAM Footprint** | **0 MB** (100% in-process) | 300 MB to 1 GB+ (container or background process) |
+| **Store Initialization** | **< 1.0 ms** (0.9 ms p50) | 2,000 to 5,000 ms (service boot or handshake) |
+| **Indexed Claim Lookup** | **0.017 ms** (17 µs p50) | 15 to 35 ms (network round-trip) |
+| **Hybrid Recall Latency (p50)** | **2.24 ms** (measured on 1,000 iterations) | 25 to 60 ms (HTTP/gRPC hop + remote vector query) |
+| **Tail Recall Latency (p95)** | **4.80 ms** | 75 to 150 ms (network and tail queue latency) |
+| **Max Query Latency** | **10.44 ms** | 200 to 500 ms (garbage collection or network jitter) |
+| **Batch Ingestion Rate** | **1,650 writes/sec** | 50 to 150 writes/sec (network-bottlenecked) |
+| **Network Attack Surface** | **Zero open ports** (fully offline) | Exposed HTTP/gRPC API ports |
 
 ---
 
-## 📐 Architecture
+## Architecture
 
 <div align="center">
-  <img src="docs/architecture.svg" alt="MemCore Trust Architecture: Raw journal vs governed canonical memory" width="85%" />
+  <img src="docs/architecture.svg" alt="MemCore Governed Trust and Hybrid Architecture" width="100%" />
 </div>
 
-MemCore enforces a strict trust boundary between ingestion and recall:
-
-```text
-  Agent Turns & Tool Activity
-              │
-              ▼
-   ┌──────────────────────┐
-   │  Raw Ingest Journal  │  ◄── Append-only ledger (Never recalled as truth)
-   └──────────────────────┘
-              │
-      Governed Admission
-   (Tombstone & Scoping Gate)
-              │
-              ▼
-   ┌──────────────────────┐
-   │   Canonical Memory   │  ◄── Bitemporal, scoped, tombstoned facts
-   └──────────────────────┘
-              │
-        core.recall()
-   (Hybrid FTS5 + Dense Vector)
-              │
-              ▼
-   High-Trust Prompt Context
-```
-
-### 🏷️ Trust Model
+### Trust Model
 
 Every recalled memory carries four explicit labels so the agent knows exactly how much to rely on it:
 
-- **`scope`**: `project` (shared across fleet members) · `private` (accessible only to owning agent).
-- **`lifecycle`**: `accepted` (live canonical memory) · `candidate` (proposed fact) · `conflict` (unresolved disagreement).
-- **`verification`**: `user_authoritative` · `runtime_verified` · `source_backed` · `unverified`.
-- **`freshness`**: `current` · `aging` · `stale` (derived from age decay curves and Git commit alignment).
+- **`scope`**: `project` (shared across fleet members) or `private` (accessible only to owning agent).
+- **`lifecycle`**: `accepted` (live canonical memory), `candidate` (proposed fact), or `conflict` (unresolved disagreement).
+- **`verification`**: `user_authoritative`, `runtime_verified`, `source_backed`, or `unverified`.
+- **`freshness`**: `current`, `aging`, or `stale` (derived from age decay curves and Git commit alignment).
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
-### 1. Installation
-
-```bash
-# Core engine: 100% Python Standard Library + SQLite (Zero external dependencies)
-pip install memcore
-
-# Optional: In-process local vector embeddings via FastEmbed (ONNX, runs on CPU)
-pip install "memcore[local-embed]"
-```
-
-### 2. Python SDK
+### 1. Python SDK
 
 Embed MemCore into any agent framework (LangChain, LlamaIndex, CrewAI, AutoGen, or custom agents):
 
@@ -161,13 +135,13 @@ and `--source-commit ...`.
 
 ---
 
-## 🔍 Hybrid Recall & Vector Providers
+## Hybrid Recall & Vector Providers
 
 MemCore provides dense vector retrieval alongside SQLite FTS5 lexical search. Configure your embedding backend via `--provider` or the `MEMCORE_EMBEDDING_PROVIDER` environment variable:
 
 | Provider | Default Model | Runtime Mode | Description |
 | :--- | :--- | :--- | :--- |
-| **`local` / `fastembed`** | `BAAI/bge-small-en-v1.5` | In-Process (CPU) | **Zero network, zero daemon** (~30MB ONNX model runs in-process). |
+| **`local` / `fastembed`** | `BAAI/bge-small-en-v1.5` | In-Process (CPU) | Zero network, zero daemon (~30MB ONNX model runs in-process). |
 | **`ollama`** | `nomic-embed-text` | Local Daemon | Connects to local Ollama service at `localhost:11434`. |
 | **`openrouter`** | `text-embedding-3-small` | Remote Gateway | Connects to OpenRouter API via `OPENROUTER_API_KEY`. |
 | **`openai`** | `text-embedding-3-small` | Cloud API | Connects to OpenAI API via `OPENAI_API_KEY`. |
@@ -175,7 +149,7 @@ MemCore provides dense vector retrieval alongside SQLite FTS5 lexical search. Co
 
 ---
 
-## 📤 Serving Multi-Agent Fleets
+## Serving Multi-Agent Fleets
 
 MemCore bridges diverse coding agents by exporting governed project memory directly into shared instruction files. This ensures every agent operating in the workspace reads from a single source of truth.
 
@@ -209,7 +183,7 @@ memcore export --host copilot       # Writes .github/copilot-instructions.md
 
 ---
 
-## 🧰 Operational CLI
+## Operational CLI
 
 MemCore includes a comprehensive CLI for administration, health audits, and disaster recovery:
 
@@ -237,7 +211,7 @@ memcore journal-review-decide <event-id> --verdict remember --content "Fact text
 
 ---
 
-## 🧩 Hermes Agent Integration
+## Hermes Agent Integration
 
 MemCore functions as an exclusive native memory provider for [Hermes Agent](https://github.com/NousResearch/hermes-agent):
 
@@ -255,6 +229,6 @@ python scripts/deploy_hermes_plugin.py --check
 
 ---
 
-## 📜 License
+## License
 
 Distributed under the **MIT License**. See `LICENSE` for details.

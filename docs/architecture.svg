@@ -42,7 +42,7 @@
   <rect width="960" height="520" fill="url(#grid)" opacity="0.7"/>
 
   <!-- ==================== LANE 1: RAW INGEST & AUDIT ==================== -->
-  <text class="t-tag" x="24" y="26">LANE 1 · RAW INGEST &amp; AUDIT — UNTRUSTED · NEVER RECALLED DIRECTLY</text>
+  <text class="t-tag" x="24" y="26">LANE 1 · RAW INGEST &amp; AUDIT : UNTRUSTED · NEVER RECALLED DIRECTLY</text>
   <rect class="zone" x="24" y="34" width="912" height="74" rx="8"/>
 
   <!-- Agent Execution -->
@@ -68,8 +68,8 @@
   <path class="edge-dash" d="M416 94 V 132"/>
   <path class="edge-dash" d="M761 94 V 132"/>
 
-  <!-- ==================== LANE 2: CANONICAL GOVERNED STORE & HYBRID SEARCH ==================== -->
-  <text class="t-tag" x="24" y="132">LANE 2 · CANONICAL STORE &amp; LOCAL HYBRID SEARCH — AUTHORITATIVE MEMORY</text>
+  <!-- ==================== LANE 2: CANONICAL STORE & HYBRID SEARCH ==================== -->
+  <text class="t-tag" x="24" y="132">LANE 2 · CANONICAL STORE &amp; LOCAL HYBRID SEARCH : AUTHORITATIVE MEMORY</text>
   <rect class="zone" x="24" y="140" width="912" height="236" rx="8"/>
 
   <!-- Admission Gate -->
@@ -116,9 +116,9 @@
   <text class="t-title" x="761" y="331" text-anchor="middle">Consumers &amp; Deliverables</text>
   <text class="t-sub" x="761" y="349" text-anchor="middle">Python SDK (MemCore) · Prompt Inject · Export (AGENTS.md)</text>
 
-  <!-- ==================== LANE 3: ENFORCEMENT BOUNDARY ==================== -->
-  <text class="t-tag" x="24" y="400">ENFORCEMENT BOUNDARY — GUARANTEED IN SQL &amp; CODE · NEVER DELEGATED TO LLM</text>
-  <rect class="zone" x="24" y="408" width="912" height="96" rx="8"/>
+  <!-- ==================== LANE 3: HARD INVARIANT BOUNDARY ==================== -->
+  <text class="t-tag" x="24" y="400">ENFORCEMENT BOUNDARY : GUARANTEED IN SQL &amp; CODE · NEVER DELEGATED TO LLM</text>
+  <rect class="zone" x="24" y="408" width="912" height="88" rx="8"/>
 
   <!-- Four Pillars -->
   <rect class="card" x="40" y="420" width="206" height="42" rx="6"/>

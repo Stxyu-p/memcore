@@ -2055,6 +2055,7 @@ def _retention_order(conn, enabled, alias='m'):
     """
     if not enabled:
         return '', ()
+    store._register_math_functions(conn)
     has_recall = _has_recall_cols(conn)
     now_iso = _eval_now_iso()
     if alias == 'm':

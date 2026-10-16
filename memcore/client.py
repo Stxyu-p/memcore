@@ -87,9 +87,11 @@ class MemCore:
         source_file: str | pathlib.Path | None = None,
         source_commit: str | None = None,
         source_hash: str | None = None,
+        lifecycle: str = "accepted",
     ) -> str:
         """Store a governed memory, optionally tied to a source file's SHA-256."""
         self._check_open()
+        fp = core.fingerprint(content)
         mid, _ = core.create_memory(
             self.conn,
             self.project,
@@ -97,10 +99,14 @@ class MemCore:
             content,
             memory_type=memory_type,
             scope=scope,
+            lifecycle=lifecycle,
             source_file=source_file,
             source_commit=source_commit,
             source_hash=source_hash,
+            idempotency_key=f"remember:{self.project}:{self.agent}:{fp}",
         )
+        core.maybe_auto_corrob(self.conn, self.project, fp, self.agent)
+        self.conn.commit()
         return mid
 
     def search(
@@ -108,6 +114,8 @@ class MemCore:
         query: str,
         limit: int = 5,
         query_vec: list[float] | None = None,
+        include_content: bool = True,
+        preview_chars: int = 180,
     ) -> list[dict[str, Any]]:
         """Hybrid search memories with governance checks and RRF ranking."""
         self._check_open()
@@ -128,19 +136,46 @@ class MemCore:
             limit=limit,
             query_vec=query_vec,
         )
-        return [
-            {
-                "id": r[0],
-                "scope": r[1],
-                "lifecycle": r[2],
-                "verification": r[3],
-                "freshness": r[4],
-                "content": r[5],
-                "owner": r[6],
-                "rank": r[7],
-            }
-            for r in rows
-        ]
+        p_chars = min(max(int(preview_chars or 180), 40), 500)
+        results = []
+        for r in rows:
+            raw_content = r[5] or ""
+            if include_content:
+                text = raw_content
+                truncated = False
+            else:
+                collapsed = " ".join(str(raw_content).split())
+                if len(collapsed) <= p_chars:
+                    text = collapsed
+                    truncated = False
+                else:
+                    cut = collapsed[:p_chars]
+                    sp = cut.rfind(" ")
+                    if sp > p_chars // 2:
+                        cut = cut[:sp]
+                    text = cut.rstrip() + "…"
+                    truncated = True
+            results.append(
+                {
+                    "id": r[0],
+                    "scope": r[1],
+                    "lifecycle": r[2],
+                    "verification": r[3],
+                    "freshness": r[4],
+                    "content": text,
+                    "content_truncated": truncated,
+                    "content_chars": len(raw_content),
+                    "owner": r[6],
+                    "rank": r[7],
+                }
+            )
+        return results
+
+    def promote(self, memory_id: str) -> None:
+        """Promote a private memory to shared project scope."""
+        self._check_open()
+        core.promote(self.conn, memory_id, self.agent)
+        self.conn.commit()
 
     def supersede(
         self,
@@ -153,7 +188,7 @@ class MemCore:
     ) -> str:
         """Update a memory with bitemporal history and optional source provenance."""
         self._check_open()
-        return core.supersede(
+        res = core.supersede(
             self.conn,
             memory_id,
             self.agent,
@@ -163,6 +198,8 @@ class MemCore:
             source_commit=source_commit,
             source_hash=source_hash,
         )
+        self.conn.commit()
+        return res
 
     def reject(self, memory_id: str, reason: str = "rejected") -> None:
         """Reject and tombstone a memory."""
@@ -173,6 +210,42 @@ class MemCore:
             self.agent,
             reason=reason,
         )
+        self.conn.commit()
+
+    def feedback(self, memory_id: str, outcome: str) -> dict[str, Any]:
+        """Apply accepted, rejected, or stale feedback to a memory."""
+        self._check_open()
+        outcome_norm = str(outcome or "").strip().lower()
+        if outcome_norm not in ("accepted", "rejected", "stale"):
+            raise core.MemCoreError("outcome must be accepted, rejected, or stale")
+        if outcome_norm == "rejected":
+            core.reject(self.conn, memory_id, self.agent, reason=f"rejected via feedback: {memory_id}")
+            self.conn.commit()
+            return {"memory_id": memory_id, "outcome": "rejected"}
+        with store.write_tx(self.conn):
+            _pid, _scope, _owner, lifecycle, _role = core._require_memory_write_access(
+                self.conn, memory_id, self.agent
+            )
+            if lifecycle in ("rejected", "disabled", "superseded"):
+                raise core.MemCoreError(
+                    f"cannot apply {outcome_norm} feedback to terminal memory (lifecycle={lifecycle})"
+                )
+            if outcome_norm == "accepted":
+                result = core.auto_accept(self.conn, memory_id, self.agent, reason="accepted via feedback")
+                if result.get("held"):
+                    return {
+                        "memory_id": memory_id,
+                        "outcome": "held",
+                        "held": True,
+                        "reason": "contradiction hold: claim contradicts live memory",
+                        "hits": [list(h) for h in result.get("hits", [])],
+                    }
+                return {"memory_id": memory_id, "outcome": "accepted", "transitioned": result.get("transitioned", False)}
+            self.conn.execute(
+                "UPDATE memory SET freshness='stale', updated_at=? WHERE id=?",
+                (core._now(), memory_id),
+            )
+            return {"memory_id": memory_id, "outcome": "stale"}
 
     def close(self) -> None:
         if self.conn:

@@ -7,6 +7,7 @@ All operations use short transactions and WAL + busy_timeout.
 import contextlib
 import hashlib
 import hmac
+import math
 import os
 import pathlib
 import re
@@ -17,6 +18,34 @@ import unicodedata
 from typing import Any
 
 from . import embedding
+
+
+def _register_math_functions(conn: sqlite3.Connection) -> None:
+    """Ensure SQLite math functions (exp, ln, log, sqrt, pow) are available even when SQLite was built without SQLITE_ENABLE_MATH_FUNCTIONS."""
+    try:
+        conn.create_function(
+            "exp", 1, lambda x: math.exp(float(x)) if x is not None else None, deterministic=True
+        )
+        conn.create_function(
+            "ln", 1, lambda x: math.log(float(x)) if x is not None and float(x) > 0 else None, deterministic=True
+        )
+        conn.create_function(
+            "log", 1, lambda x: math.log(float(x)) if x is not None and float(x) > 0 else None, deterministic=True
+        )
+        conn.create_function(
+            "log10", 1, lambda x: math.log10(float(x)) if x is not None and float(x) > 0 else None, deterministic=True
+        )
+        conn.create_function(
+            "sqrt", 1, lambda x: math.sqrt(float(x)) if x is not None and float(x) >= 0 else None, deterministic=True
+        )
+        conn.create_function(
+            "pow", 2, lambda x, y: math.pow(float(x), float(y)) if x is not None and y is not None else None, deterministic=True
+        )
+        conn.create_function(
+            "power", 2, lambda x, y: math.pow(float(x), float(y)) if x is not None and y is not None else None, deterministic=True
+        )
+    except Exception:
+        pass
 
 SCHEMA_PATH = pathlib.Path(__file__).resolve().parent.parent / 'schema' / 'schema.sql'
 _MIGRATION_LOCK_VERSION = '__migration_lock__'
@@ -516,6 +545,7 @@ def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connecti
                 time.sleep(0.05)
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('PRAGMA synchronous = NORMAL')
+        _register_math_functions(conn)
         try:
             apply_migrations(conn)
         except sqlite3.OperationalError as e:
@@ -562,6 +592,7 @@ def _open_existing_connection(db_path: str, *, readonly: bool,
             conn.execute('PRAGMA query_only = ON')
         else:
             conn.execute('PRAGMA synchronous = NORMAL')
+        _register_math_functions(conn)
         # Validate that the file is indeed a readable sqlite database
         conn.execute('PRAGMA schema_version')
         return conn

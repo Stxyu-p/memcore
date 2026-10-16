@@ -159,6 +159,8 @@ def _discover_hermes_memcore_bindings():
 
 def _resolve_project_ref(conn, project_ref):
     """Resolve exact project id/UUID or a unique project name/slug."""
+    if not project_ref or not isinstance(project_ref, str):
+        return None, f'missing_project:{project_ref}'
     direct = conn.execute(
         'SELECT id FROM project WHERE id=?', (project_ref,)
     ).fetchone()
@@ -185,6 +187,8 @@ def _project_or_exit(conn, project_ref):
 
 def _agent_identity_or_exit(conn, agent_name):
     """Return (agent_id, exists) only if deterministic identity is unambiguous."""
+    if not agent_name or not isinstance(agent_name, str):
+        sys.exit('error: agent name is required and must be a non-empty string')
     aid = f'agent-{agent_name}'
     by_id = conn.execute(
         'SELECT name, profile_key FROM agent WHERE id=?', (aid,)
@@ -956,8 +960,11 @@ def cmd_import(args):
         dry_run = getattr(args, 'dry_run', False)
         conn = (store.open_store_readonly(getattr(args, 'db', DEFAULT_DB))
                 if dry_run else _open(args))
-        with open(args.file, 'r', encoding='utf-8') as f:
-            items = json.load(f)
+        try:
+            with open(args.file, 'r', encoding='utf-8') as f:
+                items = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            sys.exit(f'error: failed to read import file: {e}')
         
         if not isinstance(items, list):
             sys.exit('error: import file must contain a JSON array of items')

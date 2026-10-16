@@ -761,6 +761,19 @@ class CliHostileArgTests(unittest.TestCase):
         self.assertIn('error:', msg)
         self.assertNotIn('Traceback', msg)
 
+    def test_import_missing_or_malformed_file_is_clean_error(self):
+        missing = os.path.join(self.tmp.name, 'nonexistent.json')
+        msg = self._exit_message(['--db', self.db, 'import', '--file', missing, '--project', 'demo', '--agent', 'a'])
+        self.assertIn('error: failed to read import file', msg)
+        self.assertNotIn('Traceback', msg)
+
+        corrupt = os.path.join(self.tmp.name, 'corrupt.json')
+        with open(corrupt, 'w', encoding='utf-8') as fh:
+            fh.write('{"unclosed": json')
+        msg = self._exit_message(['--db', self.db, 'import', '--file', corrupt, '--project', 'demo', '--agent', 'a'])
+        self.assertIn('error: failed to read import file', msg)
+        self.assertNotIn('Traceback', msg)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -237,6 +237,32 @@ class TestConcurrencyAsyncTorture(SadistTestBase):
         integrity = self.conn.execute('PRAGMA integrity_check').fetchall()
         self.assertEqual(integrity, [('ok',)])
 
+    def test_concurrent_identical_idempotency_key_race(self):
+        worker_count = 15
+
+        def worker(idx):
+            wconn = store.open_store(self.db_path)
+            try:
+                return core.create_memory(
+                    wconn, self.project, self.alice,
+                    'Identical shared fact across concurrent threads',
+                    idempotency_key='shared-idempotency-race-key',
+                    scope='project'
+                )
+            finally:
+                wconn.close()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(worker, range(worker_count)))
+
+        # All workers must receive the exact same (mem_id, ver_id) tuple without error
+        self.assertEqual(len(set(results)), 1)
+        # Exactly one memory row must exist in the database
+        count = self.conn.execute(
+            'SELECT count(*) FROM memory WHERE project_id=?', (self.project,)
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+
 
 class TestSeamHardeningWave1(SadistTestBase):
     """Wave-1 hardening: hostile types at public seams raise typed errors.

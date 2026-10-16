@@ -170,6 +170,13 @@ def render(rows, title, project, generated_at=None, generator=True):
     with a timestamp the writer rewrote the file every single run, which
     would show as a permanent dirty git status in every repo.
     """
+    if rows is None:
+        rows = []
+    elif not isinstance(rows, (list, tuple)):
+        raise core.MemCoreError('rows must be a list or tuple')
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            raise core.MemCoreError(f'malformed export row: {row!r}')
     body = _body_lines(rows, project)
     out = ['# %s' % title, '']
     if generator:

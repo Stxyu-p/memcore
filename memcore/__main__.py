@@ -340,13 +340,16 @@ def cmd_search(args):
         agent_id, agent_exists = _agent_identity_or_exit(conn, args.agent)
         if not agent_exists:
             sys.exit(f'error: agent {agent_id} does not exist; create it first')
-        rows = core.search(
-            conn,
-            project_id=project_id,
-            agent_id=agent_id,
-            query=args.query,
-            limit=args.limit,
-        )
+        try:
+            rows = core.search(
+                conn,
+                project_id=project_id,
+                agent_id=agent_id,
+                query=args.query,
+                limit=args.limit,
+            )
+        except core.MemCoreError as e:
+            sys.exit(f'error: {e}')
     finally:
         conn.close()
     if not rows:
@@ -896,12 +899,18 @@ def cmd_golden_list(args):
 
 def cmd_journal_sweep(args):
     """Auto-hygiene sweep: stale builtin dismiss + defer-cap (dry-run default)."""
+    try:
+        max_defers = int(args.max_defers)
+        if max_defers < 1:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        sys.exit('error: max_defers must be an integer >= 1')
     conn = _open(args) if args.apply else _open_readonly(args)
     try:
         # C1: both modes run ingest.sweep's single scan implementation so the
         # dry-run lists always match what --apply will do.
         result = ingest.sweep(
-            conn, builtin_days=args.builtin_days, max_defers=args.max_defers,
+            conn, builtin_days=args.builtin_days, max_defers=max_defers,
             dry_run=not args.apply)
     finally:
         conn.close()
@@ -923,9 +932,12 @@ def cmd_decay(args):
         # C1: both modes run core.apply_freshness_decay's single scan so the
         # dry-run lists always match what --apply will do (previously the
         # dry-run SQL missed the last_recalled reinforcement window).
-        aged, staled = core.apply_freshness_decay(
-            conn, aging_days=args.aging_days, stale_days=args.stale_days,
-            dry_run=not args.apply)
+        try:
+            aged, staled = core.apply_freshness_decay(
+                conn, aging_days=args.aging_days, stale_days=args.stale_days,
+                dry_run=not args.apply)
+        except core.MemCoreError as e:
+            sys.exit(f'error: {e}')
     finally:
         conn.close()
     print(f'decay ({"applied" if args.apply else "dry-run"}):')

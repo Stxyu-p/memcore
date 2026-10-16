@@ -1169,6 +1169,14 @@ def scan_contradictions(conn, project_id, limit_pairs: int = 200) -> list:
     Scales as O(groups x pairs-in-group); subject keys keep groups small.
     On the live fleet (87 fingerprints) this is trivial.
     """
+    if not isinstance(project_id, str):
+        return []
+    try:
+        limit_pairs = int(limit_pairs)
+        if limit_pairs < 1:
+            return []
+    except (TypeError, ValueError, OverflowError):
+        return []
     from memcore import contradiction as _cd
     rows = conn.execute(
         'SELECT m.id, v.content FROM memory m '
@@ -1239,6 +1247,8 @@ def pre_accept_conflict_check(conn, project_id, content, exclude_memory_id=None)
     Empty list = clean. Empty subject key -> fails closed with ('__empty_subject__', 'empty_subject_hold').
     Only checks live rows (candidate/accepted/conflict) in the project, excluding exclude_memory_id.
     """
+    if not isinstance(project_id, str) or not isinstance(content, str):
+        return []
     from memcore import contradiction as _cd
 
     key = _cd.subject_key(content)
@@ -2711,6 +2721,8 @@ def conflict_memories(conn, project_id, agent_id):
 
 def superseded_history(conn, memory_id, agent_id):
     """Readable versions of one memory, oldest first; scope enforced in SQL."""
+    if not isinstance(memory_id, str) or not isinstance(agent_id, str):
+        return []
     cur = conn.execute(
         'SELECT v.id, v.content, v.created_at, v.supersedes_version_id '
         'FROM memory m JOIN memory_version v ON v.memory_id=m.id '

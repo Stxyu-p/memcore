@@ -393,6 +393,15 @@ class TestSeamHardeningWave2(SadistTestBase):
         os.environ.pop('MEMCORE_ABLATE_DECAY', None)
         ablation._reset_ablation_cache()
 
+    def test_contradiction_and_history_hostile_args(self):
+        for bad in ([], {}, object(), None, 123):
+            self.assertEqual(core.scan_contradictions(self.conn, bad), [])
+            self.assertEqual(core.scan_contradictions(self.conn, self.project, limit_pairs=bad), [])
+            self.assertEqual(core.pre_accept_conflict_check(self.conn, bad, 'content'), [])
+            self.assertEqual(core.pre_accept_conflict_check(self.conn, self.project, bad), [])
+            self.assertEqual(core.superseded_history(self.conn, bad, self.alice), [])
+            self.assertEqual(core.superseded_history(self.conn, 'mem-1', bad), [])
+
 
 if __name__ == '__main__':
     unittest.main()

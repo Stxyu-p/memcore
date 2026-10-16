@@ -46,8 +46,8 @@ RECALL_FACTS = (
     'Converse with P Choke in Thai; commands between agents always in English',
     'Bot-to-bot dispatch: write file with prefix, run hermes chat in English',
     'lnwjud: call ONLY via lnwjud-bridge/lnwjud_call.py, native MCP fails',
-    'ig-maxpland scan pacing: 250-500ms per page, no long pause',
-    'ig-maxpland v2: scan page size 100 both sides',
+    'crawler scan pacing: 250-500ms per page, no long pause',
+    'crawler v2: scan page size 100 both sides',
     'Threads overflow menu has Copy Link only; no media download or share',
     'MemCore is the canonical team memory system',
 )

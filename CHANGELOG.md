@@ -4,15 +4,13 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
 ## [1.0.0] - 2026-10-16
 
-First stable release. Hardening & stabilization: H1–H9 mechanical fixes, deep-module
+First stable release. Hardening and stabilization: H1 to H9 mechanical fixes, deep-module
 refactor (`store.write_tx()` transaction context manager, split search/ingest
 monoliths, declarative migration hooks), and recall classification quality raised to
-p@3 1.00 on every tier (overall / exact / paraphrase / negation; was 0.86 overall and
-0.40 negation). Includes all prior Unreleased work — token-efficient preview recall,
+p@3 1.00 on every tier (overall, exact, paraphrase, negation; was 0.86 overall and
+0.40 negation). Includes token-efficient preview recall,
 write-lane secret scrubbing, C-level vector math, short-circuit search.
 
 ### Added

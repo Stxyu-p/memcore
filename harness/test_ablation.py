@@ -24,7 +24,7 @@ def _make_store(tmpdir):
         '9router local proxy answers at localhost:20128/v1 (provider custom Local)',
         'Fleet roster: MIKA orchestrator, NUA SORA ALTIMA MILIM workers, P Choke owner',
         'Converse with P Choke in Thai; commands between agents always in English',
-        'ig-maxpland scan pacing: 250-500ms per page, no long pause',
+        'crawler scan pacing: 250-500ms per page, no long pause',
     )
     for fact in FACTS:
         core.create_memory(conn, 'p-abl', 'a-abl', fact,

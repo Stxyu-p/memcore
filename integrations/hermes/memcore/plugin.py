@@ -270,7 +270,11 @@ def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8,
     pinned_set = []
     hit_set = []
     for tier_rows, tier in ((pinned_rows, pinned_set), (search_rows, hit_set)):
-        for r in list(tier_rows or []):
+        if not isinstance(tier_rows, (list, tuple)):
+            continue
+        for r in tier_rows:
+            if not isinstance(r, (list, tuple)) or len(r) < 6:
+                continue
             if r[0] in seen_ids:
                 continue
             seen_ids.add(r[0])
@@ -291,7 +295,18 @@ def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8,
             tier.append(r)
     lines = []
     header = 'Shared project memory (memcore):'
-    budget_chars = max(0, int(budget_chars))
+    try:
+        budget_chars = int(budget_chars)
+        if budget_chars < 0:
+            budget_chars = 1200
+    except (TypeError, ValueError, OverflowError):
+        budget_chars = 1200
+    try:
+        max_items = int(max_items)
+        if max_items < 1:
+            max_items = 8
+    except (TypeError, ValueError, OverflowError):
+        max_items = 8
     prefix_len = len(header) + 1  # header + first newline
     if budget_chars <= prefix_len:
         return ''
@@ -526,14 +541,34 @@ def _require_bound_memory(conn, project_name, agent_name, memory_id):
     return pid, aid
 
 
+def _tool_str_arg(args, key, required=False, default=''):
+    if not isinstance(args, dict):
+        return None, 'arguments must be a JSON object'
+    val = args.get(key)
+    if val is None:
+        if required:
+            return None, f'{key} is required'
+        return default, None
+    if not isinstance(val, str):
+        return None, f'{key} must be a string'
+    val = val.strip()
+    if required and not val:
+        return None, f'{key} is required'
+    return val, None
+
+
 def tool_memory_remember(args, ctx=None):
+    content, err = _tool_str_arg(args, 'content', required=True)
+    if err:
+        return _tool_error(err)
+    raw_type = args.get('type')
+    if raw_type is not None and not isinstance(raw_type, str):
+        return _tool_error('type must be a string')
+    mem_type = raw_type.strip() if isinstance(raw_type, str) and raw_type.strip() else 'note'
     try:
         agent_name, project = require_binding(_ctx_cfg(ctx), _ctx_profile(ctx))
     except ConfigError as e:
         return _tool_error(str(e))
-    content = (args.get('content') or '').strip()
-    if not content:
-        return _tool_error('content is required')
     # ADR-0003: explicit tool writes are always shared project memory.
     # The model never chooses scope; private observations are created only by
     # the semantic review lane and can later be promoted explicitly.
@@ -552,7 +587,7 @@ def tool_memory_remember(args, ctx=None):
         fp = core.fingerprint(content)
         mem_id, ver_id = core.create_memory(
             conn, pid, 'agent-' + agent_name, content,
-            scope=scope, memory_type=args.get('type') or 'note',
+            scope=scope, memory_type=mem_type,
             lifecycle='accepted',
             reason='memory_remember tool (explicit auto-accept)',
             source_file=args.get('source_file'),
@@ -566,11 +601,13 @@ def tool_memory_remember(args, ctx=None):
 
 
 def tool_memory_search(args, ctx=None):
+    query, err = _tool_str_arg(args, 'query', required=False, default='')
+    if err:
+        return _tool_error(err)
     try:
         agent_name, project = require_binding(_ctx_cfg(ctx), _ctx_profile(ctx))
     except ConfigError as e:
         return _tool_error(str(e))
-    query = (args.get('query') or '').strip()
     conn, store_error = _tool_store_or_error(_ctx_cfg(ctx))
     if store_error:
         return store_error
@@ -599,13 +636,13 @@ def tool_memory_search(args, ctx=None):
 
 
 def tool_memory_promote(args, ctx=None):
+    memory_id, err = _tool_str_arg(args, 'memory_id', required=True)
+    if err:
+        return _tool_error(err)
     try:
         agent_name, project = require_binding(_ctx_cfg(ctx), _ctx_profile(ctx))
     except ConfigError as e:
         return _tool_error(str(e))
-    memory_id = (args.get('memory_id') or '').strip()
-    if not memory_id:
-        return _tool_error('memory_id is required')
     conn, store_error = _tool_store_or_error(_ctx_cfg(ctx))
     if store_error:
         return store_error
@@ -619,14 +656,16 @@ def tool_memory_promote(args, ctx=None):
 
 
 def tool_memory_supersede(args, ctx=None):
+    memory_id, err = _tool_str_arg(args, 'memory_id', required=True)
+    if err:
+        return _tool_error(err)
+    new_content, err = _tool_str_arg(args, 'new_content', required=True)
+    if err:
+        return _tool_error(err)
     try:
         agent_name, project = require_binding(_ctx_cfg(ctx), _ctx_profile(ctx))
     except ConfigError as e:
         return _tool_error(str(e))
-    memory_id = (args.get('memory_id') or '').strip()
-    new_content = (args.get('new_content') or '').strip()
-    if not memory_id or not new_content:
-        return _tool_error('memory_id and new_content are required')
     conn, store_error = _tool_store_or_error(_ctx_cfg(ctx))
     if store_error:
         return store_error
@@ -643,13 +682,13 @@ def tool_memory_supersede(args, ctx=None):
 
 
 def tool_memory_reject(args, ctx=None):
+    memory_id, err = _tool_str_arg(args, 'memory_id', required=True)
+    if err:
+        return _tool_error(err)
     try:
         agent_name, project = require_binding(_ctx_cfg(ctx), _ctx_profile(ctx))
     except ConfigError as e:
         return _tool_error(str(e))
-    memory_id = (args.get('memory_id') or '').strip()
-    if not memory_id:
-        return _tool_error('memory_id is required')
     conn, store_error = _tool_store_or_error(_ctx_cfg(ctx))
     if store_error:
         return store_error
@@ -664,16 +703,19 @@ def tool_memory_reject(args, ctx=None):
 
 
 def tool_memory_feedback(args, ctx=None):
+    memory_id, err = _tool_str_arg(args, 'memory_id', required=True)
+    if err:
+        return _tool_error(err)
+    outcome, err = _tool_str_arg(args, 'outcome', required=False, default='')
+    if err:
+        return _tool_error(err)
+    outcome = outcome.lower()
+    if outcome not in ('accepted', 'rejected', 'stale'):
+        return _tool_error('outcome must be accepted|rejected|stale')
     try:
         agent_name, project = require_binding(_ctx_cfg(ctx), _ctx_profile(ctx))
     except ConfigError as e:
         return _tool_error(str(e))
-    memory_id = (args.get('memory_id') or '').strip()
-    outcome = (args.get('outcome') or '').strip().lower()
-    if not memory_id:
-        return _tool_error('memory_id is required')
-    if outcome not in ('accepted', 'rejected', 'stale'):
-        return _tool_error('outcome must be accepted|rejected|stale')
     conn, store_error = _tool_store_or_error(_ctx_cfg(ctx))
     if store_error:
         return store_error

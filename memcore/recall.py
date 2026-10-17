@@ -715,16 +715,17 @@ def _fetch_query_vector(user_query):
 
 
 def _run_vector_lane(conn, project_id, agent_id, query_vec, limit,
-                     detail_filter, detail_params):
+                     detail_filter, detail_params, min_sim: float = 0.25):
     """Vector lane wrapper: never raises — degraded search beats no search."""
     if not query_vec:
         return []
     try:
-        return _vector_search_lane(
+        raw = _vector_search_lane(
             conn, project_id, agent_id, query_vec,
             limit=limit * DISTINCT_OVERFETCH,
             detail_filter=detail_filter, detail_params=detail_params
         )
+        return [r for r in raw if -r[7] >= min_sim]
     except Exception:
         return []
 
@@ -752,7 +753,7 @@ def search(conn, project_id, agent_id, query, limit=20,
         raise MemCoreError('search limit must be >= 1')
     limit = min(limit, 500)
     user_query = str(query or '').strip()
-    if not user_query:
+    if not user_query or not any(c.isalnum() for c in user_query):
         return []
     # Retention ranking: MEMCORE_ABLATE_DECAY=1 neutralizes exactly the
     # retention term (legacy CASE+bm25 ordering). MEMCORE_FAKE_NOW feeds the

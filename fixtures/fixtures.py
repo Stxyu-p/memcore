@@ -17,7 +17,8 @@ import hashlib
 import unicodedata
 from datetime import datetime, timedelta
 
-SCHEMA_PATH = pathlib.Path(__file__).resolve().parent.parent / 'schema' / 'schema.sql'
+_pkg_schema = pathlib.Path(__file__).resolve().parent.parent / 'memcore' / 'schema' / 'schema.sql'
+SCHEMA_PATH = _pkg_schema if _pkg_schema.is_file() else pathlib.Path(__file__).resolve().parent.parent / 'schema' / 'schema.sql'
 
 # ── Canonical IDs ──────────────────────────────────────────────────────
 AGENT_SORA   = 'agent-sora'

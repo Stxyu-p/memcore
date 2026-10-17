@@ -47,6 +47,23 @@ def _register_math_functions(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
+
+def _register_vector_functions(conn: sqlite3.Connection) -> None:
+    """Load sqlite-vec extension if available, enabling in-process SIMD vector distance operations."""
+    try:
+        import sqlite_vec
+        conn.enable_load_extension(True)
+        try:
+            sqlite_vec.load(conn)
+        finally:
+            try:
+                conn.enable_load_extension(False)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _resolve_schema_path() -> pathlib.Path:
     # 1. Inside package (installed wheel / site-packages)
     pkg_schema = pathlib.Path(__file__).resolve().parent / 'schema' / 'schema.sql'
@@ -558,6 +575,7 @@ def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connecti
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('PRAGMA synchronous = NORMAL')
         _register_math_functions(conn)
+        _register_vector_functions(conn)
         try:
             apply_migrations(conn)
         except sqlite3.OperationalError as e:
@@ -605,6 +623,7 @@ def _open_existing_connection(db_path: str, *, readonly: bool,
         else:
             conn.execute('PRAGMA synchronous = NORMAL')
         _register_math_functions(conn)
+        _register_vector_functions(conn)
         # Validate that the file is indeed a readable sqlite database
         conn.execute('PRAGMA schema_version')
         return conn

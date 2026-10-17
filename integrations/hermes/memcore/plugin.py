@@ -48,7 +48,7 @@ def _ensure_memcore_importable():
     if env_src:
         candidates.append(pathlib.Path(env_src).expanduser())
     for parent in _PLUGIN_DIR.parents:
-        if (parent / 'memcore' / 'core.py').is_file() and (parent / 'schema' / 'schema.sql').is_file():
+        if (parent / 'memcore' / 'core.py').is_file() and ((parent / 'memcore' / 'schema' / 'schema.sql').is_file() or (parent / 'schema' / 'schema.sql').is_file()):
             candidates.append(parent)
             break
     candidates.append(pathlib.Path.home() / 'Workspace' / 'memcore')

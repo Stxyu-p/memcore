@@ -35,7 +35,7 @@ except ImportError:
     from memcore import core, ingest, store  # type: ignore
     from memcore.client import DEFAULT_DB, MemCore  # type: ignore
 
-SERVER_INFO = {"name": "memcore", "version": "1.0.0"}
+SERVER_INFO = {"name": "memcore", "version": "2.0.0"}
 FALLBACK_PROTOCOL = "2024-11-05"
 
 

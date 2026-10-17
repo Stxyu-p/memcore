@@ -84,8 +84,8 @@ def resolve_config(
     p_name = (provider or os.environ.get('MEMCORE_EMBEDDING_PROVIDER', '')).lower()
     if p_name in ('none', 'off', 'disabled'):
         return None, '', None
-    if p_name in ('local', 'fastembed'):
-        return 'in-process', model or 'BAAI/bge-small-en-v1.5', None
+    if p_name in ('local', 'fastembed', 'model2vec'):
+        return 'in-process', model or 'minishlab/potion-base-8M', None
 
     preset = PROVIDERS.get(p_name, {})
     target_url, target_model = _preset_targets(preset, model)
@@ -232,6 +232,29 @@ def _get_fastembed_batch(texts: list[str], model: str | None = None) -> list[lis
     return [list(vec) for vec in embedder.embed(texts)]
 
 
+_model2vec_cache: dict[str, Any] = {}
+
+
+def _get_model2vec_batch(texts: list[str], model: str | None = None) -> list[list[float]] | None:
+    try:
+        from model2vec import StaticModel
+    except ImportError:
+        return None
+    model_name = model or 'minishlab/potion-base-8M'
+    embedder = _model2vec_cache.get(model_name)
+    if embedder is None:
+        with _state_lock:
+            embedder = _model2vec_cache.get(model_name)
+            if embedder is None:
+                embedder = StaticModel.from_pretrained(model_name)
+                _model2vec_cache[model_name] = embedder
+    try:
+        vecs = embedder.encode(texts)
+        return [list(vec) for vec in vecs]
+    except Exception:
+        return None
+
+
 def get_embeddings_batch(
     texts: list[str],
     endpoint: str | None = None,
@@ -255,7 +278,10 @@ def get_embeddings_batch(
     if not target_endpoint:
         return None
     if target_endpoint == 'in-process':
-        return _get_fastembed_batch(texts, model=target_model)
+        res = _get_fastembed_batch(texts, model=target_model)
+        if res is None:
+            res = _get_model2vec_batch(texts, model=target_model)
+        return res
 
     payload = {
         'input': texts,

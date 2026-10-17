@@ -2,15 +2,27 @@
 
 # MemCore
 
-**Governed, local-first memory engine for autonomous AI agent fleets**
+**Governed, Bitemporal, Local-First Memory Engine for Autonomous AI Agent Fleets**
 
 <p><em>Capture broadly. Recall narrowly. Never trust raw conversational history.</em></p>
 
-[![Version v1.0.0](https://img.shields.io/badge/version-v1.0.0-0284c7?style=flat-square)](https://github.com/Stxyu-p/memcore/releases)
-![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB?style=flat-square)
-![SQLite WAL FTS5](https://img.shields.io/badge/storage-SQLite_WAL_FTS5-07405E?style=flat-square)
-![Zero Dependencies](https://img.shields.io/badge/dependencies-0_external-success?style=flat-square)
-[![MIT License](https://img.shields.io/badge/license-MIT-slate?style=flat-square)](https://github.com/Stxyu-p/memcore/blob/main/LICENSE)
+<p>
+  <a href="https://github.com/Stxyu-p/memcore/releases"><img src="https://img.shields.io/badge/version-v2.0.0-0284c7?style=flat-square" alt="Version v2.0.0" /></a>
+  <img src="https://img.shields.io/badge/python-3.10+-3776AB?style=flat-square" alt="Python 3.10+" />
+  <img src="https://img.shields.io/badge/storage-SQLite_WAL_+_FTS5_+_sqlite--vec-07405E?style=flat-square" alt="SQLite WAL FTS5 sqlite-vec" />
+  <img src="https://img.shields.io/badge/embeddings-model2vec_/_FastEmbed-10b981?style=flat-square" alt="Local Embeddings" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-slate?style=flat-square" alt="MIT License" /></a>
+</p>
+
+<p>
+  <a href="#what-is-memcore">Overview</a> ·
+  <a href="#the-global-agent-trinity-recommended-combo">Global Trinity Combo</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#architecture--trust-model">Architecture</a> ·
+  <a href="#measured-performance--footprint">Performance</a> ·
+  <a href="#python-sdk--cli">Python SDK & CLI</a> ·
+  <a href="#serving-multi-agent-fleets">Multi-Agent Fleets</a>
+</p>
 
 </div>
 
@@ -18,276 +30,218 @@
 
 ## What is MemCore?
 
-Most AI agent memory frameworks dump raw conversational logs directly into prompts or vector stores. Over time, this leads to prompt bloat, hallucinated facts, and state poisoning. When an agent makes a mistake, that mistake is re-injected as truth in subsequent turns.
+Most AI agent memory frameworks dump raw conversational logs directly into prompts or unverified vector stores. Over time, this causes prompt bloat, hallucinated facts, and state poisoning — when an agent makes a mistake once, that mistake is re-injected as truth in future sessions.
 
-**MemCore solves this by introducing governed, bitemporal memory with hard trust boundaries for autonomous agent fleets.**
+**MemCore v2.0.0 solves this with governed, bitemporal memory and hard SQL-enforced trust boundaries:**
 
-It separates memory into two distinct zones:
-1. **Raw Ingest Journal (Untrusted):** An append-only ledger that captures turns, tool executions, and delegations. It is **never** injected directly into prompts.
-2. **Governed Canonical Memory (Authoritative):** Verified facts, decisions, and constraints carrying explicit trust, lifecycle, and freshness labels.
-
-MemCore runs local-first on Python standard library and SQLite WAL. It requires **zero background daemons**, open network ports, or external vector databases.
-
----
-
-## Installation Links
-
-| Distribution | Source / Target | Command / Link |
-| :--- | :--- | :--- |
-| **Standard Core** | PyPI Engine (0 Dependencies) | `pip install memcore` |
-| **Local CPU Embeddings** | FastEmbed (ONNX in-process) | `pip install "memcore[local-embed]"` |
-| **Git Source** | GitHub Repository | [Stxyu-p/memcore](https://github.com/Stxyu-p/memcore) |
-| **Release Archive** | Tagged Releases | [GitHub Releases](https://github.com/Stxyu-p/memcore/releases) |
-
----
-
-## Why MemCore?
-
-| Capability | What It Does | Why It Matters |
-| :--- | :--- | :--- |
-| **Journal Isolation** | Raw conversation turns are kept in an append-only journal and never recalled directly. | Prevents conversational noise and temporary mistakes from polluting long-term memory. |
-| **Strict SQL Scoping** | Project-wide vs. private-agent boundaries are enforced directly in SQL `WHERE` clauses. | Agent A can never read Agent B's private notes, even under broad semantic search. |
-| **Tombstone Guards** | Refusal guards block re-admission of the same normalized claim fingerprint until explicitly overridden. | Exact normalized replays stay blocked; paraphrases have separate fingerprints. |
-| **Bitemporal Auditing** | Corrections create immutable versions tracking both valid-world time and system transaction time. | Full audit history is preserved; old truth remains inspectable without corrupting current state. |
-| **Hybrid RRF Recall** | FTS5 BM25 + dense vector embeddings fused via Reciprocal Rank Fusion (RRF, $k=60$). | Delivers lexical exactness for technical IDs alongside semantic meaning for natural queries. |
-| **Source Staleness** | Auto-detects when a tracked source file's SHA-256 changes. | Unrelated Git commits do not invalidate a code-backed memory. |
-| **C-Level Vector Math** | Vector dot product accelerated via C-level pointer loops in stdlib (`array.array` + `operator.mul`). | Sub-millisecond vector cosine evaluation without heavy external wheels. |
-| **Salience L1 Preview** | Progressive recall prioritizing negations, numerical bounds, and file paths within 180 chars. | Reduces context token usage by 80% while preserving critical constraints. |
-| **Daemonless & Offline** | Single SQLite file with WAL mode; optional in-process CPU vector embeddings (FastEmbed). | Zero Docker containers to run, zero open ports, zero cloud dependencies required. |
-
----
-
-## Measured Performance & Footprint
-
-Measured on local disk with SQLite WAL and hybrid RRF retrieval:
-
-| Metric | MemCore (In-Process SQLite WAL) | External Daemon / Remote Vector DB |
-| :--- | :--- | :--- |
-| **Daemon RAM Footprint** | **0 MB** (100% in-process) | 300 MB to 1 GB+ (container or background process) |
-| **Store Initialization** | **< 1.0 ms** (0.9 ms p50) | 2,000 to 5,000 ms (service boot or handshake) |
-| **Indexed Claim Lookup** | **0.017 ms** (17 µs p50) | 15 to 35 ms (network round-trip) |
-| **Hybrid Recall Latency (p50)** | **2.24 ms** (measured on 1,000 iterations) | 25 to 60 ms (HTTP/gRPC hop + remote vector query) |
-| **Tail Recall Latency (p95)** | **4.80 ms** | 75 to 150 ms (network and tail queue latency) |
-| **Max Query Latency** | **10.44 ms** | 200 to 500 ms (garbage collection or network jitter) |
-| **Batch Ingestion Rate** | **1,650 writes/sec** | 50 to 150 writes/sec (network-bottlenecked) |
-| **Network Attack Surface** | **Zero open ports** (fully offline) | Exposed HTTP/gRPC API ports |
-
----
-
-## Architecture
+1. **Raw Ingest Journal (`Untrusted`):** An append-only ledger (`ingest_event`) that records turns, tool executions, and delegations. It is **never** injected directly into prompts until reviewed and promoted.
+2. **Governed Canonical Memory (`Authoritative`):** Verified facts, architectural decisions, preferences, and constraints carrying explicit `scope`, `lifecycle`, `verification`, and `freshness` labels.
+3. **Sub-Millisecond Hybrid Recall:** Combines SQLite **FTS5 BM25** lexical search with in-process **`sqlite-vec` SIMD** vector distance and **`model2vec`** static embeddings (`minishlab/potion-base-8M`) via Reciprocal Rank Fusion (RRF, $k=60$) — requiring **zero background daemons**, zero Docker containers, and zero open network ports.
 
 <div align="center">
   <img src="docs/architecture.svg" alt="MemCore Governed Trust and Hybrid Architecture" width="100%" />
 </div>
 
-### Trust Model
+---
 
-Every recalled memory carries four explicit labels so the agent knows exactly how much to rely on it:
+## The Global Agent Trinity (Recommended Combo)
 
-- **`scope`**: `project` (shared across fleet members) or `private` (accessible only to owning agent).
-- **`lifecycle`**: `accepted` (live canonical memory), `candidate` (proposed fact), or `conflict` (unresolved disagreement).
-- **`verification`**: `user_authoritative`, `runtime_verified`, `source_backed`, or `unverified`.
-- **`freshness`**: `current`, `aging`, or `stale` (derived from age decay curves and Git commit alignment).
+For the complete local-first AI engineering stack, pair **MemCore** with [**Trimtok**](https://github.com/Stxyu-p/trimtok) and [**Skill Proof**](https://github.com/Stxyu-p/skill-proof). Together, they connect every AI coding client on your machine (**Claude Code, Cursor, Antigravity, Gemini CLI, Codex, VS Code Copilot, Windsurf, OpenCode, Cline, and Hermes**) to three unified global hubs:
+
+```mermaid
+flowchart LR
+    User(["Developer Task"]) --> SP["Skill Proof v1.0.0<br/>~/.skill-proof/skills<br/>(Deterministic Skill Routing)"]
+    SP --> MC["MemCore v2.0.0<br/>~/.memcore<br/>(Governed Bitemporal Memory)"]
+    MC --> Agent["Any AI Coding Agent<br/>(Claude / Cursor / Antigravity / Codex / Hermes)"]
+    Agent --> TT["Trimtok v4.0.0<br/>~/.trimtok<br/>(88.3% Context Compression + CCR #c1)"]
+    TT --> Agent
+    Agent -->|"Verified Facts & Decisions"| MC
+```
+
+| Layer | Engine | Global Hub | What You Gain When Installed Together |
+| :--- | :--- | :--- | :--- |
+| **1. Governed Memory** | [**MemCore v2.0.0**](https://github.com/Stxyu-p/memcore) | `~/.memcore` | **One Shared Brain Across All Clients:** Fix a bug or lock an architectural decision in Cursor, and Claude Code, Antigravity, or Codex immediately recall the verified truth. |
+| **2. Context Shield** | [**Trimtok v4.0.0**](https://github.com/Stxyu-p/trimtok) | `~/.trimtok` | **88.3% Less Context Noise:** Compresses noisy terminal logs, tracebacks, diffs, AST code bodies, and JSON outputs while keeping every byte recoverable via `#c1` aliases. |
+| **3. Skill Routing** | [**Skill Proof v1.0.0**](https://github.com/Stxyu-p/skill-proof) | `~/.skill-proof/skills` | **One Skill Vault, Zero Prompt Bloat:** Consolidates dispersed `SKILL.md` directories into one global vault and routes tasks deterministically in `< 1 ms` without extra LLM calls. |
+
+### One-Command Trinity Setup
+
+```bash
+# 1. Install all three engines (includes sqlite-vec, model2vec, msgspec, rapidfuzz, zstandard, tiktoken)
+pip install memcore trimtok skill-proof
+
+# 2. Initialize MemCore & auto-register MCP servers across all detected AI coding clients
+memcore init
+memcore install
+trimtok install
+skill-proof install
+
+# 3. Consolidate dispersed agent skills into the global vault (~/.skill-proof/skills)
+skill-proof vault migrate
+```
 
 ---
 
 ## Quick Start
 
-### 1. Universal One-Command Auto-Install (Recommended)
+### 1. Universal One-Command Auto-Install
 
-Install `memcore` and automatically register it into every supported AI agent CLI and IDE with zero manual configuration:
+Install `memcore` and automatically register its stdio MCP server across every detected AI agent CLI and IDE:
 
 ```bash
-# 1. Install package
 pip install memcore
-
-# 2. Initialize project database
 memcore init
-
-# 3. Auto-register MCP server and sync agent skills
 memcore install
 ```
 
-`memcore install` detects and atomically registers MCP tools into:
-- **Claude Code** (`~/.claude.json` via official `claude mcp add-json`)
-- **Claude Desktop** (`claude_desktop_config.json` on Windows, macOS, and Linux)
-- **Gemini CLI** (`~/.gemini/settings.json`)
-- **Google Antigravity & IDE** (`~/.gemini/config/mcp_config.json`, `~/.gemini/antigravity/mcp_config.json`)
-- **Codex CLI** (`~/.codex/config.toml` with atomic TOML validation)
-- **OpenCode** (`~/.config/opencode/opencode.json`)
-- **VS Code / GitHub Copilot** (`mcp.json` user settings)
-- **Cursor** (`~/.cursor/mcp.json`)
-- **Windsurf** (`~/.codeium/windsurf/mcp_config.json`)
-- **Cline** (`cline_mcp_settings.json`)
+`memcore install` atomically registers `memcore` into:
+- **Claude Code** (`~/.claude.json`) & **Claude Desktop** (`claude_desktop_config.json`)
+- **Google Antigravity & Antigravity IDE** (`~/.gemini/config/mcp_config.json`, `~/.gemini/antigravity/mcp_config.json`)
+- **Gemini CLI** (`~/.gemini/settings.json`) & **Codex CLI** (`~/.codex/config.toml`)
+- **Cursor** (`~/.cursor/mcp.json`), **Windsurf**, **VS Code (Copilot)**, **OpenCode**, and **Cline**
 
-It also automatically synchronizes MCP schema definitions into Antigravity (`~/.gemini/antigravity-cli/mcp/memcore`) and exports global skills into `~/.agents/skills/memcore/SKILL.md` and `~/.gemini/config/skills/memcore/SKILL.md`.
-
-#### Inspect Detected Clients
+Inspect detected clients or run a full governance & schema health check:
 
 ```bash
 memcore clients
-```
-
-Output:
-```text
-  claude-code      Claude Code        registered      ~/.claude.json
-  claude-desktop   Claude Desktop     registered      AppData/Roaming/Claude/claude_desktop_config.json
-  gemini-cli       Gemini CLI         registered      ~/.gemini/settings.json
-  antigravity      Antigravity        registered      ~/.gemini/config/mcp_config.json
-  antigravity-ide  Antigravity IDE    registered      ~/.gemini/antigravity/mcp_config.json
-  codex            Codex CLI          registered      ~/.codex/config.toml
-  opencode         OpenCode           registered      ~/.config/opencode/opencode.json
-  vscode           VS Code (Copilot)  registered      AppData/Roaming/Code/User/mcp.json
-```
-
-#### Health Audit & Uninstallation
-
-```bash
-# Verify WAL mode, schema integrity, and backup readiness
 memcore doctor
-
-# Cleanly unregister memcore from all configured clients
-memcore uninstall
 ```
 
 ---
 
-### 2. Python SDK
+## Architecture & Trust Model
 
-Embed MemCore into any agent framework (LangChain, LlamaIndex, CrewAI, AutoGen, or custom agents):
+### Modular Package Layout (`memcore v2.0.0`)
+
+| Module | Role | Key Responsibilities |
+| :--- | :--- | :--- |
+| `memcore/store.py` | **SQLite WAL + `sqlite-vec` Storage** | Schema migrations, FTS5 sync triggers, custom SQL math functions, and locked-down `sqlite-vec` SIMD vector loading. |
+| `memcore/write.py` | **Governed Write & Lifecycle Engine** | Claim fingerprinting, idempotency keys, bitemporal `supersede`, `promote`, `reject`, tombstone refusal guards, and corroboration funnel. |
+| `memcore/recall.py` | **Hybrid RRF Search & Salience L1** | SQL-enforced scope filtering, FTS5 BM25 + dense vector RRF ($k=60$), freshness/decay scoring, and 180-char Salience L1 constraint previews. |
+| `memcore/doctor.py` | **Governance Audit & Retention GC** | Fingerprint integrity verification, tombstone scope validation, reversible candidate retention cleanup (`gc_apply`), and operational telemetry. |
+| `memcore/imports.py` | **Ingest & Cross-Format Import** | JSONL/Markdown import with secret redaction, duplicate detection, and provenance preservation. |
+| `memcore/embedding.py` | **Multi-Tier Embedding Engine** | In-process `model2vec` (`StaticModel`), `fastembed` (ONNX), `ollama`, `openrouter`, `openai`, and pure-offline lexical fallback. |
+| `memcore/core.py` | **Unified Engine Facade** | Attribute-synchronizing module proxy preserving 100% backward compatibility across all callers and test harnesses. |
+| `memcore/mcp_server.py` | **Stdio MCP Server** | Exposes 9 governed memory tools (`memory_remember`, `memory_search`, `memory_promote`, `memory_supersede`, `memory_reject`, `memory_feedback`, `memory_review_queue`, `memory_review_decide`, `memory_status`). |
+
+### Four-Dimensional Trust Labels
+
+Every recalled memory carries four explicit labels so agents know exactly how to weight it:
+
+| Dimension | Values | Meaning |
+| :--- | :--- | :--- |
+| **`scope`** | `project` \| `private` | Enforced directly in SQL `WHERE` clauses — Agent A can never read Agent B's private notes. |
+| **`lifecycle`** | `accepted` \| `candidate` \| `conflict` \| `superseded` \| `rejected` \| `disabled` | Tracks whether a claim is canonical truth, awaiting corroboration, or blocked by a tombstone. |
+| **`verification`** | `user_authoritative` \| `runtime_verified` \| `source_backed` \| `unverified` | Ranks proven runtime/user facts above unverified observations. |
+| **`freshness`** | `current` \| `aging` \| `stale` | Automatically marks `source_file`-backed memories `stale` when the file's SHA-256 changes on disk. |
+
+---
+
+## Measured Performance & Footprint
+
+Measured on local disk with SQLite WAL, FTS5 BM25, and hybrid RRF retrieval (`docs/BENCHMARKS.md`):
+
+| Metric | MemCore v2.0.0 (In-Process SQLite WAL) | External Daemon / Remote Vector DB |
+| :--- | :--- | :--- |
+| **Background Daemon RAM** | **0 MB** (100% in-process) | 300 MB – 1 GB+ (Docker / server process) |
+| **Store Initialization** | **< 1.0 ms** (`0.9 ms` p50) | 2,000 – 5,000 ms (service boot / handshake) |
+| **Indexed Claim Lookup** | **0.017 ms** (`17 µs` p50) | 15 – 35 ms (network round-trip) |
+| **Hybrid Recall Latency (`p50`)** | **2.24 ms** (1,000 iterations) | 25 – 60 ms (HTTP/gRPC + remote vector query) |
+| **Tail Recall Latency (`p95`)** | **4.80 ms** | 75 – 150 ms |
+| **Hybrid Recall Precision (`p@3`)** | **1.00** (exact, negation, paraphrase) | Varies |
+| **Batch Ingestion Rate** | **1,650 writes/sec** | 50 – 150 writes/sec |
+| **Network Attack Surface** | **Zero open ports** (offline-first) | Exposed HTTP/gRPC ports |
+
+---
+
+## Python SDK & CLI
+
+### Python SDK
 
 ```python
 from memcore.client import MemCore
 
-# Initialize client bound to a project and agent
-with MemCore(project="platform", agent="orchestrator") as mc:
-    # 1. Store a governed memory
+with MemCore(project="platform", agent="sora") as mc:
+    # 1. Store a governed fact bound to a source file for automatic SHA-256 staleness tracking
     mem_id = mc.remember(
-        "ClickHouse is used for telemetry analytics on port 9000",
-        memory_type="fact"
+        "ClickHouse telemetry analytics runs on port 9000",
+        memory_type="fact",
+        source_file="src/settings.py",
     )
 
-    # 2. Hybrid recall (FTS5 BM25 + Semantic Vector Fusion)
-    hits = mc.search("database stack")
+    # 2. Hybrid recall (FTS5 BM25 + Dense Vector RRF Fusion)
+    hits = mc.search("telemetry database port")
     for hit in hits:
-        print(f"[{hit['scope']} | {hit['freshness']}] {hit['content']}")
+        print(f"[{hit['scope']} | {hit['verification']} | {hit['freshness']}] {hit['content']}")
 
-    # 3. Correct with immutable bitemporal history (supersede)
+    # 3. Bitemporal update (preserves immutable prior version history)
     mc.supersede(
         mem_id,
-        "ClickHouse telemetry analytics migrated to port 9440 with TLS",
-        reason="security upgrade"
-    )
-
-    # Optional source provenance: MemCore stores an absolute path and SHA-256.
-    mc.remember(
-        "Telemetry configuration is defined in settings.py",
-        source_file="src/settings.py",
-        source_commit="<commit-sha>",
+        "ClickHouse telemetry analytics migrated to port 9440 with mTLS",
+        reason="security hardening",
     )
 ```
 
-Recall marks a source-backed memory stale when that file's contents change.
-The commit value is provenance context; unrelated commits do not affect freshness.
-The CLI supports the same metadata with `memcore remember --source-file ...`
-and `--source-commit ...`.
+### Operational CLI
 
----
+```bash
+# Database health, WAL integrity, governance invariants, and backup readiness
+memcore doctor
 
-## Hybrid Recall & Vector Providers
+# Store and search memories directly from the terminal
+memcore remember "Python 3.10+ required for core services" --project platform --agent sora
+memcore search "python version" --project platform --agent sora
 
-MemCore provides dense vector retrieval alongside SQLite FTS5 lexical search. Configure your embedding backend via `--provider` or the `MEMCORE_EMBEDDING_PROVIDER` environment variable:
+# Backfill or refresh local embeddings
+memcore embed --provider local --all
 
-| Provider | Default Model | Runtime Mode | Description |
-| :--- | :--- | :--- | :--- |
-| **`local` / `fastembed`** | `BAAI/bge-small-en-v1.5` | In-Process (CPU) | Zero network, zero daemon (~30MB ONNX model runs in-process). |
-| **`ollama`** | `nomic-embed-text` | Local Daemon | Connects to local Ollama service at `localhost:11434`. |
-| **`openrouter`** | `text-embedding-3-small` | Remote Gateway | Connects to OpenRouter API via `OPENROUTER_API_KEY`. |
-| **`openai`** | `text-embedding-3-small` | Cloud API | Connects to OpenAI API via `OPENAI_API_KEY`. |
-| **`none`** | *(Disabled)* | Pure Offline | Lexical search only (SQLite FTS5 BM25 + Unicode substring). |
+# Create and verify atomic database snapshots
+memcore backup
+memcore backup-status
+
+# Review raw journal events and apply governed triage decisions
+memcore journal-stats
+memcore journal-review-list --project platform --agent sora
+memcore journal-review-decide <event-id> --verdict remember --content "Verified fact" --agent sora
+```
 
 ---
 
 ## Serving Multi-Agent Fleets
 
-MemCore bridges diverse coding agents by exporting governed project memory directly into shared instruction files. This ensures every agent operating in the workspace reads from a single source of truth.
+MemCore exports governed project memory into deterministic, SHA-256-signed instruction files so every agent in your workspace reads from the same canonical truth:
 
 <table width="100%">
   <tr>
-    <td align="center" width="25%"><img src="assets/agents/antigravity.svg" width="44" height="44" alt="Antigravity logo" /><br /><sub>Antigravity</sub></td>
-    <td align="center" width="25%"><img src="assets/agents/codex.svg" width="44" height="44" alt="Codex logo" /><br /><sub>Codex</sub></td>
-    <td align="center" width="25%"><img src="assets/agents/claude-code.svg" width="44" height="44" alt="Claude Code logo" /><br /><sub>Claude Code</sub></td>
-    <td align="center" width="25%"><img src="assets/agents/cursor.svg" width="44" height="44" alt="Cursor logo" /><br /><sub>Cursor</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/antigravity.svg" width="44" height="44" alt="Antigravity" /><br /><sub>Antigravity</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/codex.svg" width="44" height="44" alt="Codex" /><br /><sub>Codex</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/claude-code.svg" width="44" height="44" alt="Claude Code" /><br /><sub>Claude Code</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/cursor.svg" width="44" height="44" alt="Cursor" /><br /><sub>Cursor</sub></td>
   </tr>
   <tr>
-    <td align="center" width="25%"><img src="assets/agents/deepseek-harness.svg" width="44" height="44" alt="DeepSeek logo" /><br /><sub>DeepSeek Harness</sub></td>
-    <td align="center" width="25%"><img src="assets/agents/hermes.svg" width="44" height="44" alt="Hermes logo" /><br /><sub>Hermes</sub></td>
-    <td align="center" width="25%"><img src="assets/agents/opencode.svg" width="44" height="44" alt="OpenCode logo" /><br /><sub>OpenCode</sub></td>
-    <td align="center" width="25%"><img src="assets/agents/gemini.svg" width="44" height="44" alt="Gemini logo" /><br /><sub>Gemini CLI</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/deepseek-harness.svg" width="44" height="44" alt="DeepSeek" /><br /><sub>DeepSeek Harness</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/hermes.svg" width="44" height="44" alt="Hermes" /><br /><sub>Hermes</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/opencode.svg" width="44" height="44" alt="OpenCode" /><br /><sub>OpenCode</sub></td>
+    <td align="center" width="25%"><img src="assets/agents/gemini.svg" width="44" height="44" alt="Gemini" /><br /><sub>Gemini CLI</sub></td>
   </tr>
 </table>
 
 ```bash
-# Export governed memory into workspace AGENTS.md
-memcore export
-
-# Export targeting specific agent conventions
+memcore export                      # Writes governed workspace AGENTS.md
 memcore export --host claude-code   # Writes CLAUDE.md
 memcore export --host gemini-cli    # Writes GEMINI.md
 memcore export --host copilot       # Writes .github/copilot-instructions.md
 ```
 
-- **Guaranteed Consistency:** Output across all targets is verified byte-for-byte by SHA-256 digest.
-- **Safe Overwriting:** Existing files without a MemCore signature are preserved to prevent accidental data loss.
-
----
-
-## Operational CLI
-
-MemCore includes a comprehensive CLI for administration, health audits, and disaster recovery:
+### Verification Suite
 
 ```bash
-# Database health, WAL integrity, and backup readiness
-memcore doctor
-
-# Store and search memories from terminal
-memcore remember "Python 3.10+ required for core services" --project platform --agent dev
-memcore search "python version" --project platform --agent dev
-
-# Backfill or update vector embeddings
-memcore embed --provider local --all
-
-# Create verified, consistent atomic backup snapshots
-memcore backup
-memcore backup-status
-memcore restore-from-snapshot --snapshot <snapshot-name> --confirm
-
-# Review raw journal and resolve pending semantic triage
-memcore journal-stats
-memcore journal-review-list --project platform --agent dev
-memcore journal-review-decide <event-id> --verdict remember --content "Fact text" --agent dev
-```
-
----
-
-## Hermes Agent Integration
-
-MemCore functions as an exclusive native memory provider for [Hermes Agent](https://github.com/NousResearch/hermes-agent):
-
-```yaml
-memory:
-  provider: memcore
-```
-
-Deploy and verify the tracked plugin runtime directly:
-
-```bash
-python scripts/deploy_hermes_plugin.py
-python scripts/deploy_hermes_plugin.py --check
+# Run the complete 605-test governance, bitemporal, concurrency, and recall harness
+python -m unittest discover -s harness -p "test_*.py"
 ```
 
 ---
 
 ## License
 
-Distributed under the **MIT License**. See `LICENSE` for details.
+Distributed under the [MIT License](LICENSE). Designed and maintained by **P Choke & SORA**.

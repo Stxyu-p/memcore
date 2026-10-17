@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memcore"
-version = "1.0.0"
+version = "2.0.0"
 description = "Governed, bitemporal, local-first memory engine for autonomous AI agent fleets"
 readme = "README.md"
 authors = [
@@ -27,8 +27,12 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+sqlite-vec = [
+    "sqlite-vec>=0.1.0",
+]
 local-embed = [
     "fastembed>=0.4.0",
+    "model2vec>=0.10.0",
 ]
 
 [project.scripts]

@@ -47,7 +47,19 @@ def _register_math_functions(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
-SCHEMA_PATH = pathlib.Path(__file__).resolve().parent.parent / 'schema' / 'schema.sql'
+def _resolve_schema_path() -> pathlib.Path:
+    # 1. Inside package (installed wheel / site-packages)
+    pkg_schema = pathlib.Path(__file__).resolve().parent / 'schema' / 'schema.sql'
+    if pkg_schema.is_file():
+        return pkg_schema
+    # 2. Repo root parent/schema/schema.sql
+    repo_schema = pathlib.Path(__file__).resolve().parent.parent / 'schema' / 'schema.sql'
+    if repo_schema.is_file():
+        return repo_schema
+    return pkg_schema
+
+
+SCHEMA_PATH = _resolve_schema_path()
 _MIGRATION_LOCK_VERSION = '__migration_lock__'
 _MIGRATION_LOCK_TTL_SECONDS = 30.0
 _MIGRATION_LOCK_WAIT_SECONDS = 10.0

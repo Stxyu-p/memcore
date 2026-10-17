@@ -9,6 +9,60 @@ import time
 import pathlib
 
 from . import store, core, ingest, export as export_mod, embedding
+from .mcp_install import ServerSpec, add_install_arguments, run_clients, run_install
+from . import mcp_server
+
+
+def _memcore_server_spec() -> ServerSpec:
+    return ServerSpec(name="memcore", module="memcore.mcp_server")
+
+
+def _sync_memcore_antigravity_schema() -> None:
+    try:
+        ag_mcp = pathlib.Path.home() / ".gemini" / "antigravity-cli" / "mcp"
+        if not ag_mcp.parent.is_dir():
+            return
+        target = ag_mcp / "memcore"
+        target.mkdir(parents=True, exist_ok=True)
+        for tool in mcp_server.TOOLS:
+            schema = {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["inputSchema"],
+            }
+            (target / f"{tool['name']}.json").write_text(
+                json.dumps(schema, ensure_ascii=False), encoding="utf-8"
+            )
+    except Exception:
+        pass
+
+
+def _sync_memcore_global_skill() -> None:
+    skill_md = (
+        "---\n"
+        "name: memcore\n"
+        "description: >-\n"
+        "  Governed, bitemporal, local-first memory engine (MemCore v1.0.0) for storing, searching,\n"
+        "  promoting, superseding, and auditing canonical project facts and architectural decisions across agent sessions.\n"
+        "---\n\n"
+        "# MemCore v1.0.0 — Governed Bitemporal Memory\n\n"
+        "MemCore provides governed project memory across agent sessions with 9 MCP tools:\n"
+        "`memory_remember`, `memory_search`, `memory_promote`, `memory_supersede`, `memory_reject`,\n"
+        "`memory_feedback`, `memory_review_queue`, `memory_review_decide`, and `memory_status`.\n"
+    )
+    for root in (
+        pathlib.Path.home() / ".agents" / "skills",
+        pathlib.Path.home() / ".gemini" / "config" / "skills",
+    ):
+        try:
+            if root.is_dir():
+                d = root / "memcore"
+                d.mkdir(parents=True, exist_ok=True)
+                target = d / "SKILL.md"
+                if not target.exists():
+                    target.write_text(skill_md, encoding="utf-8")
+        except Exception:
+            pass
 
 
 DEFAULT_DB = str(pathlib.Path.home() / '.memcore' / 'memory.db')
@@ -1895,6 +1949,33 @@ def main(argv=None):
     p.add_argument('--skip-binding-check', action='store_true',
                    help='skip Hermes config binding drift checks (useful for test/staging stores)')
     p.set_defaults(func=cmd_doctor)
+
+    def _cmd_install(a):
+        rc = run_install(_memcore_server_spec(), a, remove=False)
+        if not getattr(a, 'dry_run', False) and not getattr(a, 'print_only', False):
+            _sync_memcore_antigravity_schema()
+            _sync_memcore_global_skill()
+        sys.exit(rc)
+
+    def _cmd_uninstall(a):
+        sys.exit(run_install(_memcore_server_spec(), a, remove=True))
+
+    def _cmd_clients(a):
+        sys.exit(run_clients(_memcore_server_spec()))
+
+    def _cmd_mcp(a):
+        sys.exit(mcp_server.main())
+
+    p_inst = sub.add_parser('install', help='Auto-register MemCore MCP server in all detected agent CLIs/IDEs', parents=[common])
+    add_install_arguments(p_inst)
+    p_inst.set_defaults(func=_cmd_install)
+
+    p_uninst = sub.add_parser('uninstall', help='Remove MemCore MCP server registration from agent CLIs/IDEs', parents=[common])
+    add_install_arguments(p_uninst)
+    p_uninst.set_defaults(func=_cmd_uninstall)
+
+    sub.add_parser('clients', help='List supported agent clients and MemCore registration status', parents=[common]).set_defaults(func=_cmd_clients)
+    sub.add_parser('mcp', help='Run the stdio MCP server (JSON-RPC 2.0)', parents=[common]).set_defaults(func=_cmd_mcp)
 
     args = parser.parse_args(argv)
     # --db is accepted before or after the subcommand; the fallback is resolved

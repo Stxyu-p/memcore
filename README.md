@@ -93,7 +93,66 @@ Every recalled memory carries four explicit labels so the agent knows exactly ho
 
 ## Quick Start
 
-### 1. Python SDK
+### 1. Universal One-Command Auto-Install (Recommended)
+
+Install `memcore` and automatically register it into every supported AI agent CLI and IDE with zero manual configuration:
+
+```bash
+# 1. Install package
+pip install memcore
+
+# 2. Initialize project database
+memcore init
+
+# 3. Auto-register MCP server and sync agent skills
+memcore install
+```
+
+`memcore install` detects and atomically registers MCP tools into:
+- **Claude Code** (`~/.claude.json` via official `claude mcp add-json`)
+- **Claude Desktop** (`claude_desktop_config.json` on Windows, macOS, and Linux)
+- **Gemini CLI** (`~/.gemini/settings.json`)
+- **Google Antigravity & IDE** (`~/.gemini/config/mcp_config.json`, `~/.gemini/antigravity/mcp_config.json`)
+- **Codex CLI** (`~/.codex/config.toml` with atomic TOML validation)
+- **OpenCode** (`~/.config/opencode/opencode.json`)
+- **VS Code / GitHub Copilot** (`mcp.json` user settings)
+- **Cursor** (`~/.cursor/mcp.json`)
+- **Windsurf** (`~/.codeium/windsurf/mcp_config.json`)
+- **Cline** (`cline_mcp_settings.json`)
+
+It also automatically synchronizes MCP schema definitions into Antigravity (`~/.gemini/antigravity-cli/mcp/memcore`) and exports global skills into `~/.agents/skills/memcore/SKILL.md` and `~/.gemini/config/skills/memcore/SKILL.md`.
+
+#### Inspect Detected Clients
+
+```bash
+memcore clients
+```
+
+Output:
+```text
+  claude-code      Claude Code        registered      ~/.claude.json
+  claude-desktop   Claude Desktop     registered      AppData/Roaming/Claude/claude_desktop_config.json
+  gemini-cli       Gemini CLI         registered      ~/.gemini/settings.json
+  antigravity      Antigravity        registered      ~/.gemini/config/mcp_config.json
+  antigravity-ide  Antigravity IDE    registered      ~/.gemini/antigravity/mcp_config.json
+  codex            Codex CLI          registered      ~/.codex/config.toml
+  opencode         OpenCode           registered      ~/.config/opencode/opencode.json
+  vscode           VS Code (Copilot)  registered      AppData/Roaming/Code/User/mcp.json
+```
+
+#### Health Audit & Uninstallation
+
+```bash
+# Verify WAL mode, schema integrity, and backup readiness
+memcore doctor
+
+# Cleanly unregister memcore from all configured clients
+memcore uninstall
+```
+
+---
+
+### 2. Python SDK
 
 Embed MemCore into any agent framework (LangChain, LlamaIndex, CrewAI, AutoGen, or custom agents):
 

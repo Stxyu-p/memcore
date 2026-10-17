@@ -33,6 +33,11 @@ local-embed = [
 
 [project.scripts]
 memcore = "memcore.__main__:main"
+memcore-mcp = "memcore.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["memcore*"]
+
+[tool.setuptools.package-data]
+memcore = ["schema/*.sql", "schema.sql"]
+

@@ -84,7 +84,7 @@
   <!-- Canonical Store (SQLite WAL) -->
   <rect class="card-accent" x="296" y="154" width="240" height="88" rx="6"/>
   <text class="t-title" x="416" y="174" text-anchor="middle" fill="#60a5fa">Canonical Store</text>
-  <text class="t-sub" x="416" y="193" text-anchor="middle">SQLite WAL · 18 migrations</text>
+  <text class="t-sub" x="416" y="193" text-anchor="middle">SQLite WAL · schema-migrated</text>
   <text class="t-sub" x="416" y="209" text-anchor="middle">immutable bitemporal history</text>
   <text class="t-sub" x="416" y="225" text-anchor="middle">valid_from / valid_until</text>
 
@@ -93,9 +93,9 @@
   <!-- Vector Embedding Store -->
   <rect class="card-purple" x="296" y="274" width="240" height="88" rx="6"/>
   <text class="t-title" x="416" y="294" text-anchor="middle" fill="#c084fc">Vector Embeddings</text>
-  <text class="t-sub" x="416" y="312" text-anchor="middle">memory_embedding (IEEE 754)</text>
-  <text class="t-sub" x="416" y="328" text-anchor="middle">FastEmbed (in-process) · Ollama</text>
-  <text class="t-sub" x="416" y="344" text-anchor="middle">9Router · OpenRouter · OpenAI</text>
+  <text class="t-sub" x="416" y="312" text-anchor="middle">sqlite-vec SIMD + IEEE 754</text>
+  <text class="t-sub" x="416" y="328" text-anchor="middle">model2vec · FastEmbed · Ollama</text>
+  <text class="t-sub" x="416" y="344" text-anchor="middle">OpenRouter · OpenAI · Offline</text>
 
   <!-- Connect Store & Embedding to Hybrid Search -->
   <path class="edge" d="M536 198 H 596"/>
@@ -108,13 +108,13 @@
   <text class="t-sub" x="761" y="216" text-anchor="middle">Lane B: Cosine Similarity (Semantic Vector)</text>
   <text class="t-sub" x="761" y="234" text-anchor="middle">Score(d) = 1/(60+rank_fts) + 1/(60+rank_vec)</text>
   <text class="t-sub" x="761" y="254" text-anchor="middle" fill="#6ee7b7">Exact terms + Semantic intent amplified</text>
-  <text class="t-sub" x="761" y="272" text-anchor="middle">Token-budget bounded · Zero starvation</text>
+  <text class="t-sub" x="761" y="272" text-anchor="middle">Salience L1 · Token-budget bounded</text>
 
   <!-- Output / Consumption -->
   <path class="edge-green" d="M761 286 V 308"/>
   <rect class="card" x="602" y="312" width="318" height="50" rx="6"/>
   <text class="t-title" x="761" y="331" text-anchor="middle">Consumers &amp; Deliverables</text>
-  <text class="t-sub" x="761" y="349" text-anchor="middle">Python SDK (MemCore) · Prompt Inject · Export (AGENTS.md)</text>
+  <text class="t-sub" x="761" y="349" text-anchor="middle">Universal MCP Server · Python SDK · Multi-Agent Export</text>
 
   <!-- ==================== LANE 3: HARD INVARIANT BOUNDARY ==================== -->
   <text class="t-tag" x="24" y="400">ENFORCEMENT BOUNDARY : GUARANTEED IN SQL &amp; CODE · NEVER DELEGATED TO LLM</text>

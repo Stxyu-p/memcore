@@ -4,6 +4,25 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-10-18
+
+### Added
+- **Universal Stdio MCP Server & One-Command Installer (`memcore/mcp_server.py`, `memcore/mcp_install.py`)**:
+  - Exposes 9 governed memory tools (`memory_remember`, `memory_search`, `memory_promote`, `memory_supersede`, `memory_reject`, `memory_feedback`, `memory_review_queue`, `memory_review_decide`, `memory_status`) over stdio JSON-RPC 2.0.
+  - `memcore install` / `memcore clients` / `memcore uninstall` auto-registers across Claude Code, Claude Desktop, Gemini CLI, Antigravity, Antigravity IDE, OpenAI Codex CLI, OpenCode, and VS Code (GitHub Copilot).
+- **High-Level Python SDK (`memcore/client.py`)**:
+  - `MemCore` context-managed client with automatic project/agent/membership provisioning, hybrid FTS5 BM25 + dense vector RRF search, and bitemporal write helpers.
+- **Live On-Disk SHA-256 Provenance Verification in `memory_search` (`memcore/mcp_server.py`)**:
+  - `_tool_search` joins `memory.current_version_id = memory_version.id` and compares stored `source_hash` against `core.compute_file_hash(source_file)` on disk at recall time, automatically marking modified or deleted source-backed memories as `freshness="stale"`.
+- **Zero-Willpower Agent Habit & MCP Instructions (`SERVER_INSTRUCTIONS`)**:
+  - Emits `instructions` in the MCP `initialize` response and provisions `~/.gemini/antigravity-cli/mcp/memcore/instructions.md` and `~/.skill-proof/skills/memcore/SKILL.md` during `memcore install`.
+
+### Fixed
+- **Vector Recall Noise Floor & Punctuation Guard (`memcore/recall.py`)**:
+  - Added `min_sim: float = 0.25` threshold in `_run_vector_lane` and an early `[]` return on punctuation-only queries (`not any(c.isalnum() for c in user_query)`) to prevent low-similarity noise hits when no lexical terms match.
+- **Workspace Outer Shim Resolution (`mcp_server.py`)**:
+  - Updated root `mcp_server.py` shim to load `memcore/mcp_server.py` via `importlib.util.spec_from_file_location`, preventing circular self-imports when launched from a parent workspace while strictly preserving the Pure PEP 420 Namespace Package invariant (`test_plugin_import_guard.py`).
+
 ## [1.0.0] - 2026-10-16
 
 First stable release. Hardening and stabilization: H1 to H9 mechanical fixes, deep-module

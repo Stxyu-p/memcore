@@ -33,6 +33,10 @@ def _sync_memcore_antigravity_schema() -> None:
             (target / f"{tool['name']}.json").write_text(
                 json.dumps(schema, ensure_ascii=False), encoding="utf-8"
             )
+        if getattr(mcp_server, "SERVER_INSTRUCTIONS", None):
+            (target / "instructions.md").write_text(
+                mcp_server.SERVER_INSTRUCTIONS.strip() + "\n", encoding="utf-8"
+            )
     except Exception:
         pass
 
@@ -42,15 +46,16 @@ def _sync_memcore_global_skill() -> None:
         "---\n"
         "name: memcore\n"
         "description: >-\n"
-        "  Governed, bitemporal, local-first memory engine (MemCore v2.0.0) for storing, searching,\n"
+        "  Governed, bitemporal, local-first memory engine (MemCore) for storing, searching,\n"
         "  promoting, superseding, and auditing canonical project facts and architectural decisions across agent sessions.\n"
         "---\n\n"
-        "# MemCore v2.0.0 — Governed Bitemporal Memory\n\n"
+        "# MemCore — Governed Bitemporal Memory\n\n"
         "MemCore provides governed project memory across agent sessions with 9 MCP tools:\n"
         "`memory_remember`, `memory_search`, `memory_promote`, `memory_supersede`, `memory_reject`,\n"
         "`memory_feedback`, `memory_review_queue`, `memory_review_decide`, and `memory_status`.\n"
     )
     for root in (
+        pathlib.Path.home() / ".skill-proof" / "skills",
         pathlib.Path.home() / ".agents" / "skills",
         pathlib.Path.home() / ".gemini" / "config" / "skills",
     ):

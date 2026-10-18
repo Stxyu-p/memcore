@@ -4,6 +4,50 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-10-18
+
+### Added
+- **Automatic Provenance & Zero-Touch Staleness (`mode='strict'`)**:
+  - `write._auto_detect_source_file`: ReDoS-immune deterministic extraction of source file paths (e.g. `` `path/to/file.py:12` ``) with strict workspace confinement and 5 MB file size limit.
+  - Automatically initializes `verification='source_backed'` when a valid source file is bound or auto-detected.
+  - Read-time SHA-256 staleness checking (`core.is_single_source_stale` / `_source_file_is_stale_readonly`): verifies source files on disk at recall time with zero database writes.
+  - `mode='strict'` parameter in `core.search()`, `core.recall()`, `MemCore.search()`, and MCP `memory_search`: filters out unverified, disputed, and stale memories, guaranteeing only verified, authoritative current truth is returned.
+- **Situational Trigger Indexing (`when_to_use`)**:
+  - Added `when_to_use TEXT` column on `memory_version` without bumping schema migrations, preserving `0018_memory_embedding` stability and read-only handle compatibility.
+  - Added dedicated Situational Lane (Lane 3.4) in `recall._run_summary_lane` to recall memories matching situational trigger contexts even when the memory body itself has disjoint vocabulary.
+  - Parameter `when_to_use` wired through CLI (`--when-to-use`), Python SDK (`mc.remember`), and MCP Server (`memory_remember`, `memory_supersede`).
+- **Bitemporal & Delta Recall (`as_of`, `changed_since`, `mode='historical'`)**:
+  - Point-in-time time travel (`as_of`): evaluates version validity interval `[valid_from, valid_until)` with tombstone lifetime awareness (prevents future supersede tombstones from blocking historical past versions).
+  - Delta synchronization (`changed_since`): retrieves only memories created or modified at or after a timestamp, supporting query-less delta sync.
+  - Historical recall (`mode='historical'`): surfaces superseded versions explicitly with `lifecycle='superseded'` and `freshness='historical'`.
+- **Layer-3 Progressive Disclosure & Token Budget Packing**:
+  - `core.get_memories()` / `MemCore.get()` / MCP `memory_get`: batch hydration of full memory records including version history (`include_history`) and evidence links (`include_evidence`).
+  - `core.pack_search_results()`: budget-aware packing governed by `max_tokens`, progressively downgrading overflow rows to Salience L1 previews while guaranteeing top hits fit within the token budget.
+- **Skill Graduation Candidate Detection**:
+  - `core.skill_graduation_candidates()` in `memcore/doctor.py`: detects frequently-recalled facts and rules (`recall_count >= 5`) as candidates for persistent agent skills.
+  - `doctor.stats()` and `doctor.inspect_governance_health()` report graduation candidates using Content-Free metrics to prevent secret leakage in logs.
+- **Grouped & Refusal Guard Export**:
+  - `--grouped` CLI flag and `export_markdown(grouped=True)`: organizes memories by Type headings (fact, rule, preference, decision) while preserving byte-identical flat output by default.
+  - `--include-tombstones` CLI flag: renders active scope-aware refusal guards (tombstones) in an audited section.
+- **Comprehensive Upgrade Test Suite (`harness/test_ai_memory_upgrades.py`)**:
+  - 8 automated tests covering all 6 architectural capabilities, live staleness detection, read-only access recording bypass, and MCP delta sync.
+
+### Security
+- **`<private>` Tag Redaction**:
+  - Pre-write scrubbing of `<private>...</private>` tags across all write lanes (`create_memory`, `supersede`), replacing enclosed text with `«redacted:private»` and computing claim fingerprints exclusively from sanitized text.
+- **Path Traversal Confinement**:
+  - Strictly enforces that auto-detected file paths must reside within the active workspace root (`MEMCORE_WORKSPACE` or `cwd`), preventing arbitrary filesystem binding.
+
+### Fixed
+- **Race-Resilient Column Addition (`memcore/store.py`)**:
+  - Made `_ensure_column` safe against multi-threaded / multi-process startup races by handling concurrent `sqlite3.OperationalError: duplicate column name`.
+- **Read-Only Access Recording in `get_memories` (`memcore/recall.py`)**:
+  - Switched write transaction exception handler to `(sqlite3.OperationalError, store.StoreError)` so `get_memories()` with `record_access=True` completes without errors on read-only database connections.
+- **Live Staleness Signature Parity (`memcore/client.py`)**:
+  - Switched `MemCore.search()` to call `core.is_single_source_stale(sfile, shash)` preventing `AttributeError` on string paths.
+- **MCP Delta Search Schema (`memcore/mcp_server.py`)**:
+  - Removed mandatory `"query"` requirement in `memory_search` inputSchema, enabling query-less delta queries with `changed_since`.
+
 ## [2.0.0] - 2026-10-18
 
 ### Added

@@ -388,6 +388,7 @@ def cmd_remember(args):
             source_file=args.source_file,
             source_commit=args.source_commit,
             source_hash=args.source_hash,
+            when_to_use=getattr(args, 'when_to_use', None),
         )
         print(f'remembered: {mem_id} (version {ver_id})')
     except core.MemCoreError as e:
@@ -410,6 +411,9 @@ def cmd_search(args):
                 agent_id=agent_id,
                 query=args.query,
                 limit=args.limit,
+                mode=getattr(args, 'mode', 'standard'),
+                as_of=getattr(args, 'as_of', None),
+                changed_since=getattr(args, 'changed_since', None),
             )
         except core.MemCoreError as e:
             sys.exit(f'error: {e}')
@@ -450,6 +454,7 @@ def cmd_supersede(args):
             source_file=args.source_file,
             source_commit=args.source_commit,
             source_hash=args.source_hash,
+            when_to_use=getattr(args, 'when_to_use', None),
         )
         print(f'superseded: {args.memory_id} -> new version {new_ver}')
     except core.MemCoreError as e:
@@ -699,10 +704,19 @@ def cmd_export(args):
             agent = agent or bound_agent
         conn = _open_readonly(args)
         project_id = _project_or_exit(conn, project)
+        grouped = bool(getattr(args, 'grouped', False))
+        include_tombstones = bool(getattr(args, 'include_tombstones', False))
         if args.stdout:
             rows = export_mod.rank_for_export(
                 conn, project_id, 'agent-' + agent, args.limit, args.include_private)
-            sys.stdout.write(export_mod.render(rows, args.title, project))
+            tombstones = None
+            if include_tombstones and core._membership_role(conn, project_id, 'agent-' + agent) is not None:
+                all_tombs = core.list_tombstones(conn, project_id, 'agent-' + agent)
+                if not args.include_private:
+                    all_tombs = [t for t in all_tombs if not str(t[2]).startswith('private:')]
+                tombstones = all_tombs[:20]
+            sys.stdout.write(export_mod.render(
+                rows, args.title, project, grouped=grouped, tombstones=tombstones))
             return
         # An explicit --out wins; --host picks the conventional filename(s),
         # written under --out-dir so a user can target a repo from anywhere.
@@ -711,7 +725,8 @@ def cmd_export(args):
             conn, project_id, 'agent-' + agent, out_path,
             limit=args.limit, include_private=args.include_private,
             title=args.title, force=args.force, host=args.host,
-            out_dir=args.out_dir)
+            out_dir=args.out_dir, grouped=grouped,
+            include_tombstones=include_tombstones)
         _print_export_results(results)
     except (core.MemCoreError, store.StoreError, ValueError) as e:
         sys.exit(f'error: {e}')
@@ -1705,6 +1720,8 @@ def main(argv=None):
     p.add_argument('--type', default='fact')
     p.add_argument('--idempotency-key', default=None)
     p.add_argument('--reason', default=None)
+    p.add_argument('--when-to-use', default=None, dest='when_to_use',
+                   help='optional situational trigger describing when this memory applies')
     p.add_argument('--source-file', default=None,
                    help='file whose SHA-256 will be stored as source provenance')
     p.add_argument('--source-commit', default=None,
@@ -1717,8 +1734,14 @@ def main(argv=None):
     p.add_argument('--project', required=True,
                    help='project id/UUID or unique name/slug')
     p.add_argument('--agent', required=True)
-    p.add_argument('query')
+    p.add_argument('query', nargs='?', default='')
     p.add_argument('--limit', type=int, default=20)
+    p.add_argument('--mode', default='standard', choices=['standard', 'strict', 'historical'],
+                   help='recall mode: standard, strict (verified & non-stale only), or historical')
+    p.add_argument('--as-of', default=None, dest='as_of',
+                   help='optional ISO-8601 timestamp for point-in-time bitemporal query')
+    p.add_argument('--changed-since', default=None, dest='changed_since',
+                   help='optional ISO-8601 timestamp to return only memories updated since then')
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser('promote', help='private -> project scope', parents=[common])
@@ -1731,6 +1754,8 @@ def main(argv=None):
     p.add_argument('--agent', required=True)
     p.add_argument('content')
     p.add_argument('--reason', default=None)
+    p.add_argument('--when-to-use', default=None, dest='when_to_use',
+                   help='optional updated situational trigger')
     p.add_argument('--source-file', default=None,
                    help='file whose SHA-256 will be stored as source provenance')
     p.add_argument('--source-commit', default=None,
@@ -1813,6 +1838,10 @@ def main(argv=None):
                    help='heading for the exported file')
     p.add_argument('--include-private', action='store_true',
                    help="include this agent's private memories")
+    p.add_argument('--grouped', action='store_true',
+                   help='group exported memories by category (Golden Rules, Decisions, Facts, Preferences, Notes)')
+    p.add_argument('--include-tombstones', action='store_true', dest='include_tombstones',
+                   help='include active refusal guards (tombstones) in a Do Not Repeat section')
     p.add_argument('--stdout', action='store_true',
                    help='print instead of writing a file')
     p.add_argument('--force', action='store_true',

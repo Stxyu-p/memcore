@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import operator
+import os
 import pathlib
 import re
 import sqlite3
@@ -105,13 +106,22 @@ _SECRET_PATTERNS = (
     re.compile(r'\bAIza[0-9A-Za-z_-]{35}\b'),
 )
 _SECRET_REDACTED = '«redacted:secret»'
+_PRIVATE_TAG_RE = re.compile(r'<private>[\s\S]*?</private>', re.IGNORECASE)
+_PRIVATE_REDACTED = '«redacted:private»'
+
+
+def scrub_private_tags(content: str) -> str:
+    """Redact explicit <private>...</private> blocks before storage or indexing."""
+    if not isinstance(content, str) or '<' not in content:
+        return content
+    return _PRIVATE_TAG_RE.sub(_PRIVATE_REDACTED, content)
 
 
 def scrub_secrets(content: str) -> str:
-    """Redact unmistakable credential values; names and prose survive."""
+    """Redact unmistakable credential values and <private> tags; names and prose survive."""
     if not isinstance(content, str) or not content:
         return content
-    out = content
+    out = scrub_private_tags(content)
     for pattern in _SECRET_PATTERNS:
         out = pattern.sub(_SECRET_REDACTED, out)
     return out
@@ -143,11 +153,82 @@ def _new_id(prefix):
     return f'{prefix}-{uuid.uuid4().hex[:12]}'
 
 
-def _source_metadata(source_file=None, source_commit=None, source_hash=None):
+_AUTO_SOURCE_EXTS = (
+    '.py', '.sql', '.toml', '.yaml', '.yml', '.json', '.md', '.sh', '.ps1',
+    '.ts', '.tsx', '.js', '.jsx', '.rs', '.go', '.c', '.cpp', '.h', '.java',
+    '.rb', '.cfg', '.ini',
+)
+_AUTO_SOURCE_TOKEN_RE = re.compile(
+    r'(?:`([^`\r\n]+)`|([A-Za-z0-9_.\-/\\:]+\.(?:py|sql|toml|ya?ml|json|md|sh|ps1|tsx?|jsx?|rs|go|c|cpp|h|java|rb|cfg|ini)(?::\d+(?:-\d+)?|#L\d+(?:-L?\d+)?)?))',
+    re.IGNORECASE,
+)
+_AUTO_SOURCE_LINE_SUFFIX_RE = re.compile(r'(?::\d+(?:-\d+)?|#L\d+(?:-L?\d+)?)$')
+_MAX_AUTO_SOURCE_BYTES = 5 * 1024 * 1024
+
+
+def _auto_detect_source_file(content: str, base_dir=None) -> str | None:
+    """Deterministically detect an existing regular source file referenced in content."""
+    if not isinstance(content, str) or len(content) < 4:
+        return None
+    c_lower = content.lower()
+    if not any(ext in c_lower for ext in _AUTO_SOURCE_EXTS):
+        return None
+
+    root_raw = base_dir or os.environ.get('MEMCORE_WORKSPACE') or os.getcwd()
+    try:
+        base_root = pathlib.Path(root_raw).expanduser().resolve()
+    except Exception:
+        base_root = None
+
+    candidates = []
+    # 1. Backtick-enclosed tokens
+    for part in content.split('`')[1::2]:
+        if any(ext in part.lower() for ext in _AUTO_SOURCE_EXTS):
+            candidates.append(part.strip())
+    # 2. Whitespace separated tokens
+    for tok in content.split():
+        if '.' in tok and any(ext in tok.lower() for ext in _AUTO_SOURCE_EXTS):
+            candidates.append(tok.strip('\'"()[]<>.,;'))
+
+    for raw in candidates:
+        if not raw or '://' in raw or raw.startswith(('http:', 'https:', 'mailto:')):
+            continue
+        cleaned = _AUTO_SOURCE_LINE_SUFFIX_RE.sub('', raw).strip()
+        if not cleaned or not cleaned.lower().endswith(_AUTO_SOURCE_EXTS):
+            continue
+        try:
+            candidate = pathlib.Path(cleaned).expanduser()
+            if candidate.is_absolute():
+                resolved = candidate.resolve(strict=True)
+            else:
+                if base_root is None:
+                    continue
+                resolved = (base_root / candidate).resolve(strict=True)
+            if base_root is not None and not resolved.is_relative_to(base_root):
+                continue
+            if not resolved.is_file():
+                continue
+            size = resolved.stat().st_size
+            if 0 < size <= _MAX_AUTO_SOURCE_BYTES:
+                return str(resolved)
+        except Exception:
+            continue
+    return None
+
+
+def _source_metadata(source_file=None, source_commit=None, source_hash=None,
+                     *, content=None, auto_source_file: bool = True):
     """Normalize file provenance and bind its SHA-256 to the saved contents."""
     if source_file is None:
         if source_hash is not None:
             raise MemCoreError('source_hash requires source_file')
+        if auto_source_file and content:
+            detected = _auto_detect_source_file(content)
+            if detected is not None:
+                try:
+                    return _sha256_file(detected), source_commit, detected
+                except Exception:
+                    pass
         return None, source_commit, None
     try:
         path = pathlib.Path(source_file).expanduser().resolve(strict=True)
@@ -173,6 +254,10 @@ def _sha256_file(path):
         for chunk in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+#: Public alias for file hash calculation
+compute_file_hash = _sha256_file
 
 
 def _now() -> str:
@@ -436,8 +521,25 @@ def _store_embedding_safe(conn, memory_id: str, version_id: str, vec) -> None:
             pass
 
 
+def _validate_when_to_use(when_to_use) -> str | None:
+    """Validate + scrub optional situational disclosure trigger."""
+    if when_to_use is None:
+        return None
+    if not isinstance(when_to_use, str):
+        raise MemCoreError('when_to_use must be a string')
+    try:
+        when_to_use.encode('utf-8')
+    except UnicodeEncodeError:
+        raise MemCoreError('when_to_use contains unencodable surrogate characters')
+    if '\x00' in when_to_use:
+        raise MemCoreError('when_to_use must not contain null bytes')
+    cleaned = scrub_secrets(when_to_use).strip()
+    return cleaned or None
+
+
 def _prepare_memory_write(content, scope, lifecycle, reason, scope_detail,
-                          source_file, source_commit, source_hash):
+                          source_file, source_commit, source_hash,
+                          when_to_use=None, auto_source_file: bool = True):
     """Validate + normalize one create payload (pure; no conn, no writes).
 
     Ordering is the compatibility contract: scope -> content shape ->
@@ -462,12 +564,15 @@ def _prepare_memory_write(content, scope, lifecycle, reason, scope_detail,
     if '\x00' in content:
         raise MemCoreError('content must not contain null bytes')
     reason = scrub_secrets(reason) if isinstance(reason, str) else reason
+    clean_when = _validate_when_to_use(when_to_use)
     source_hash, source_commit, source_file = _source_metadata(
-        source_file, source_commit, source_hash
+        source_file, source_commit, source_hash,
+        content=content, auto_source_file=auto_source_file
     )
     return {
         'content': content,
         'reason': reason,
+        'when_to_use': clean_when,
         'detail': _validate_scope_detail(scope, scope_detail),
         'source_hash': source_hash,
         'source_commit': source_commit,
@@ -616,7 +721,7 @@ FRESHNESS_STALE_DAYS = 90
 
 def _insert_memory_rows(conn, project_id, agent_id, content, scope, memory_type,
                         lifecycle, claim_fp, reason, detail, source_hash,
-                        source_commit, source_file):
+                        source_commit, source_file, when_to_use=None):
     """Insert the memory header + first immutable version; returns (mem, ver, now).
 
     Scope_detail is schema-conditional: the column only exists after
@@ -630,39 +735,50 @@ def _insert_memory_rows(conn, project_id, agent_id, content, scope, memory_type,
     if detail is not None and 'scope_detail' not in mem_cols:
         raise MemCoreError(
             'scope_detail requires migration 0016; open the store normally first')
+    init_verif = 'source_backed' if source_file else 'unverified'
     if 'scope_detail' in mem_cols:
         conn.execute(
             'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
             '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
             '  created_at, updated_at, scope_detail) '
-            "VALUES (?, ?, ?, ?, ?, ?, 'unverified', 'current', ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'current', ?, ?, ?, ?, ?)",
             (mem_id, project_id, scope, agent_id, memory_type,
-             lifecycle, ver_id, claim_fp, now, now, detail)
+             lifecycle, init_verif, ver_id, claim_fp, now, now, detail)
         )
     else:
         conn.execute(
             'INSERT INTO memory (id, project_id, scope, owner_agent_id, type, '
             '  lifecycle, verification, freshness, current_version_id, claim_fingerprint, '
             '  created_at, updated_at) '
-            "VALUES (?, ?, ?, ?, ?, ?, 'unverified', 'current', ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'current', ?, ?, ?, ?)",
             (mem_id, project_id, scope, agent_id, memory_type,
-             lifecycle, ver_id, claim_fp, now, now)
+             lifecycle, init_verif, ver_id, claim_fp, now, now)
         )
-    conn.execute(
-        'INSERT INTO memory_version (id, memory_id, content, reason, '
-        '  created_by_agent_id, created_at, valid_from, source_hash, '
-        '  source_commit, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (ver_id, mem_id, content, reason, agent_id, now, now,
-         source_hash, source_commit, source_file)
-    )
+    ver_cols = _table_cols(conn, 'memory_version')
+    if 'when_to_use' in ver_cols:
+        conn.execute(
+            'INSERT INTO memory_version (id, memory_id, content, when_to_use, reason, '
+            '  created_by_agent_id, created_at, valid_from, source_hash, '
+            '  source_commit, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (ver_id, mem_id, content, when_to_use, reason, agent_id, now, now,
+             source_hash, source_commit, source_file)
+        )
+    else:
+        conn.execute(
+            'INSERT INTO memory_version (id, memory_id, content, reason, '
+            '  created_by_agent_id, created_at, valid_from, source_hash, '
+            '  source_commit, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (ver_id, mem_id, content, reason, agent_id, now, now,
+             source_hash, source_commit, source_file)
+        )
     return mem_id, ver_id, now
 
 
 def create_memory(conn, project_id, agent_id, content, scope='private',
                   memory_type='fact', lifecycle='candidate', idempotency_key=None,
                   reason=None, scope_detail=None, source_file=None,
-                  source_commit=None, source_hash=None,
-                  _manage_transaction=True):
+                  source_commit=None, source_hash=None, when_to_use=None,
+                  auto_source_file: bool = True, _manage_transaction=True):
     """Create a memory + first immutable version. Tombstone guard applies.
 
     Returns (memory_id, version_id) or existing ids if idempotency_key replays.
@@ -671,10 +787,12 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         raise MemCoreError('memory_type must be a non-empty string')
     prepared = _prepare_memory_write(
         content, scope, lifecycle, reason, scope_detail,
-        source_file, source_commit, source_hash
+        source_file, source_commit, source_hash,
+        when_to_use=when_to_use, auto_source_file=auto_source_file
     )
     content = prepared['content']
     claim_fp = prepared['claim_fp']
+    clean_when = prepared['when_to_use']
 
     # H1: embedding fetch is network/model I/O and runs OUTSIDE the write
     # lock. Batched callers (manage=False) already hold a transaction and
@@ -683,7 +801,8 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
     if _manage_transaction:
         try:
             if store._table_exists(conn, 'memory_embedding'):
-                embed_vec = _fetch_embedding_safe(content)
+                embed_text = f'{clean_when}\n{content}' if clean_when else content
+                embed_vec = _fetch_embedding_safe(embed_text)
         except Exception:
             embed_vec = None
 
@@ -721,7 +840,7 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             conn, project_id, agent_id, content, scope, memory_type,
             lifecycle, claim_fp, prepared['reason'], prepared['detail'],
             prepared['source_hash'], prepared['source_commit'],
-            prepared['source_file']
+            prepared['source_file'], when_to_use=clean_when
         )
         _store_embedding_safe(conn, mem_id, ver_id, embed_vec)
         _audit(conn, 'create', agent_id, mem_id, project_id,
@@ -767,7 +886,7 @@ def _validate_supersede_content(new_content):
 
 def _close_and_insert_version(conn, memory_id, agent_id, new_content, reason,
                               old_ver, new_fp, source_hash, source_commit,
-                              source_file):
+                              source_file, when_to_use=None):
     """Close the old validity window, insert the new version, reset trust.
 
     The changed claim does not inherit acceptance/verification from the old
@@ -780,14 +899,25 @@ def _close_and_insert_version(conn, memory_id, agent_id, new_content, reason,
         'WHERE id=? AND valid_until IS NULL',
         (now, old_ver)
     )
-    conn.execute(
-        'INSERT INTO memory_version (id, memory_id, content, reason, '
-        '  created_by_agent_id, supersedes_version_id, created_at, valid_from, '
-        '  source_hash, source_commit, source_file) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (new_ver, memory_id, new_content, reason, agent_id, old_ver, now, now,
-         source_hash, source_commit, source_file)
-    )
+    ver_cols = _table_cols(conn, 'memory_version')
+    if 'when_to_use' in ver_cols:
+        conn.execute(
+            'INSERT INTO memory_version (id, memory_id, content, when_to_use, reason, '
+            '  created_by_agent_id, supersedes_version_id, created_at, valid_from, '
+            '  source_hash, source_commit, source_file) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (new_ver, memory_id, new_content, when_to_use, reason, agent_id, old_ver, now, now,
+             source_hash, source_commit, source_file)
+        )
+    else:
+        conn.execute(
+            'INSERT INTO memory_version (id, memory_id, content, reason, '
+            '  created_by_agent_id, supersedes_version_id, created_at, valid_from, '
+            '  source_hash, source_commit, source_file) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (new_ver, memory_id, new_content, reason, agent_id, old_ver, now, now,
+             source_hash, source_commit, source_file)
+        )
     conn.execute(
         "UPDATE memory SET current_version_id=?, claim_fingerprint=?, lifecycle='candidate', "
         "verification='unverified', freshness='current', updated_at=? "
@@ -798,7 +928,8 @@ def _close_and_insert_version(conn, memory_id, agent_id, new_content, reason,
 
 
 def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=None,
-              source_file=None, source_commit=None, source_hash=None):
+              source_file=None, source_commit=None, source_hash=None,
+              when_to_use=None, auto_source_file: bool = True):
     """Correct a memory in place while preserving immutable version history.
 
     The old claim receives a scope-appropriate refusal fingerprint, its
@@ -807,14 +938,17 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
     """
     new_content = _validate_supersede_content(new_content)
     reason = scrub_secrets(reason) if isinstance(reason, str) else reason
+    clean_when = _validate_when_to_use(when_to_use) if when_to_use is not None else None
     source_hash, source_commit, source_file = _source_metadata(
-        source_file, source_commit, source_hash
+        source_file, source_commit, source_hash,
+        content=new_content, auto_source_file=auto_source_file
     )
     # H1: fetch the replacement's embedding before taking the write lock.
     embed_vec = None
     try:
         if store._table_exists(conn, 'memory_embedding'):
-            embed_vec = _fetch_embedding_safe(new_content)
+            embed_text = f'{clean_when}\n{new_content}' if clean_when else new_content
+            embed_vec = _fetch_embedding_safe(embed_text)
     except Exception:
         embed_vec = None
     with store.write_tx(conn):
@@ -838,9 +972,19 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
         if old_fp == new_fp:
             raise MemCoreError('new_content is equivalent to the current claim')
 
+        if when_to_use is None:
+            effective_when = None
+            if 'when_to_use' in _table_cols(conn, 'memory_version'):
+                prev_row = conn.execute(
+                    'SELECT when_to_use FROM memory_version WHERE id=?', (old_ver,)
+                ).fetchone()
+                effective_when = prev_row[0] if prev_row and prev_row[0] else None
+        else:
+            effective_when = clean_when
+
         new_ver, now = _close_and_insert_version(
             conn, memory_id, agent_id, new_content, reason, old_ver, new_fp,
-            source_hash, source_commit, source_file)
+            source_hash, source_commit, source_file, when_to_use=effective_when)
         _store_embedding_safe(conn, memory_id, new_ver, embed_vec)
 
         tombstone_created = False

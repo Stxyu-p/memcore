@@ -112,9 +112,11 @@ def rank_for_export(conn, project_id, agent_id, limit, include_private=False):
     # Same retention signal recall orders by, so an export ranks like recall.
     retention_expr, retention_params = core._retention_order(conn, True, alias='m')
     retention_tail = (', ' + retention_expr + ' DESC') if retention_expr else ''
+    has_wtu = 'when_to_use' in core._table_cols(conn, 'memory_version')
+    wtu_col = 'v.when_to_use' if has_wtu else 'NULL'
     rows = conn.execute(
         'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, '
-        '       v.content, m.claim_fingerprint '
+        f'       v.content, m.claim_fingerprint, m.type, m.pinned, m.critical, {wtu_col} '
         'FROM memory m '
         'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
         'WHERE m.project_id = ? '
@@ -172,7 +174,8 @@ def _atomic_write_text(path: pathlib.Path, text: str) -> None:
         raise
 
 
-def render(rows, title, project, generated_at=None, generator=True):
+def render(rows, title, project, generated_at=None, generator=True,
+           grouped=False, tombstones=None):
     """Render the export as markdown a coding agent can act on.
 
     The generated marker carries a digest of the CONTENT, not a timestamp, so
@@ -187,7 +190,7 @@ def render(rows, title, project, generated_at=None, generator=True):
     for row in rows:
         if not isinstance(row, (list, tuple)) or len(row) < 6:
             raise core.MemCoreError(f'malformed export row: {row!r}')
-    body = _body_lines(rows, project)
+    body = _body_lines(rows, project, grouped=grouped, tombstones=tombstones)
     out = ['# %s' % title, '']
     if generator:
         digest = hashlib.sha256('\n'.join(body).encode('utf-8')).hexdigest()[:12]
@@ -197,18 +200,69 @@ def render(rows, title, project, generated_at=None, generator=True):
     return '\n'.join(out + body) + '\n'
 
 
-def _body_lines(rows, project):
+def _format_export_item(row, include_trigger=False):
+    content = ' '.join(str(row[5]).split())
+    when_to_use = row[10] if len(row) > 10 and row[10] else None
+    if include_trigger and when_to_use:
+        trigger = ' '.join(str(when_to_use).split())
+        return '- %s *(When: %s)* %s' % (_label(row), trigger, content)
+    return '- %s %s' % (_label(row), content)
+
+
+def _body_lines(rows, project, grouped=False, tombstones=None):
     """The part of the export that reflects actual memory content."""
     out = []
-    if not rows:
+    if not rows and not tombstones:
         out.append('No governed memory available for this project yet.')
         return out
     out.append('%d governed memories, ranked. Each line carries its trust '
                'state: [scope | lifecycle | verification | freshness].' % len(rows))
     out.append('')
-    for row in rows:
-        content = ' '.join(str(row[5]).split())
-        out.append('- %s %s' % (_label(row), content))
+    if not grouped:
+        for row in rows:
+            out.append(_format_export_item(row, include_trigger=False))
+    else:
+        buckets = [
+            ('Golden Rules (Pinned & Critical)', []),
+            ('Architectural Decisions', []),
+            ('Verified Facts', []),
+            ('Preferences & Conventions', []),
+            ('Notes & Observations', []),
+        ]
+        bucket_map = {
+            'decision': buckets[1][1],
+            'fact': buckets[2][1],
+            'preference': buckets[3][1],
+            'note': buckets[4][1],
+        }
+        for row in rows:
+            pinned = bool(row[8]) if len(row) > 8 else False
+            critical = bool(row[9]) if len(row) > 9 else False
+            mtype = str(row[7] if len(row) > 7 and row[7] else 'fact').lower()
+            if pinned and critical:
+                buckets[0][1].append(row)
+            else:
+                bucket_map.get(mtype, buckets[4][1]).append(row)
+        first_sec = True
+        for heading, items in buckets:
+            if not items:
+                continue
+            if not first_sec:
+                out.append('')
+            first_sec = False
+            out.append('## %s' % heading)
+            out.append('')
+            for row in items:
+                out.append(_format_export_item(row, include_trigger=True))
+    if tombstones:
+        out.append('')
+        out.append('## Do Not Repeat (Active Refusal Guards)')
+        out.append('')
+        for tomb in tombstones:
+            tomb_id, claim_fp, scope, reason, created_at = tomb[:5]
+            reason_clean = ' '.join(str(reason or 'rejected').split())
+            out.append('- [tombstone | fp:%s | %s] %s' % (
+                str(claim_fp)[:8], scope, reason_clean))
     out.append('')
     out.append('---')
     out.append('')
@@ -220,7 +274,8 @@ def _body_lines(rows, project):
 
 def export(conn, project_id, agent_id, out_path=None, limit=40,
            include_private=False, title='Shared project memory',
-           write=True, force=False, host=None, out_dir=None):
+           write=True, force=False, host=None, out_dir=None,
+           grouped=False, include_tombstones=False):
     """Build (and by default write) the export file(s).
 
     ``host`` selects the conventional filename(s) for one agent family; an
@@ -228,7 +283,13 @@ def export(conn, project_id, agent_id, out_path=None, limit=40,
     see HOST_TARGETS for why.
     """
     rows = rank_for_export(conn, project_id, agent_id, limit, include_private)
-    text = render(rows, title, project_id)
+    tombstones = None
+    if include_tombstones and core._membership_role(conn, project_id, agent_id) is not None:
+        all_tombs = core.list_tombstones(conn, project_id, agent_id)
+        if not include_private:
+            all_tombs = [t for t in all_tombs if not str(t[2]).startswith('private:')]
+        tombstones = all_tombs[:20]
+    text = render(rows, title, project_id, grouped=grouped, tombstones=tombstones)
     size = len(text.encode('utf-8'))
     # --out-dir applies to --out too, otherwise `--out-dir` reads as "put it
     # here" while the file lands in the cwd.

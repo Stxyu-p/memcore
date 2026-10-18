@@ -88,10 +88,13 @@ class MemCore:
         source_commit: str | None = None,
         source_hash: str | None = None,
         lifecycle: str = "accepted",
+        when_to_use: str | None = None,
+        auto_source_file: bool = True,
     ) -> str:
-        """Store a governed memory, optionally tied to a source file's SHA-256."""
+        """Store a governed memory, optionally tied to a source file's SHA-256 and situational trigger."""
         self._check_open()
-        fp = core.fingerprint(content)
+        scrubbed_content = core.scrub_secrets(content)
+        fp = core.fingerprint(scrubbed_content)
         mid, _ = core.create_memory(
             self.conn,
             self.project,
@@ -103,6 +106,8 @@ class MemCore:
             source_file=source_file,
             source_commit=source_commit,
             source_hash=source_hash,
+            when_to_use=when_to_use,
+            auto_source_file=auto_source_file,
             idempotency_key=f"remember:{self.project}:{self.agent}:{fp}",
         )
         core.maybe_auto_corrob(self.conn, self.project, fp, self.agent)
@@ -111,15 +116,19 @@ class MemCore:
 
     def search(
         self,
-        query: str,
+        query: str = "",
         limit: int = 5,
         query_vec: list[float] | None = None,
         include_content: bool = True,
         preview_chars: int = 180,
+        mode: str = "standard",
+        as_of: str | None = None,
+        changed_since: str | None = None,
+        max_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Hybrid search memories with governance checks and RRF ranking."""
+        """Hybrid search memories with governance checks, temporal/strict modes, and RRF ranking."""
         self._check_open()
-        if query_vec is None:
+        if query_vec is None and query and str(query).strip():
             query_vec = embedding.get_embedding(
                 query,
                 endpoint=self.endpoint,
@@ -135,10 +144,29 @@ class MemCore:
             query,
             limit=limit,
             query_vec=query_vec,
+            mode=mode,
+            as_of=as_of,
+            changed_since=changed_since,
         )
         p_chars = min(max(int(preview_chars or 180), 40), 500)
+        # Batch-load version metadata (summary/when_to_use, source_file, source_hash)
+        meta_by_id: dict[str, tuple[str | None, str | None, str | None]] = {}
+        hit_ids = [r[0] for r in rows if r and r[0]]
+        if hit_ids:
+            placeholders = ",".join("?" for _ in hit_ids)
+            has_wtu = "when_to_use" in core._table_cols(self.conn, "memory_version")
+            wtu_col = "mv.when_to_use" if has_wtu else "NULL"
+            for mid, when_to_use_val, sfile, shash in self.conn.execute(
+                f"SELECT m.id, {wtu_col}, mv.source_file, mv.source_hash "
+                f"FROM memory m JOIN memory_version mv ON m.current_version_id = mv.id "
+                f"WHERE m.id IN ({placeholders})",
+                tuple(hit_ids),
+            ).fetchall():
+                meta_by_id[mid] = (when_to_use_val, sfile, shash)
+
         results = []
         for r in rows:
+            mid = r[0]
             raw_content = r[5] or ""
             if include_content:
                 text = raw_content
@@ -155,21 +183,55 @@ class MemCore:
                         cut = cut[:sp]
                     text = cut.rstrip() + "…"
                     truncated = True
-            results.append(
-                {
-                    "id": r[0],
-                    "scope": r[1],
-                    "lifecycle": r[2],
-                    "verification": r[3],
-                    "freshness": r[4],
-                    "content": text,
-                    "content_truncated": truncated,
-                    "content_chars": len(raw_content),
-                    "owner": r[6],
-                    "rank": r[7],
-                }
+            when_to_use, sfile, shash = meta_by_id.get(mid, (None, None, None))
+            freshness = r[4]
+            if sfile and core.is_single_source_stale(sfile, shash):
+                freshness = "stale"
+            item: dict[str, Any] = {
+                "id": mid,
+                "scope": r[1],
+                "lifecycle": r[2],
+                "verification": r[3],
+                "freshness": freshness,
+                "content": text,
+                "content_truncated": truncated,
+                "content_chars": len(raw_content),
+                "owner": r[6],
+                "rank": r[7],
+            }
+            if when_to_use:
+                item["when_to_use"] = when_to_use
+            if sfile:
+                item["source_file"] = str(sfile)
+            results.append(item)
+        if max_tokens is not None:
+            results = core.pack_search_results(
+                results, max_tokens=max_tokens, preview_chars=p_chars
             )
         return results
+
+    def get(
+        self,
+        memory_ids: list[str] | tuple[str, ...] | str,
+        include_history: bool = False,
+        include_evidence: bool = False,
+        record_access: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Layer-3 progressive disclosure: fetch full governed records by ID(s)."""
+        self._check_open()
+        if isinstance(memory_ids, str):
+            ids = [memory_ids]
+        else:
+            ids = list(memory_ids or [])
+        return core.get_memories(
+            self.conn,
+            self.project,
+            self.agent,
+            ids,
+            include_history=include_history,
+            include_evidence=include_evidence,
+            record_access=record_access,
+        )
 
     def promote(self, memory_id: str) -> None:
         """Promote a private memory to shared project scope."""
@@ -185,6 +247,8 @@ class MemCore:
         source_file: str | pathlib.Path | None = None,
         source_commit: str | None = None,
         source_hash: str | None = None,
+        when_to_use: str | None = None,
+        auto_source_file: bool = True,
     ) -> str:
         """Update a memory with bitemporal history and optional source provenance."""
         self._check_open()
@@ -197,6 +261,8 @@ class MemCore:
             source_file=source_file,
             source_commit=source_commit,
             source_hash=source_hash,
+            when_to_use=when_to_use,
+            auto_source_file=auto_source_file,
         )
         self.conn.commit()
         return res

@@ -229,12 +229,92 @@ def inspect_governance_health(conn) -> dict:
     report["corroboration"] = store.corroboration_funnel(
         conn, accept_n=CORROBORATE_ACCEPT_N, golden_n=GOLDEN_N
     )
+    grad_cands = skill_graduation_candidates(conn, include_content=False)
+    report["skill_graduation"] = {
+        "candidate_count": len(grad_cands),
+        "candidate_ids": [c["id"] for c in grad_cands[:20]],
+    }
     return report
+
+
+SKILL_GRADUATION_MIN_RECALLS = 5
+
+
+def skill_graduation_candidates(
+    conn,
+    project_id: str | None = None,
+    min_recalls: int = SKILL_GRADUATION_MIN_RECALLS,
+    include_content: bool = False,
+) -> list[dict[str, Any]]:
+    """Identify high-utility accepted project memories eligible to graduate to a Skill.
+
+    Inspired by Cognee / MemOS skill-graduation loops, adapted to MemCore's
+    zero-daemon governance: surfaces accepted, current, project-scoped memories
+    whose recall_count >= min_recalls (or pinned Golden rules with >= 3 recalls).
+    Content is omitted by default so doctor/stats remain strictly content-free.
+    """
+    try:
+        threshold = max(1, int(min_recalls))
+    except (TypeError, ValueError):
+        threshold = SKILL_GRADUATION_MIN_RECALLS
+    pinned_threshold = max(1, min(threshold, 3))
+    from .recall import _table_cols
+    has_wtu = "when_to_use" in _table_cols(conn, "memory_version")
+    wtu_col = "v.when_to_use" if has_wtu else "NULL"
+    sql = (
+        "SELECT m.id, m.project_id, m.type, m.verification, "
+        "       COALESCE(m.recall_count, 0) AS rc, m.pinned, m.critical, "
+        f"       v.content, {wtu_col}, v.source_file "
+        "FROM memory m "
+        "JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id "
+        "WHERE m.lifecycle = 'accepted' "
+        "  AND m.scope = 'project' "
+        "  AND m.freshness = 'current' "
+        "  AND (COALESCE(m.recall_count, 0) >= ? "
+        "       OR (m.pinned = 1 AND COALESCE(m.recall_count, 0) >= ?)) "
+    )
+    params: list[Any] = [threshold, pinned_threshold]
+    if project_id:
+        sql += "  AND m.project_id = ? "
+        params.append(project_id)
+    sql += "ORDER BY rc DESC, m.pinned DESC, m.critical DESC, m.updated_at DESC, m.id ASC"
+    out: list[dict[str, Any]] = []
+    for (
+        mid,
+        pid,
+        mtype,
+        verif,
+        rc,
+        pinned,
+        critical,
+        content,
+        when_to_use_val,
+        sfile,
+    ) in conn.execute(sql, tuple(params)).fetchall():
+        item: dict[str, Any] = {
+            "id": mid,
+            "project_id": pid,
+            "type": mtype,
+            "verification": verif,
+            "recall_count": int(rc or 0),
+            "pinned": bool(pinned),
+            "critical": bool(critical),
+            "has_when_to_use": bool(when_to_use_val),
+            "has_source_file": bool(sfile),
+        }
+        if include_content:
+            item["content"] = content
+            if when_to_use_val:
+                item["when_to_use"] = when_to_use_val
+            if sfile:
+                item["source_file"] = sfile
+        out.append(item)
+    return out
 
 
 def stats(conn):
     """Operational stats: lifecycle/scope counts, top authors, avg summary
-    length, FTS drift check. Dict out, no printing (CLI renders)."""
+    length, FTS drift check, skill graduation candidates. Dict out, no printing."""
     def one(sql, args=()):
         return conn.execute(sql, args).fetchone()[0]
 
@@ -270,6 +350,7 @@ def stats(conn):
         if has_journal
         else {}
     )
+    grad_cands = skill_graduation_candidates(conn, include_content=False)
     return {
         "memories_total": one("SELECT COUNT(*) FROM memory"),
         "by_lifecycle": by_lifecycle,
@@ -282,6 +363,10 @@ def stats(conn):
             "in_sync": fts_rows == ver_rows,
         },
         "journal": journal,
+        "skill_graduation": {
+            "candidate_count": len(grad_cands),
+            "candidate_ids": [c["id"] for c in grad_cands[:20]],
+        },
     }
 
 

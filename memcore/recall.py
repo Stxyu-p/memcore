@@ -12,6 +12,7 @@ import json
 import math
 import operator
 import re
+import sqlite3
 import unicodedata
 from typing import Any
 
@@ -730,8 +731,244 @@ def _run_vector_lane(conn, project_id, agent_id, query_vec, limit,
         return []
 
 
+def _run_summary_lane(conn, project_id, agent_id, raw_query, detail_filter,
+                      detail_params, retention_tail, retention_params, now_iso,
+                      limit):
+    """Situational trigger (when_to_use) lexical matching lane."""
+    if 'when_to_use' not in _table_cols(conn, 'memory_version'):
+        return []
+    tokens = [
+        t.lower() for t in dict.fromkeys(_query_tokens(raw_query))
+        if len(t) >= 2
+    ][:16]
+    if not tokens:
+        return []
+    match_exprs = ['(CASE WHEN instr(lower(v.when_to_use), ?) > 0 THEN 1 ELSE 0 END)' for _ in tokens]
+    or_clauses = ' OR '.join(['instr(lower(v.when_to_use), ?) > 0'] * len(tokens))
+    score_sql = '-(' + ' + '.join(match_exprs) + ')'
+    cur = conn.execute(
+        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
+        '       v.content, m.owner_agent_id, '
+        '       ' + score_sql + ' AS rank, m.claim_fingerprint '
+        'FROM memory m '
+        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+        'WHERE v.when_to_use IS NOT NULL AND v.when_to_use != \'\' '
+        '  AND m.project_id = ? '
+        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
+        '  AND ' + _recall_tombstone_guard('m') + ' '
+        '  AND (' + or_clauses + ') ' + detail_filter +
+        'ORDER BY m.pinned DESC, ' +
+        "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
+        "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
+        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
+        retention_tail + ', ' +
+        'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
+        _freshness_params(now_iso) +
+        tuple(tokens) + (project_id, agent_id) + tuple(tokens) + detail_params +
+        tuple(retention_params) + (min(500, limit * DISTINCT_OVERFETCH),)
+    )
+    return cur.fetchall()
+
+
+def _is_single_source_stale(source_file: str | None, source_hash: str | None) -> bool:
+    """Read-only SHA-256 check for a single source file (never mutates DB)."""
+    if not source_file or not source_hash:
+        return False
+    import hashlib
+    import pathlib
+    try:
+        p = pathlib.Path(source_file)
+        if not p.is_absolute() or not p.is_file():
+            return False
+        digest = hashlib.sha256(p.read_bytes()).hexdigest()
+        return digest.lower() != str(source_hash).lower()
+    except Exception:
+        return False
+
+
+#: Public alias for single source file staleness check
+is_single_source_stale = _is_single_source_stale
+
+
+def _source_file_is_stale_readonly(conn, memory_ids) -> set[str]:
+    """Read-only SHA-256 check for source-backed memories (never mutates DB)."""
+    if not memory_ids:
+        return set()
+    marks = ','.join('?' for _ in memory_ids)
+    rows = conn.execute(
+        f'SELECT m.id, v.source_file, v.source_hash '
+        f'FROM memory m JOIN memory_version v ON v.id = m.current_version_id '
+        f'WHERE m.id IN ({marks}) AND v.source_file IS NOT NULL AND v.source_hash IS NOT NULL',
+        tuple(memory_ids)
+    ).fetchall()
+    stale_ids: set[str] = set()
+    for mid, source_file, source_hash in rows:
+        if _is_single_source_stale(source_file, source_hash):
+            stale_ids.add(mid)
+    return stale_ids
+
+
+def _filter_strict_rows(conn, rows):
+    """Filter rows to strict authoritative current truth (accepted + current + verified)."""
+    if not rows:
+        return []
+    stale_ids = _source_file_is_stale_readonly(conn, [r[0] for r in rows])
+    out = []
+    for r in rows:
+        # r = (id, scope, lifecycle, verification, freshness, content, owner, rank, fp)
+        if r[0] in stale_ids:
+            continue
+        if len(r) > 2 and r[2] != 'accepted':
+            continue
+        if len(r) > 3 and r[3] in ('unverified', 'disputed'):
+            continue
+        if len(r) > 4 and r[4] != 'current':
+            continue
+        out.append(r)
+    return out
+
+
+def _filter_changed_since(conn, rows, changed_since: str):
+    """Filter candidate rows to those updated at or after changed_since."""
+    if not rows or not changed_since:
+        return rows
+    ids = [r[0] for r in rows]
+    marks = ','.join('?' for _ in ids)
+    qualifying = {
+        row[0] for row in conn.execute(
+            f'SELECT m.id FROM memory m WHERE m.id IN ({marks}) '
+            'AND datetime(m.updated_at) >= datetime(?)',
+            (*ids, str(changed_since).strip())
+        ).fetchall()
+    }
+    return [r for r in rows if r[0] in qualifying]
+
+
+def _search_changed_since_only(conn, project_id, agent_id, changed_since,
+                               detail_filter, detail_params, retention_tail,
+                               retention_params, now_iso, limit, mode='standard'):
+    """Delta query when user_query is empty and changed_since is provided."""
+    cur = conn.execute(
+        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
+        '       v.content, m.owner_agent_id, 0.0 AS rank, '
+        '       m.claim_fingerprint '
+        'FROM memory m '
+        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+        'WHERE m.project_id = ? '
+        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
+        '  AND datetime(m.updated_at) >= datetime(?) '
+        '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter +
+        'ORDER BY m.pinned DESC, ' +
+        "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
+        "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
+        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
+        retention_tail + ', m.updated_at DESC, m.id ASC LIMIT ?',
+        _freshness_params(now_iso) +
+        (project_id, agent_id, str(changed_since).strip()) + detail_params +
+        tuple(retention_params) + (limit,)
+    )
+    rows = cur.fetchall()
+    if mode == 'strict':
+        rows = _filter_strict_rows(conn, rows)
+    return rows[:limit]
+
+
+def _search_historical(conn, project_id, agent_id, user_query, raw_query,
+                       detail_filter, detail_params, now_iso, limit,
+                       as_of=None, changed_since=None):
+    """Point-in-time (as_of) or full bitemporal version search (mode='historical')."""
+    v_cols = _table_cols(conn, 'memory_version')
+    has_valid_until = 'valid_until' in v_cols
+    has_wtu = 'when_to_use' in v_cols
+    tokens = [
+        t.lower() for t in dict.fromkeys(_query_tokens(raw_query))
+        if len(t) >= 2
+    ][:16]
+    where_extra = ''
+    extra_params: list[Any] = []
+    if as_of is not None:
+        ts = str(as_of).strip()
+        if has_valid_until:
+            where_extra += (
+                '  AND datetime(v.valid_from) <= datetime(?) '
+                '  AND (v.valid_until IS NULL OR datetime(?) < datetime(v.valid_until)) '
+            )
+            extra_params.extend([ts, ts])
+        else:
+            where_extra += '  AND datetime(v.valid_from) <= datetime(?) '
+            extra_params.append(ts)
+    if changed_since is not None:
+        where_extra += '  AND datetime(v.valid_from) >= datetime(?) '
+        extra_params.append(str(changed_since).strip())
+    if tokens:
+        if has_wtu:
+            token_clauses = [
+                '(instr(lower(v.content), ?) > 0 OR (v.when_to_use IS NOT NULL AND instr(lower(v.when_to_use), ?) > 0))'
+                for _ in tokens
+            ]
+            where_extra += '  AND (' + ' OR '.join(token_clauses) + ') '
+            for t in tokens:
+                extra_params.extend([t, t])
+        else:
+            token_clauses = ['instr(lower(v.content), ?) > 0' for _ in tokens]
+            where_extra += '  AND (' + ' OR '.join(token_clauses) + ') '
+            for t in tokens:
+                extra_params.append(t)
+
+    lifecycle_sql = (
+        "CASE WHEN v.id = m.current_version_id THEN m.lifecycle ELSE 'superseded' END"
+        if as_of is None else 'm.lifecycle'
+    )
+    freshness_sql = (
+        "CASE WHEN v.id = m.current_version_id THEN " + _FRESHNESS_PROJECTION_SQL + " ELSE 'historical' END"
+        if as_of is None else "'current'"
+    )
+    fresh_params = _freshness_params(now_iso) if as_of is None else ()
+    cur = conn.execute(
+        'SELECT m.id, m.scope, ' + lifecycle_sql + ' AS lifecycle, m.verification, '
+        '       ' + freshness_sql + ' AS freshness, '
+        '       v.content, m.owner_agent_id, 0.0 AS rank, '
+        '       m.claim_fingerprint, v.valid_from, v.id '
+        'FROM memory_version v '
+        'JOIN memory m ON m.id = v.memory_id '
+        'WHERE m.project_id = ? '
+        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+        "  AND m.lifecycle NOT IN ('rejected', 'disabled') " +
+        where_extra + detail_filter +
+        'ORDER BY CASE WHEN v.id = m.current_version_id THEN 0 ELSE 1 END, '
+        'datetime(v.valid_from) DESC, m.id ASC LIMIT ?',
+        fresh_params + (project_id, agent_id) + tuple(extra_params) + detail_params + (limit * 2,)
+    )
+    out = []
+    for row in cur.fetchall():
+        mid, scope, lc, verif, fresh, content, owner, rank, fp, _vf, _vid = row
+        ver_fp = fingerprint(content)
+        # Ensure active tombstones still block rejected claims unless searching historical versions explicitly
+        if as_of is not None:
+            tomb = conn.execute(
+                'SELECT 1 FROM tombstone t WHERE t.claim_fingerprint = ? '
+                'AND t.overridden_by IS NULL '
+                "AND t.reason NOT LIKE 'corrected:%' "
+                'AND datetime(t.created_at) <= datetime(?) '
+                'AND (t.scope = \'global\' OR t.scope = ?)',
+                (ver_fp, str(as_of).strip(), project_id)
+            ).fetchone()
+            if tomb is not None:
+                continue
+        out.append((mid, scope, lc, verif, fresh, content, owner, rank, ver_fp))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def search(conn, project_id, agent_id, query, limit=20,
-           scope_detail=None, query_vec=None):
+           scope_detail=None, query_vec=None, *,
+           mode: str = 'standard', as_of: str | None = None,
+           changed_since: str | None = None):
     """FTS5 + Vector hybrid search over memory content, scope-enforced in SQL.
 
     Deterministic rank: FTS bm25 + Vector cosine similarity via Reciprocal
@@ -744,6 +981,8 @@ def search(conn, project_id, agent_id, query, limit=20,
 
     scope_detail narrows to one private subdivision (e.g. 'skill:x'); None
     means no narrowing. Project-scope rows never carry a detail tag.
+    mode supports 'standard' (default), 'strict' (accepted + current + non-disputed),
+    and 'historical' (includes superseded versions or point-in-time as_of).
     """
     try:
         limit = int(limit)
@@ -752,28 +991,43 @@ def search(conn, project_id, agent_id, query, limit=20,
     if limit < 1:
         raise MemCoreError('search limit must be >= 1')
     limit = min(limit, 500)
+    mode_norm = str(mode or 'standard').strip().lower()
+    if mode_norm not in ('standard', 'strict', 'historical'):
+        raise MemCoreError(f'invalid search mode: {mode}; must be standard|strict|historical')
+
     user_query = str(query or '').strip()
-    if not user_query or not any(c.isalnum() for c in user_query):
+    has_query = bool(user_query and any(c.isalnum() for c in user_query))
+    if not has_query and as_of is None and changed_since is None and mode_norm != 'historical':
         return []
-    # Retention ranking: MEMCORE_ABLATE_DECAY=1 neutralizes exactly the
-    # retention term (legacy CASE+bm25 ordering). MEMCORE_FAKE_NOW feeds the
-    # simulated clock (fake else real) for age computation only; it never
-    # reorders except through that age term. Junk FAKE_NOW falls back to the
-    # real clock and never raises.
+
     now_iso = _eval_now_iso()
     retention_expr, retention_params = _retention_order(
         conn, not _decay_ablated(), alias='m')
     retention_tail = (
         (', ' + retention_expr + ' DESC') if retention_expr else '')
-    # Lane 3.2: expand fleet aliases before any matching (FTS lane).
-    # The exact-fallback below keeps using user_query (pre-expansion) so
-    # appended alias values can never break the verbatim substring check.
-    raw_query = _expand_aliases(user_query)
+    raw_query = _expand_aliases(user_query) if has_query else ''
     if _membership_role(conn, project_id, agent_id) is None:
         return []
     detail_filter, detail_params = _search_detail_filter(conn, scope_detail)
     if detail_filter is None:
         return []
+
+    if as_of is not None or mode_norm == 'historical':
+        if not has_query and as_of is None and changed_since is None:
+            return []
+        return _search_historical(
+            conn, project_id, agent_id, user_query, raw_query,
+            detail_filter, detail_params, now_iso, limit,
+            as_of=as_of, changed_since=changed_since
+        )
+
+    if not has_query and changed_since is not None:
+        return _search_changed_since_only(
+            conn, project_id, agent_id, changed_since,
+            detail_filter, detail_params, retention_tail,
+            retention_params, now_iso, limit, mode=mode_norm
+        )
+
     substr_terms = _extract_non_ascii_substr_terms(user_query)
 
     # Lane 3.3: Local vector search lane (semantic similarity)
@@ -792,6 +1046,18 @@ def search(conn, project_id, agent_id, query, limit=20,
             min(500, limit * DISTINCT_OVERFETCH)
         )
 
+    # Lane 3.4: Situational trigger (when_to_use / v.summary) lane
+    summary_rows = _run_summary_lane(
+        conn, project_id, agent_id, raw_query, detail_filter,
+        detail_params, retention_tail, retention_params, now_iso, limit
+    )
+    if summary_rows:
+        seen_fts = {r[0] for r in fts_rows}
+        for sr in summary_rows:
+            if sr[0] not in seen_fts:
+                fts_rows.append(sr)
+                seen_fts.add(sr[0])
+
     # Substring lane runs ONLY as a fallback, and only when the ranked lane did
     # not already supply enough DISTINCT claims.
     exact_rows = []
@@ -803,24 +1069,43 @@ def search(conn, project_id, agent_id, query, limit=20,
     if not vec_rows and not fts_rows and not exact_rows:
         return []
     # Query-side analysis for the demotion pass: computed once here, so the
-    # incompatibility check never re-tokenizes the query per row (C2). The
-    # ordered token list feeds the phrase-negation signal; the set feeds
-    # anchor/choice checks.
+    # incompatibility check never re-tokenizes the query per row (C2).
     from memcore import contradiction as _qd
     query_tokens = _qd._tokens(user_query)
     query_tok = set(query_tokens)
     query_numbers = _qd.numbers(user_query)
 
+    fetch_cap = limit * 2 if (mode_norm == 'strict' or changed_since is not None) else limit
     if not vec_rows:
-        return _merge_exact_fallback(
-            fts_rows, exact_rows, limit, user_query,
+        results = _merge_exact_fallback(
+            fts_rows, exact_rows, fetch_cap, user_query,
             query_tok=query_tok, query_numbers=query_numbers,
             query_tokens=query_tokens)
-    fused = _fuse_rrf_candidates(fts_rows, vec_rows)
-    return _merge_exact_fallback(
-        fused, exact_rows, limit, user_query,
-        query_tok=query_tok, query_numbers=query_numbers,
-        query_tokens=query_tokens)
+    else:
+        fused = _fuse_rrf_candidates(fts_rows, vec_rows)
+        results = _merge_exact_fallback(
+            fused, exact_rows, fetch_cap, user_query,
+            query_tok=query_tok, query_numbers=query_numbers,
+            query_tokens=query_tokens)
+
+    if results:
+        stale_ids = _source_file_is_stale_readonly(conn, [r[0] for r in results])
+        if stale_ids:
+            refreshed = []
+            for r in results:
+                if r[0] in stale_ids and len(r) > 4:
+                    r_list = list(r)
+                    r_list[4] = 'stale'
+                    refreshed.append(tuple(r_list))
+                else:
+                    refreshed.append(r)
+            results = refreshed
+
+    if changed_since is not None:
+        results = _filter_changed_since(conn, results, changed_since)
+    if mode_norm == 'strict':
+        results = _filter_strict_rows(conn, results)
+    return results[:limit]
 
 
 def finalize_recall(conn, rows):
@@ -856,7 +1141,9 @@ def finalize_recall(conn, rows):
 
 
 def recall(conn, project_id, agent_id, query, limit=20,
-           scope_detail=None, query_vec=None, get_head=None, repo_root=None):
+           scope_detail=None, query_vec=None, get_head=None, repo_root=None,
+           *, mode: str = 'standard', as_of: str | None = None,
+           changed_since: str | None = None):
     """The unified, deep memory recall lifecycle.
 
     Encapsulates candidate search, access reinforcement, source staleness
@@ -867,9 +1154,13 @@ def recall(conn, project_id, agent_id, query, limit=20,
     """
     rows = search(
         conn, project_id, agent_id, query, limit=limit,
-        scope_detail=scope_detail, query_vec=query_vec
+        scope_detail=scope_detail, query_vec=query_vec,
+        mode=mode, as_of=as_of, changed_since=changed_since
     )
-    return finalize_recall(conn, rows)
+    finalized = finalize_recall(conn, rows)
+    if str(mode or 'standard').strip().lower() == 'strict':
+        finalized = [r for r in finalized if len(r) > 4 and r[2] == 'accepted' and r[4] == 'current']
+    return finalized
 
 
 #: How much deeper than ``limit`` search() reads before collapsing duplicate
@@ -1030,6 +1321,187 @@ def superseded_history(conn, memory_id, agent_id):
         (memory_id, agent_id, agent_id)
     )
     return cur.fetchall()
+
+
+def get_memories(conn, project_id, agent_id, memory_ids, *,
+                 include_history=False, include_evidence=False,
+                 record_access=True):
+    """Layer-3 progressive disclosure: fetch full governed records by ID list.
+
+    Enforces SQL WHERE project membership, private-scope ownership, and active
+    tombstone guards. Performs live read-time SHA-256 provenance checks on
+    source_file-backed rows and preserves caller ID order.
+    """
+    if not memory_ids or not isinstance(memory_ids, (list, tuple, set)):
+        return []
+    if _membership_role(conn, project_id, agent_id) is None:
+        return []
+    clean_ids = []
+    seen = set()
+    for mid in memory_ids:
+        if isinstance(mid, str):
+            s = mid.strip()
+            if s and s not in seen:
+                seen.add(s)
+                clean_ids.append(s)
+    if not clean_ids:
+        return []
+    clean_ids = clean_ids[:50]
+    placeholders = ','.join('?' for _ in clean_ids)
+    v_cols = _table_cols(conn, 'memory_version')
+    wtu_col = 'v.when_to_use' if 'when_to_use' in v_cols else 'NULL'
+    now_iso = _eval_now_iso()
+    cur = conn.execute(
+        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
+        f'       v.content, m.owner_agent_id, m.type, {wtu_col} AS when_to_use, '
+        '       v.source_file, v.source_commit, v.source_hash, '
+        '       v.valid_from, v.valid_until, m.pinned, m.critical, '
+        '       COALESCE(m.recall_count, 0), m.updated_at '
+        'FROM memory m '
+        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+        f'WHERE m.project_id = ? AND m.id IN ({placeholders}) '
+        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+        '  AND ' + _recall_tombstone_guard('m'),
+        _freshness_params(now_iso) + (project_id, *clean_ids, agent_id),
+    )
+    by_id = {}
+    for row in cur.fetchall():
+        (mid, scope, lifecycle, verification, freshness, content, owner,
+         mtype, when_to_use, source_file, source_commit, source_hash,
+         valid_from, valid_until, pinned, critical, recall_count, updated_at) = row
+        effective_freshness = freshness
+        if source_file and _is_single_source_stale(source_file, source_hash):
+            effective_freshness = 'stale'
+        item = {
+            'id': mid,
+            'scope': scope,
+            'lifecycle': lifecycle,
+            'verification': verification,
+            'freshness': effective_freshness,
+            'type': mtype,
+            'content': content,
+            'when_to_use': when_to_use,
+            'owner': owner,
+            'source_file': source_file,
+            'source_commit': source_commit,
+            'source_hash': source_hash,
+            'valid_from': valid_from,
+            'valid_until': valid_until,
+            'pinned': bool(pinned),
+            'critical': bool(critical),
+            'recall_count': int(recall_count or 0),
+            'updated_at': updated_at,
+        }
+        if include_history:
+            hist = superseded_history(conn, mid, agent_id)
+            item['history'] = [
+                {
+                    'version_id': h[0],
+                    'content': h[1],
+                    'created_at': h[2],
+                    'supersedes_version_id': h[3],
+                }
+                for h in hist
+            ]
+        if include_evidence:
+            ev_rows = conn.execute(
+                'SELECT e.id, e.kind, e.locator, e.excerpt '
+                'FROM evidence_link el '
+                'JOIN evidence e ON e.id = el.evidence_id '
+                'JOIN memory m ON m.current_version_id = el.memory_version_id '
+                'WHERE m.id = ? ORDER BY e.created_at ASC',
+                (mid,),
+            ).fetchall()
+            item['evidence'] = [
+                {'id': er[0], 'kind': er[1], 'locator': er[2], 'excerpt': er[3]}
+                for er in ev_rows
+            ]
+        by_id[mid] = item
+
+    ordered = [by_id[mid] for mid in clean_ids if mid in by_id]
+    if record_access and ordered:
+        try:
+            with store.write_tx(conn):
+                for item in ordered:
+                    conn.execute(
+                        'UPDATE memory SET recall_count = COALESCE(recall_count, 0) + 1, '
+                        'last_recalled = ? WHERE id = ?',
+                        (now_iso, item['id']),
+                    )
+                    item['recall_count'] += 1
+        except (sqlite3.OperationalError, store.StoreError):
+            pass
+    return ordered
+
+
+def pack_search_results(results, max_tokens=None, preview_chars=180):
+    """Pack search result dicts within a token budget using progressive disclosure.
+
+    When max_tokens is None or <= 0, returns results unchanged.
+    Otherwise estimates token cost (~4 chars/token + 12 metadata tokens/row).
+    Full rows that fit are kept in full; rows whose full body would exceed the
+    remaining budget are downgraded to a Salience L1 preview if the preview fits.
+    """
+    if not results or max_tokens is None:
+        return list(results or [])
+    try:
+        budget_tok = int(max_tokens)
+    except (TypeError, ValueError):
+        return list(results)
+    if budget_tok <= 0:
+        return list(results)
+
+    p_chars = min(max(int(preview_chars or 180), 40), 500)
+    packed = []
+    used_tok = 0
+    meta_overhead_tok = 12
+
+    def _est_tokens(text):
+        return max(1, (len(str(text or '')) + 3) // 4)
+
+    def _make_preview(raw_text, limit_chars):
+        collapsed = ' '.join(str(raw_text or '').split())
+        if len(collapsed) <= limit_chars:
+            return collapsed, False
+        cut = collapsed[:limit_chars]
+        sp = cut.rfind(' ')
+        if sp > limit_chars // 2:
+            cut = cut[:sp]
+        return cut.rstrip() + '…', True
+
+    for idx, item in enumerate(results):
+        row = dict(item)
+        raw_content = str(row.get('content') or '')
+        full_cost = meta_overhead_tok + _est_tokens(raw_content)
+        if used_tok + full_cost <= budget_tok:
+            row['estimated_tokens'] = full_cost
+            packed.append(row)
+            used_tok += full_cost
+            continue
+        # Try downgrading to preview if remaining budget can hold a preview
+        rem_tok = budget_tok - used_tok - meta_overhead_tok
+        if rem_tok >= 10:
+            avail_chars = min(p_chars, rem_tok * 4)
+            if avail_chars >= 40:
+                prev_text, trunc = _make_preview(raw_content, avail_chars)
+                prev_cost = meta_overhead_tok + _est_tokens(prev_text)
+                row['content'] = prev_text
+                row['content_truncated'] = True if trunc or len(prev_text) < len(raw_content) else bool(row.get('content_truncated'))
+                row['estimated_tokens'] = prev_cost
+                packed.append(row)
+                used_tok += prev_cost
+                continue
+        if idx == 0 and not packed:
+            # Always emit at least the top-1 hit, truncated to fit budget
+            avail_chars = max(40, max(1, budget_tok - meta_overhead_tok) * 4)
+            prev_text, trunc = _make_preview(raw_content, avail_chars)
+            row['content'] = prev_text
+            row['content_truncated'] = True if trunc or len(prev_text) < len(raw_content) else bool(row.get('content_truncated'))
+            row['estimated_tokens'] = meta_overhead_tok + _est_tokens(prev_text)
+            packed.append(row)
+        break
+    return packed
 
 
 # ————————————————————————————————————————————————————————————————————————————————————————

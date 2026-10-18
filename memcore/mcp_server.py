@@ -79,12 +79,12 @@ TOOLS = [
         "name": "memory_remember",
         "description": (
             "Store a verified fact, architectural decision, preference, or note in MemCore governed memory. "
-            "Optionally bind source_file and source_commit for automatic SHA-256 staleness tracking."
+            "Optionally bind source_file/source_commit for automatic SHA-256 staleness tracking and when_to_use for situational trigger recall."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "The authoritative claim or fact to store"},
+                "content": {"type": "string", "description": "The authoritative claim or fact to store (supports <private>...</private> redaction tags)"},
                 "type": {
                     "type": "string",
                     "enum": ["fact", "decision", "preference", "note"],
@@ -100,10 +100,18 @@ TOOLS = [
                     "enum": ["project", "private"],
                     "description": "Visibility scope (default: project)",
                 },
+                "when_to_use": {
+                    "type": "string",
+                    "description": "Optional situational trigger describing WHEN this memory should be activated (e.g. 'when debugging SQLite WAL locks')",
+                },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
                 "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
-                "source_file": {"type": "string", "description": "Optional path to source file for SHA-256 provenance"},
+                "source_file": {"type": "string", "description": "Optional path to source file for SHA-256 provenance (auto-detected from content if omitted)"},
                 "source_commit": {"type": "string", "description": "Optional git commit SHA"},
+                "auto_source_file": {
+                    "type": "boolean",
+                    "description": "Auto-detect existing workspace file path in content for SHA-256 provenance (default: true)",
+                },
             },
             "required": ["content"],
             "additionalProperties": False,
@@ -113,7 +121,7 @@ TOOLS = [
         "name": "memory_search",
         "description": (
             "Search MemCore governed memory using hybrid FTS5 BM25 + semantic vector RRF recall. "
-            "Returns trust labels (scope, lifecycle, verification, freshness) and content."
+            "Supports progressive disclosure (include_content=false or max_tokens), strict verification mode, and bitemporal queries (as_of, changed_since)."
         ),
         "inputSchema": {
             "type": "object",
@@ -128,10 +136,58 @@ TOOLS = [
                     "type": "integer",
                     "description": "Preview character cap when include_content is false (40-500, default: 180)",
                 },
+                "mode": {
+                    "type": "string",
+                    "enum": ["standard", "strict", "historical"],
+                    "description": "Recall mode: standard (default), strict (verified & non-stale only), or historical (includes superseded versions)",
+                },
+                "as_of": {
+                    "type": "string",
+                    "description": "Optional ISO-8601 timestamp (e.g. '2026-10-01T00:00:00Z') for point-in-time bitemporal recall",
+                },
+                "changed_since": {
+                    "type": "string",
+                    "description": "Optional ISO-8601 timestamp to return only memories created/updated at or after that timestamp",
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Optional token budget cap; packs results and downgrades overflow items to previews",
+                },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
                 "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
             },
-            "required": ["query"],
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "memory_get",
+        "description": (
+            "Layer-3 progressive disclosure: fetch full governed memory records (content, when_to_use, provenance, optional version history and evidence) by ID list."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of memory IDs to fetch in full",
+                },
+                "memory_id": {
+                    "type": "string",
+                    "description": "Single memory ID alias (if memory_ids is not provided)",
+                },
+                "include_history": {
+                    "type": "boolean",
+                    "description": "Include bitemporal superseded version history (default: false)",
+                },
+                "include_evidence": {
+                    "type": "boolean",
+                    "description": "Include linked evidence records (default: false)",
+                },
+                "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
+                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
+            },
             "additionalProperties": False,
         },
     },
@@ -160,6 +216,7 @@ TOOLS = [
                 "memory_id": {"type": "string", "description": "ID of the memory to supersede"},
                 "new_content": {"type": "string", "description": "Updated authoritative content"},
                 "reason": {"type": "string", "description": "Reason for superseding"},
+                "when_to_use": {"type": "string", "description": "Optional updated situational trigger condition"},
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
                 "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
                 "source_file": {"type": "string", "description": "Optional source file path"},
@@ -263,7 +320,7 @@ class MethodNotFound(Exception):
 
 
 def _client(args: dict[str, Any]) -> MemCore:
-    db_path = os.environ.get("MEMCORE_DB_PATH") or DEFAULT_DB
+    db_path = str(args.get("db_path") or os.environ.get("MEMCORE_DB_PATH") or DEFAULT_DB)
     project = str(args.get("project") or DEFAULT_PROJECT).strip() or DEFAULT_PROJECT
     agent = str(args.get("agent") or DEFAULT_AGENT).strip() or DEFAULT_AGENT
     provider = os.environ.get("MEMCORE_EMBEDDING_PROVIDER", "none")
@@ -278,6 +335,8 @@ def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
     scope = str(args.get("scope") or "project").strip() or "project"
     source_file = args.get("source_file")
     source_commit = args.get("source_commit")
+    when_to_use = args.get("when_to_use")
+    auto_source_file = bool(args.get("auto_source_file", True))
     with _client(args) as mc:
         mid = mc.remember(
             content.strip(),
@@ -285,8 +344,17 @@ def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
             scope=scope,
             source_file=source_file,
             source_commit=source_commit,
+            when_to_use=when_to_use,
+            auto_source_file=auto_source_file,
         )
-        return {
+        has_wtu = "when_to_use" in core._table_cols(mc.conn, "memory_version")
+        wtu_col = "mv.when_to_use" if has_wtu else "NULL"
+        row = mc.conn.execute(
+            f"SELECT mv.source_file, {wtu_col} FROM memory m "
+            "JOIN memory_version mv ON m.current_version_id = mv.id WHERE m.id = ?",
+            (mid,),
+        ).fetchone()
+        out: dict[str, Any] = {
             "success": True,
             "status": "stored",
             "memory_id": mid,
@@ -295,6 +363,11 @@ def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
             "scope": scope,
             "memory_type": mtype,
         }
+        if row and row[0]:
+            out["source_file"] = row[0]
+        if row and row[1]:
+            out["when_to_use"] = row[1]
+        return out
 
 
 def _tool_search(args: dict[str, Any]) -> dict[str, Any]:
@@ -306,39 +379,58 @@ def _tool_search(args: dict[str, Any]) -> dict[str, Any]:
     limit = max(1, min(50, int(args.get("limit") or 10)))
     include_content = bool(args.get("include_content", True))
     preview_chars = int(args.get("preview_chars") or 180)
+    mode = str(args.get("mode") or "standard").strip().lower()
+    as_of = args.get("as_of")
+    changed_since = args.get("changed_since")
+    max_tokens = args.get("max_tokens")
     with _client(args) as mc:
         hits = mc.search(
             query.strip(),
             limit=limit,
             include_content=include_content,
             preview_chars=preview_chars,
+            mode=mode,
+            as_of=as_of,
+            changed_since=changed_since,
+            max_tokens=max_tokens,
         )
-        # Live SHA-256 provenance verification for hits bound to a source_file
-        for item in hits:
-            mid = item.get("id")
-            if not mid:
-                continue
-            row = mc.conn.execute(
-                "SELECT mv.source_file, mv.source_hash FROM memory m "
-                "JOIN memory_version mv ON m.current_version_id = mv.id WHERE m.id = ?",
-                (mid,),
-            ).fetchone()
-            if row and row[0] and row[1]:
-                src_path = pathlib.Path(str(row[0])).expanduser()
-                item["source_file"] = str(row[0])
-                if src_path.is_file():
-                    live_hash = core.compute_file_hash(src_path)
-                    if live_hash and live_hash != row[1]:
-                        item["freshness"] = "stale"
-                else:
-                    item["freshness"] = "stale"
         return {
             "success": True,
             "query": query.strip(),
+            "mode": mode,
             "project": mc.project,
             "agent": mc.agent,
             "count": len(hits),
             "results": hits,
+        }
+
+
+def _tool_get(args: dict[str, Any]) -> dict[str, Any]:
+    raw_ids = args.get("memory_ids")
+    single_id = args.get("memory_id")
+    ids: list[str] = []
+    if isinstance(raw_ids, list):
+        ids.extend(str(x).strip() for x in raw_ids if isinstance(x, str) and x.strip())
+    elif isinstance(raw_ids, str) and raw_ids.strip():
+        ids.append(raw_ids.strip())
+    if isinstance(single_id, str) and single_id.strip():
+        ids.append(single_id.strip())
+    if not ids:
+        raise ValueError("memory_ids (or memory_id) is required")
+    include_history = bool(args.get("include_history", False))
+    include_evidence = bool(args.get("include_evidence", False))
+    with _client(args) as mc:
+        items = mc.get(
+            ids,
+            include_history=include_history,
+            include_evidence=include_evidence,
+        )
+        return {
+            "success": True,
+            "project": mc.project,
+            "agent": mc.agent,
+            "count": len(items),
+            "results": items,
         }
 
 
@@ -366,6 +458,7 @@ def _tool_supersede(args: dict[str, Any]) -> dict[str, Any]:
     reason = args.get("reason")
     source_file = args.get("source_file")
     source_commit = args.get("source_commit")
+    when_to_use = args.get("when_to_use")
     with _client(args) as mc:
         new_id = mc.supersede(
             memory_id,
@@ -373,6 +466,7 @@ def _tool_supersede(args: dict[str, Any]) -> dict[str, Any]:
             reason=reason,
             source_file=source_file,
             source_commit=source_commit,
+            when_to_use=when_to_use,
         )
         return {
             "success": True,
@@ -460,6 +554,9 @@ def _tool_status(args: dict[str, Any]) -> dict[str, Any]:
         total_proj = mc.conn.execute("SELECT COUNT(*) FROM project").fetchone()[0]
         total_agents = mc.conn.execute("SELECT COUNT(*) FROM agent").fetchone()[0]
         journal_mode = mc.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        grad_candidates = core.skill_graduation_candidates(
+            mc.conn, project_id=mc.project, include_content=False
+        ) if hasattr(core, "skill_graduation_candidates") else []
         return {
             "success": True,
             "status": "healthy",
@@ -470,12 +567,14 @@ def _tool_status(args: dict[str, Any]) -> dict[str, Any]:
             "accepted_memories": total_mem,
             "projects_count": total_proj,
             "agents_count": total_agents,
+            "skill_graduation_candidates": len(grad_candidates),
         }
 
 
 _HANDLERS = {
     "memory_remember": _tool_remember,
     "memory_search": _tool_search,
+    "memory_get": _tool_get,
     "memory_promote": _tool_promote,
     "memory_supersede": _tool_supersede,
     "memory_reject": _tool_reject,

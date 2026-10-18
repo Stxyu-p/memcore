@@ -1015,6 +1015,8 @@ def apply_migrations(conn):
             '  lock_until REAL)'
         )
     _run_migrations(conn)
+    if _current_version(conn) == '0018_memory_embedding':
+        _ensure_column(conn, 'memory_version', 'when_to_use', 'TEXT')
     _invalidate_core_schema_caches()
 
 
@@ -1329,7 +1331,11 @@ def _ensure_column(conn, table: str, col: str, col_def: str) -> None:
     """Idempotent ALTER TABLE ADD COLUMN (SQLite has no IF NOT EXISTS here)."""
     cols = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
     if col not in cols:
-        conn.execute(f'ALTER TABLE {table} ADD COLUMN {col} {col_def}')
+        try:
+            conn.execute(f'ALTER TABLE {table} ADD COLUMN {col} {col_def}')
+        except sqlite3.OperationalError as exc:
+            if 'duplicate column' not in str(exc).lower():
+                raise
 
 
 def _pre_0013_ownership_guard(conn):

@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memcore"
-version = "2.1.0"
+name = "memcore-omnix"
+version = "2.2.0"
 description = "Governed, bitemporal, local-first memory engine for autonomous AI agent fleets"
 readme = "README.md"
 authors = [

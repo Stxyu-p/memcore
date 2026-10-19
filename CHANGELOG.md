@@ -4,6 +4,13 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-10-20
+
+### Added
+- **PyPI distribution renamed to `memcore-omnix`** (`pyproject.toml`): the `memcore` name on PyPI is held by an unrelated account (`0.1.0`, uploaded 2025-06-27), so Trusted Publishing could never claim it — the release workflow failed with `invalid-publisher`. `memcore-omnix` is free and the project can now be created on first publish via an OIDC pending publisher.
+  - **The import package, the console scripts, and the MCP server name are unchanged** — `import memcore` still works, `memcore` / `memcore-mcp` commands still work, and every client config that registers the `memcore` MCP server (`~/.codex/config.toml`, `~/.claude.json`, `~/.gemini/config/mcp_config.json`) stays valid. Only the *distribution* name on PyPI changed: install with `pip install memcore-omnix`.
+- **Release workflow for `skill-proof`** (`.github/workflows/release.yml`): publishes the wheel and sdist to PyPI via Trusted Publishing on release-published, with `skip-existing` so a re-run cannot overwrite an existing version.
+
 ## [2.1.0] - 2026-10-18
 
 ### Added

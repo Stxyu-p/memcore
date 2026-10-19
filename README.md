@@ -110,7 +110,7 @@ Result:
 Install `memcore`, initialize the governed store, and automatically register its stdio MCP server across every supported AI agent CLI and IDE on your machine:
 
 ```bash
-pip install memcore
+pip install memcore-omnix
 memcore init
 memcore install
 ```
@@ -343,7 +343,7 @@ flowchart LR
 
 ```bash
 # Install & link the complete Global Agent Trinity across all your IDEs and CLIs
-pip install memcore trimtok skill-proof
+pip install memcore-omnix trimtok skill-proof
 memcore init && memcore install && trimtok install && skill-proof install
 skill-proof vault migrate
 ```

@@ -7,6 +7,7 @@
 <p><em>Capture broadly. Recall narrowly. Never trust raw conversational history.</em></p>
 
 <p>
+  <a href="https://pypi.org/project/memcore-omnix/"><img src="https://img.shields.io/pypi/v/memcore-omnix?style=flat-square&color=blue" alt="PyPI" /></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB?style=flat-square" alt="Python 3.10+" />
   <img src="https://img.shields.io/badge/storage-SQLite_WAL_+_FTS5_+_sqlite--vec-07405E?style=flat-square" alt="SQLite WAL FTS5 sqlite-vec" />
   <img src="https://img.shields.io/badge/embeddings-model2vec_/_FastEmbed-10b981?style=flat-square" alt="Local Embeddings" />
@@ -343,7 +344,7 @@ flowchart LR
 
 ```bash
 # Install & link the complete Global Agent Trinity across all your IDEs and CLIs
-pip install memcore-omnix trimtok skill-proof
+pip install memcore-omnix trimtok skill-proof-router
 memcore init && memcore install && trimtok install && skill-proof install
 skill-proof vault migrate
 ```

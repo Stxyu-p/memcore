@@ -53,6 +53,11 @@ def _sync_memcore_global_skill() -> None:
         "MemCore provides governed project memory across agent sessions with 9 MCP tools:\n"
         "`memory_remember`, `memory_search`, `memory_promote`, `memory_supersede`, `memory_reject`,\n"
         "`memory_feedback`, `memory_review_queue`, `memory_review_decide`, and `memory_status`.\n"
+        "\n"
+        "**Surface note:** those nine are the **MCP server** tools (Codex CLI, Claude Code, Antigravity / Gemini CLI). "
+        "In **Hermes**, memcore is the native memory provider (`memory.provider: memcore`), not an MCP server — eight "
+        "tools are exposed natively under the same names (`memory_remember` … `memory_review_decide`), with no "
+        "`memory_get` and no `memory_status`.\n"
     )
     for root in (
         pathlib.Path.home() / ".skill-proof" / "skills",

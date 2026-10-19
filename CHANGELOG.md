@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Switched `MemCore.search()` to call `core.is_single_source_stale(sfile, shash)` preventing `AttributeError` on string paths.
 - **MCP Delta Search Schema (`memcore/mcp_server.py`)**:
   - Removed mandatory `"query"` requirement in `memory_search` inputSchema, enabling query-less delta queries with `changed_since`.
+- **Surface note in the generated MemCore skill body (`memcore/__main__.py`)**:
+  - The generated `SKILL.md` for `~/.skill-proof/skills`, `~/.agents/skills`, and `~/.gemini/config/skills` now states which tools each client exposes. The nine names it lists are the **MCP server** tools (Codex CLI, Claude Code, Antigravity / Gemini CLI); in **Hermes**, memcore is the native memory provider (`memory.provider: memcore`) and exposes eight of them natively under the same names — there is no `memory_get` and no `memory_status`.
+- **Package version alignment**:
+  - `pyproject.toml` and the MCP `SERVER_INFO` handshake now report `2.1.0`, matching the 2.1.0 changelog entry that the earlier commits documented but the version strings did not carry.
 
 ## [2.0.0] - 2026-10-18
 

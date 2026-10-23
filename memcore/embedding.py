@@ -1,8 +1,9 @@
 """
 Local embedding client for MemCore with resilient circuit breaking.
 
-Connects to 9Router or OpenAI-compatible embedding endpoint (default localhost:20128).
-Uses standard library only (urllib.request). Fails closed to None so callers
+Defaults to local in-process ONNX embeddings using the shared global model
+(Xenova/multilingual-e5-small) across OS platforms. Supports OpenAI-compatible
+and Ollama endpoints when explicitly configured. Fails closed to None so callers
 can gracefully fall back to lexical FTS5 search without disrupting operations.
 """
 import array
@@ -10,6 +11,7 @@ import json
 import math
 import operator
 import os
+import pathlib
 import struct
 import threading
 import time
@@ -17,27 +19,53 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+def _find_global_e5_dir() -> pathlib.Path | None:
+    env_dir = os.environ.get('HERMES_MODELS_DIR')
+    candidates = []
+    if env_dir:
+        candidates.append(pathlib.Path(env_dir))
+
+    hermes_home = os.environ.get('HERMES_HOME')
+    if hermes_home:
+        candidates.append(pathlib.Path(hermes_home) / 'models')
+
+    if os.name == 'nt':
+        local_app_data = os.environ.get('LOCALAPPDATA')
+        if local_app_data:
+            base = pathlib.Path(local_app_data) / 'hermes'
+            candidates.append(base / 'models')
+            candidates.append(base / 'plugin-data' / 'skill-proof' / 'models')
+    else:
+        xdg_data = os.environ.get('XDG_DATA_HOME')
+        base = pathlib.Path(xdg_data) / 'hermes' if xdg_data else pathlib.Path.home() / '.local' / 'share' / 'hermes'
+        candidates.append(base / 'models')
+        candidates.append(base / 'plugin-data' / 'skill-proof' / 'models')
+
+    candidates.append(pathlib.Path.home() / '.hermes' / 'models')
+    for c in candidates:
+        target = c / 'Xenova_multilingual-e5-small'
+        if (target / 'tokenizer.json').is_file() and (target / 'onnx' / 'model_quantized.onnx').is_file():
+            return target
+    return None
+
 DEFAULT_ENDPOINT = os.environ.get(
-    'MEMCORE_EMBEDDING_URL', 'http://localhost:20128/v1/embeddings'
+    'MEMCORE_EMBEDDING_URL',
+    'in-process'
 )
 DEFAULT_MODEL = os.environ.get(
-    'MEMCORE_EMBEDDING_MODEL', 'text-embedding-3-small'
+    'MEMCORE_EMBEDDING_MODEL',
+    'Xenova/multilingual-e5-small'
 )
 
 PROVIDERS = {
-    '9router': {
-        'url': 'http://localhost:20128/v1/embeddings',
-        'key_env': ('MEMCORE_EMBEDDING_KEY', 'HERMES_CUSTOM_LOCALHOST_20128_API_KEY'),
+    'openai': {
+        'url': 'https://api.openai.com/v1/embeddings',
+        'key_env': ('MEMCORE_EMBEDDING_KEY', 'OPENAI_API_KEY'),
         'default_model': 'text-embedding-3-small',
     },
     'openrouter': {
         'url': 'https://openrouter.ai/api/v1/embeddings',
         'key_env': ('MEMCORE_EMBEDDING_KEY', 'OPENROUTER_API_KEY'),
-        'default_model': 'text-embedding-3-small',
-    },
-    'openai': {
-        'url': 'https://api.openai.com/v1/embeddings',
-        'key_env': ('MEMCORE_EMBEDDING_KEY', 'OPENAI_API_KEY'),
         'default_model': 'text-embedding-3-small',
     },
     'ollama': {
@@ -84,8 +112,8 @@ def resolve_config(
     p_name = (provider or os.environ.get('MEMCORE_EMBEDDING_PROVIDER', '')).lower()
     if p_name in ('none', 'off', 'disabled'):
         return None, '', None
-    if p_name in ('local', 'fastembed', 'model2vec'):
-        return 'in-process', model or 'minishlab/potion-base-8M', None
+    if p_name in ('local', 'onnx', 'e5', 'xenova', 'fastembed', 'model2vec') or not p_name:
+        return 'in-process', model or 'Xenova/multilingual-e5-small', None
 
     preset = PROVIDERS.get(p_name, {})
     target_url, target_model = _preset_targets(preset, model)
@@ -216,6 +244,65 @@ def get_embedding(
     return None
 
 
+_onnx_cache: dict[str, Any] = {}
+
+
+def _get_onnx_e5_batch(texts: list[str], model: str | None = None) -> list[list[float]] | None:
+    target_dir = _find_global_e5_dir()
+    if not target_dir:
+        return None
+    try:
+        import numpy as np
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+    except ImportError:
+        return None
+
+    state = _onnx_cache.get('e5')
+    if state is None:
+        with _state_lock:
+            state = _onnx_cache.get('e5')
+            if state is None:
+                try:
+                    tok = Tokenizer.from_file(str(target_dir / 'tokenizer.json'))
+                    tok.enable_truncation(max_length=512)
+                    tok.enable_padding(pad_id=0, pad_token='<pad>')
+                    sess_opts = ort.SessionOptions()
+                    sess_opts.intra_op_num_threads = 2
+                    sess = ort.InferenceSession(
+                        str(target_dir / 'onnx' / 'model_quantized.onnx'),
+                        sess_options=sess_opts,
+                        providers=['CPUExecutionProvider']
+                    )
+                    state = (tok, sess)
+                    _onnx_cache['e5'] = state
+                except Exception:
+                    return None
+
+    tok, sess = state
+    try:
+        import numpy as np
+        encodings = tok.encode_batch(texts)
+        input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
+        attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
+        feed = {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'token_type_ids': np.zeros_like(input_ids, dtype=np.int64),
+        }
+        outs = sess.run(None, feed)
+        last_hidden = outs[0]
+        mask_exp = np.expand_dims(attention_mask, -1).astype(float)
+        sum_emb = np.sum(last_hidden * mask_exp, axis=1)
+        sum_mask = np.clip(mask_exp.sum(axis=1), a_min=1e-9, a_max=None)
+        pooled = sum_emb / sum_mask
+        norms = np.clip(np.linalg.norm(pooled, axis=1, keepdims=True), a_min=1e-9, a_max=None)
+        normed = pooled / norms
+        return [list(float(v) for v in row) for row in normed]
+    except Exception:
+        return None
+
+
 _fastembed_cache: dict[str, Any] = {}
 
 
@@ -284,7 +371,9 @@ def get_embeddings_batch(
     if not target_endpoint:
         return None
     if target_endpoint == 'in-process':
-        res = _get_fastembed_batch(texts, model=target_model)
+        res = _get_onnx_e5_batch(texts, model=target_model)
+        if res is None:
+            res = _get_fastembed_batch(texts, model=target_model)
         if res is None:
             res = _get_model2vec_batch(texts, model=target_model)
         return res

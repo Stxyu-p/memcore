@@ -4,6 +4,21 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-10-24
+
+### Changed
+- **Zero-Config Local Embedding via Shared Global Models (`memcore/embedding.py`)**:
+  - Automatically resolves and uses the OS-standard global models directory across platforms:
+    - Windows: `%LOCALAPPDATA%\hermes\models`
+    - Linux / macOS: `$XDG_DATA_HOME/hermes/models` (falling back to `~/.local/share/hermes/models`)
+    - Universal fallback: `~/.hermes/models` (overridable via `HERMES_MODELS_DIR`)
+  - Supports in-process ONNX embeddings with `Xenova/multilingual-e5-small` without requiring external services or local network proxies.
+  - Automatically shares the model across plugins (`skill-proof`, `memcore`) with zero duplicate disk usage.
+- **Removed Private Gateway Coupling (`memcore/embedding.py`, `memcore/__main__.py`)**:
+  - Completely purged hardcoded private localhost / custom gateway defaults.
+  - Defaults cleanly to in-process local execution, falling back gracefully to lexical FTS5 if no model is present.
+  - Standardized public provider presets to `openai`, `openrouter`, and `ollama`.
+
 ## [2.2.0] - 2026-10-20
 
 ### Added

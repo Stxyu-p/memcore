@@ -184,6 +184,7 @@ Configure your embedding provider via `--provider` or `MEMCORE_EMBEDDING_PROVIDE
 
 | Provider | Default Model | Execution Mode | Highlights |
 | :--- | :--- | :--- | :--- |
+| **`local` / `e5`** | `Xenova/multilingual-e5-small` | **In-Process ONNX (CPU)** | Zero-config multilingual 384-dim ONNX embeddings using shared OS models dir; zero daemon. |
 | **`local` / `model2vec`** | `minishlab/potion-base-8M` | **In-Process Static Vectors** | Ultra-lightweight sub-millisecond static embeddings in pure CPU RAM; zero daemon. |
 | **`local` / `fastembed`** | `BAAI/bge-small-en-v1.5` | **In-Process ONNX (CPU)** | High-precision 384-dim ONNX embeddings running directly in-process (~30 MB). |
 | **`ollama`** | `nomic-embed-text` | **Local Daemon** | Connects to a local Ollama instance (`localhost:11434`). |

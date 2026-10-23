@@ -112,9 +112,9 @@ class EmbeddingClientTests(unittest.TestCase):
         self.assertIsNotNone(vec)
 
     def test_resolve_config_presets(self):
-        # 9router preset
-        url, model, _ = embedding.resolve_config(provider='9router')
-        self.assertEqual(url, 'http://localhost:20128/v1/embeddings')
+        # openai preset
+        url, model, _ = embedding.resolve_config(provider='openai')
+        self.assertEqual(url, 'https://api.openai.com/v1/embeddings')
         self.assertEqual(model, 'text-embedding-3-small')
 
         # openrouter preset

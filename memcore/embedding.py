@@ -103,16 +103,19 @@ _state_lock = threading.Lock()
 
 _consecutive_failures = 0
 _circuit_open_until = 0.0
+_probe_in_flight = False
 
 
 def is_circuit_open() -> bool:
-    """Return True if the circuit breaker is currently open (blocking calls)."""
-    global _circuit_open_until
+    """Return True if circuit is open or a half-open probe is already in flight."""
+    global _circuit_open_until, _probe_in_flight
     with _state_lock:
         if _circuit_open_until <= 0.0:
             return False
-        if time.time() >= _circuit_open_until:
-            _circuit_open_until = 0.0
+        if time.monotonic() >= _circuit_open_until:
+            if _probe_in_flight:
+                return True
+            _probe_in_flight = True
             return False
         return True
 
@@ -164,25 +167,28 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
 
 def reset_circuit_breaker() -> None:
     """Reset circuit breaker failure counters and cooldown."""
-    global _consecutive_failures, _circuit_open_until
+    global _consecutive_failures, _circuit_open_until, _probe_in_flight
     with _state_lock:
         _consecutive_failures = 0
         _circuit_open_until = 0.0
+        _probe_in_flight = False
 
 
 def _record_failure() -> None:
-    global _consecutive_failures, _circuit_open_until
+    global _consecutive_failures, _circuit_open_until, _probe_in_flight
     with _state_lock:
+        _probe_in_flight = False
         _consecutive_failures += 1
         if _consecutive_failures >= CIRCUIT_FAILURE_THRESHOLD:
-            _circuit_open_until = time.time() + CIRCUIT_COOLDOWN_SECONDS
+            _circuit_open_until = time.monotonic() + CIRCUIT_COOLDOWN_SECONDS
 
 
 def _record_success() -> None:
-    global _consecutive_failures, _circuit_open_until
+    global _consecutive_failures, _circuit_open_until, _probe_in_flight
     with _state_lock:
         _consecutive_failures = 0
         _circuit_open_until = 0.0
+        _probe_in_flight = False
 
 
 def get_embedding(

@@ -70,8 +70,8 @@ def version_at(conn, memory_id, agent_id, as_of):
     project_id = row[0]
     if _membership_role(conn, project_id, agent_id) is None:
         return None
-    cols = {r[1] for r in conn.execute('PRAGMA table_info(memory_version)')}
-    if 'valid_until' not in cols:
+    v_cols = _table_cols(conn, 'memory_version')
+    if 'valid_until' not in v_cols:
         return None
     return conn.execute(
         'SELECT v.id, v.content, v.valid_from, v.valid_until, v.created_by_agent_id '

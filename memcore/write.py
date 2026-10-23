@@ -106,7 +106,7 @@ _SECRET_PATTERNS = (
     re.compile(r'\bAIza[0-9A-Za-z_-]{35}\b'),
 )
 _SECRET_REDACTED = '«redacted:secret»'
-_PRIVATE_TAG_RE = re.compile(r'<private>[\s\S]*?</private>', re.IGNORECASE)
+_PRIVATE_TAG_RE = re.compile(r'<private>[\s\S]*?(?:</private>|$)', re.IGNORECASE)
 _PRIVATE_REDACTED = '«redacted:private»'
 
 

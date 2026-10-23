@@ -78,7 +78,10 @@ def resolve_project(cwd, path_bindings, default_project=None):
         return default_project
 
     def norm(s):
-        return str(s).replace('\\', '/').rstrip('/').lower()
+        p = str(s).replace('\\', '/').rstrip('/').lower()
+        if p.startswith('//?/') or p.startswith('//./'):
+            p = p[4:]
+        return p
 
     cwd_n = norm(cwd)
     best = None

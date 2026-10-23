@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -117,7 +118,19 @@ def _atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
-        os.replace(tmp, path)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    path.write_text(text, encoding="utf-8", newline="\n")
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    break
+                time.sleep(0.05 * (2 ** attempt))
     except Exception:
         try:
             os.unlink(tmp)

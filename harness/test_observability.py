@@ -116,7 +116,12 @@ class ObservabilityTests(unittest.TestCase):
             self.conn, 'proj-test', 'agent-alice', canary,
             scope='project', lifecycle='candidate',
         )
-        day1, day2 = '2026-09-20T10:00:00Z', '2026-09-21T10:00:00Z'
+        d1 = datetime.now(timezone.utc) - timedelta(days=2)
+        d2 = datetime.now(timezone.utc) - timedelta(days=1)
+        day1 = d1.strftime('%Y-%m-%dT10:00:00Z')
+        day2 = d2.strftime('%Y-%m-%dT10:00:00Z')
+        key1 = d1.strftime('%Y-%m-%d')
+        key2 = d2.strftime('%Y-%m-%d')
         for action, actor, created in (
             ('auto_corrob_accept', 'agent-alice', day1),
             ('duplicate-merge', 'agent-alice', day1),
@@ -136,9 +141,9 @@ class ObservabilityTests(unittest.TestCase):
         text = output.getvalue()
         data = json.loads(text)
         per_day = data['autonomy_per_day']
-        self.assertEqual(per_day['2026-09-20']['auto_corrob_accept'], 1)
-        self.assertEqual(per_day['2026-09-20']['duplicate-merge'], 1)
-        self.assertEqual(per_day['2026-09-21']['contradiction-hold'], 1)
+        self.assertEqual(per_day[key1]['auto_corrob_accept'], 1)
+        self.assertEqual(per_day[key1]['duplicate-merge'], 1)
+        self.assertEqual(per_day[key2]['contradiction-hold'], 1)
         self.assertNotIn('zebra quasar', text)
 
 

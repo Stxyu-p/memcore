@@ -52,6 +52,8 @@ def gc_scan(conn, candidate_days=30, tombstone_days=90):
         "WHERE m.lifecycle = 'candidate' "
         "  AND m.pinned = 0 AND m.critical = 0 "
         "  AND datetime(m.updated_at) < datetime(?) "
+        "  AND m.verification = 'unverified' "
+        "  AND v.source_file IS NULL "
         "  AND NOT EXISTS (SELECT 1 FROM evidence_link el "
         "                  WHERE el.memory_version_id = m.current_version_id) "
         "ORDER BY datetime(m.updated_at), m.id",
@@ -89,6 +91,8 @@ def gc_apply(conn, candidate_days=30, tombstone_days=90):
                 "WHERE m.id=? AND m.lifecycle='candidate' "
                 "  AND m.pinned=0 AND m.critical=0 "
                 "  AND datetime(m.updated_at) < datetime(?) "
+                "  AND m.verification = 'unverified' "
+                "  AND v.source_file IS NULL "
                 "  AND NOT EXISTS (SELECT 1 FROM evidence_link el "
                 "                  WHERE el.memory_version_id=m.current_version_id)",
                 (mem_id, cutoff_c),

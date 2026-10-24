@@ -498,7 +498,7 @@ def _fetch_embedding_safe(content: str):
     inside the transaction with ``_store_embedding_safe`` (pure SQL).
     """
     try:
-        vec = embedding.get_embedding(content, timeout=0.1)
+        vec = embedding.get_embedding(content, timeout=2.5)
         return vec if vec else None
     except Exception:
         return None

@@ -520,38 +520,60 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
     mul = operator.mul
 
     now_iso = _eval_now_iso()
-    sql = (
-        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
-        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
-        '       v.content, m.owner_agent_id, e.vector, '
-        '       m.claim_fingerprint, m.pinned '
-        'FROM memory m '
-        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
-        'JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
-        'WHERE m.project_id = ? '
-        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-        '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter
-    )
-    params = _freshness_params(now_iso) + (project_id, agent_id) + detail_params
+    fresh_params = _freshness_params(now_iso)
+    q_blob = q_arr.tobytes()
 
-    cur = conn.execute(sql, params)
-    candidates = []
-    for row in cur.fetchall():
-        mid, scope, lifecycle, verif, freshness, content, owner, blob, fp, pinned = row
-        v_arr = array.array('f')
-        v_arr.frombytes(blob)
-        if len(v_arr) != q_len:
-            continue
-        dot = sum(map(mul, q_arr, v_arr))
-        doc_norm_sq = sum(map(mul, v_arr, v_arr))
-        if doc_norm_sq <= 0.0:
-            sim = 0.0
-        else:
-            sim = dot / (query_norm * math.sqrt(doc_norm_sq))
-        # rank: lower is better to match bm25 convention (e.g. -sim)
-        rank = -sim
-        candidates.append((mid, scope, lifecycle, verif, freshness, content, owner, rank, fp, pinned))
+    # Fast path: in-process SIMD vector distance via sqlite-vec when available
+    try:
+        sql_simd = (
+            'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+            '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
+            '       v.content, m.owner_agent_id, '
+            '       (vec_distance_cosine(e.vector, ?) - 1.0) AS rank, '
+            '       m.claim_fingerprint, m.pinned '
+            'FROM memory m '
+            'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+            'JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
+            'WHERE m.project_id = ? '
+            "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+            "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
+            '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter
+        )
+        params_simd = fresh_params + (q_blob, project_id, agent_id) + detail_params
+        candidates = conn.execute(sql_simd, params_simd).fetchall()
+    except Exception:
+        # Fallback: pure Python scan when sqlite-vec is not compiled/available
+        sql = (
+            'SELECT m.id, m.scope, m.lifecycle, m.verification, '
+            '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
+            '       v.content, m.owner_agent_id, e.vector, '
+            '       m.claim_fingerprint, m.pinned '
+            'FROM memory m '
+            'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+            'JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
+            'WHERE m.project_id = ? '
+            "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+            "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
+            '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter
+        )
+        params = fresh_params + (project_id, agent_id) + detail_params
+        cur = conn.execute(sql, params)
+        candidates = []
+        for row in cur.fetchall():
+            mid, scope, lifecycle, verif, freshness, content, owner, blob, fp, pinned = row
+            v_arr = array.array('f')
+            v_arr.frombytes(blob)
+            if len(v_arr) != q_len:
+                continue
+            dot = sum(map(mul, q_arr, v_arr))
+            doc_norm_sq = sum(map(mul, v_arr, v_arr))
+            if doc_norm_sq <= 0.0:
+                sim = 0.0
+            else:
+                sim = dot / (query_norm * math.sqrt(doc_norm_sq))
+            # rank: lower is better to match bm25 convention (e.g. -sim)
+            rank = -sim
+            candidates.append((mid, scope, lifecycle, verif, freshness, content, owner, rank, fp, pinned))
 
     def _cand_sort_key(c):
         pinned_order = 0 if c[9] else 1

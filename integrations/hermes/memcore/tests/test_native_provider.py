@@ -118,12 +118,20 @@ class NativeProviderTest(unittest.TestCase):
         p._load_config = lambda: config_for(self.db)
         manager = MemoryManager()
         manager.add_provider(p)
-        manager.initialize_all('session-routing', hermes_home=self.tmp.name,
-                               platform='cli', agent_identity='alice')
-        self.assertTrue(manager.has_tool('memory_review_queue'))
-        result = json.loads(manager.handle_tool_call('memory_review_queue', {'limit': 1}))
-        self.assertTrue(result['success'])
-        self.assertEqual(result['events'], [])
+        old_home = os.environ.get('HERMES_HOME')
+        os.environ['HERMES_HOME'] = self.tmp.name
+        try:
+            manager.initialize_all('session-routing', hermes_home=self.tmp.name,
+                                   platform='cli', agent_identity='alice')
+            self.assertTrue(manager.has_tool('memory_review_queue'))
+            result = json.loads(manager.handle_tool_call('memory_review_queue', {'limit': 1}))
+            self.assertTrue(result['success'])
+            self.assertEqual(result['events'], [])
+        finally:
+            if old_home is None:
+                os.environ.pop('HERMES_HOME', None)
+            else:
+                os.environ['HERMES_HOME'] = old_home
 
     def test_provider_contract_and_tools(self):
         p = self.provider()

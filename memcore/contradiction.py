@@ -18,16 +18,45 @@ import unicodedata
 _NEGATIVE_EN = frozenset({
     'not', 'no', 'never', 'cannot', "can't", "don't", 'neither', 'nor',
     'without', 'against', 'forbidden', 'prohibited', 'must not', 'do not',
-    'is not', 'are not', 'was not', 'were not', 'will not', 'cannot',
+    'is not', 'are not', 'was not', 'were not', 'will not',
 })
 _NEGATIVE_TH = frozenset({
     'ไม่', 'ห้าม', 'ไม่ใช่', 'ไม่มี', 'ไม่ได้', 'อย่า', 'ยกเลิก',
 })
 
+# Word-bounded English negative regex: prevents 'no'/'not' inside identifiers
+# like 'Node.js', 'another', 'notice', 'normal', 'technology' from flipping polarity.
+_NEGATIVE_EN_RE = re.compile(
+    r'\b(?:' + '|'.join(sorted([re.escape(w) for w in _NEGATIVE_EN], key=len, reverse=True)) + r')\b',
+    re.IGNORECASE,
+)
+
 # Numeric claims: "port 20128" vs "port 8080" on the same subject disagree.
 # Standalone numbers only: digits glued inside a word (the "9" in "9router",
 # the "1" in "v1") are identifiers, not claims. Lookarounds keep stdlib-only.
 _NUMBER_RE = re.compile(r'(?<![A-Za-z0-9_])\d+(?:\.\d+)*(?![A-Za-z0-9_])')
+_YEAR_RE = re.compile(r'^(?:19|20)\d{2}$')
+
+
+def _numbers_disagree(na, nb) -> bool:
+    """True when two non-empty number sets disagree within the same domain.
+
+    Prevents temporal calendar years (e.g. '2026') from falsely conflicting with
+    ports/counts/metrics (e.g. '9440').
+    """
+    if not na or not nb or (na & nb):
+        return False
+    ya = {n for n in na if _YEAR_RE.fullmatch(n)}
+    yb = {n for n in nb if _YEAR_RE.fullmatch(n)}
+    nya = na - ya
+    nyb = nb - yb
+    # Disjoint property numbers (e.g. port 8080 vs 20128) -> conflict
+    if nya and nyb:
+        return True
+    # Disjoint calendar years (e.g. 2024 vs 2026) -> conflict
+    if ya and yb:
+        return True
+    return False
 
 
 def _tokens(text):
@@ -102,9 +131,9 @@ def polarity(content):
     Numeric-only claims return 0 — numbers are compared separately.
     """
     text = unicodedata.normalize('NFC', str(content or '').lower())
-    neg_hits = sum(1 for w in _NEGATIVE_EN if w in text)
-    neg_hits += sum(1 for w in _NEGATIVE_TH if w in text)
-    if neg_hits:
+    if _NEGATIVE_EN_RE.search(text):
+        return -1
+    if any(w in text for w in _NEGATIVE_TH):
         return -1
     return 0
 
@@ -308,7 +337,7 @@ def query_fact_incompatible(query, fact, query_tok=None, query_numbers=None,
     if not anchor_shared:
         return False
     fn = numbers(fact)
-    if query_numbers and fn and not (query_numbers & fn):
+    if _numbers_disagree(query_numbers, fn):
         return True
     if _exclusive_member_conflict(query_tokens, ftokens, query_tok, ftok,
                                   choice_sets=choice_sets):
@@ -331,6 +360,6 @@ def is_contradiction_pair(a, b):
     if pa != pb and (pa, pb) in ((0, -1), (-1, 0)):
         return True, 'polarity'
     na, nb = numbers(a), numbers(b)
-    if na and nb and not (na & nb):
+    if _numbers_disagree(na, nb):
         return True, 'numeric'
     return False, 'agree_or_unknown'

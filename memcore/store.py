@@ -1015,7 +1015,9 @@ def apply_migrations(conn):
             '  lock_until REAL)'
         )
     _run_migrations(conn)
-    if _current_version(conn) == '0018_memory_embedding':
+    v = _current_version(conn)
+    known = [ver for ver, _ in MIGRATIONS]
+    if '0018_memory_embedding' in known and v in known and known.index(v) >= known.index('0018_memory_embedding'):
         _ensure_column(conn, 'memory_version', 'when_to_use', 'TEXT')
     _invalidate_core_schema_caches()
 

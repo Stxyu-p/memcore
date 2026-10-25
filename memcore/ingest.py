@@ -188,22 +188,11 @@ def classify_user_text(text):
         return 'ignore', 'trivial', ''
     if _NEGATIVE_MEMORY_RE.search(text):
         return 'review', 'semantic_review_required', ''
-    if _NAVIGATION_PREFIX_RE.search(text) and not re.search(r'จำไว้|ช่วยจำ|ต่อไปนี้', text):
-        return 'ignore', 'transient_query', ''
     if _EXPLICIT_MEMORY_RE.search(text):
         candidate = _LEADING_REMEMBER_RE.sub('', text).strip() or text
-        # Guard: must be >= 15 chars, >= 3 tokens, not a question, not code fence
-        if (
-            len(candidate) < 15
-            or len(candidate.split()) < 3
-            or len(candidate) > MAX_ANALYSIS_CANDIDATE_CHARS
-            or '```' in candidate
-            or _QUESTION_OR_CHAT_RE.search(candidate)
-        ):
-            return 'ignore', 'too_short_or_ambiguous', ''
+        if len(candidate) > MAX_ANALYSIS_CANDIDATE_CHARS or '```' in candidate:
+            return 'review', 'semantic_review_required', ''
         return 'candidate', 'explicit_durable_signal', candidate
-    if _QUESTION_OR_CHAT_RE.search(text) or len(text) < 25:
-        return 'ignore', 'transient_query', ''
     return 'review', 'semantic_review_required', ''
 
 

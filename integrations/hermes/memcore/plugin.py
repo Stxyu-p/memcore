@@ -6,6 +6,7 @@ match on cwd) or default_project. Fail-closed: no resolvable project ->
 hooks do nothing and tools return a clear config error. Tool schemas
 carry no identity/scope parameters.
 """
+import atexit
 import importlib.util
 import json
 import os
@@ -457,6 +458,11 @@ def reset_conn():
             conn.close()
         except Exception:
             pass
+    return len(entries)
+
+
+close_cached_connections = reset_conn
+atexit.register(reset_conn)
 
 
 # -- Tools (schemas carry NO identity/scope params; config is the source) ----

@@ -59,6 +59,8 @@ class FakePluginLlm:
 
 class NativeProviderTest(unittest.TestCase):
     def setUp(self):
+        self._orig_embed_provider = os.environ.get('MEMCORE_EMBEDDING_PROVIDER')
+        os.environ['MEMCORE_EMBEDDING_PROVIDER'] = 'none'
         self.tmp = tempfile.TemporaryDirectory(prefix='memcore_native_')
         self.db = os.path.join(self.tmp.name, 'memory.db')
         conn = store.open_store(self.db)
@@ -66,6 +68,12 @@ class NativeProviderTest(unittest.TestCase):
         conn.execute("INSERT INTO agent (id, name, profile_key) VALUES ('agent-alice','alice','alice')")
         conn.execute("INSERT INTO project_membership (project_id, agent_id, role) VALUES ('proj-demo','agent-alice','owner')")
         conn.close()
+
+    def tearDown(self):
+        if self._orig_embed_provider is None:
+            os.environ.pop('MEMCORE_EMBEDDING_PROVIDER', None)
+        else:
+            os.environ['MEMCORE_EMBEDDING_PROVIDER'] = self._orig_embed_provider
 
     def provider(self):
         p = MemCoreMemoryProvider()

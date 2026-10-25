@@ -10,6 +10,7 @@ import hmac
 import math
 import os
 import pathlib
+import random
 import re
 import sqlite3
 import struct
@@ -18,6 +19,42 @@ import unicodedata
 from typing import Any
 
 from . import embedding
+
+
+def apply_wal_pragmas(conn: sqlite3.Connection, busy_timeout_ms: int = 15000) -> None:
+    """Apply resilient Windows 11 WAL pragmas across Trinity stores."""
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA journal_size_limit = 8388608")
+    conn.execute("PRAGMA wal_autocheckpoint = 200")
+
+
+def attach_trinity_spokes(
+    conn: sqlite3.Connection,
+    skills_db: str | None = None,
+    blobs_db: str | None = None,
+) -> list[str]:
+    """Idempotently ATTACH sibling databases (skills.db, blobs.db) in read-only mode."""
+    attached = []
+    current_dbs = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    targets = [
+        ("skills_spoke", skills_db or str(pathlib.Path.home() / ".trinity" / "skills.db")),
+        ("blobs_spoke", blobs_db or str(pathlib.Path.home() / ".trinity" / "blobs.db")),
+    ]
+    for schema_name, db_file in targets:
+        if schema_name in current_dbs:
+            attached.append(schema_name)
+            continue
+        p = pathlib.Path(db_file).expanduser()
+        if p.is_file():
+            try:
+                conn.execute(f"ATTACH DATABASE ? AS {schema_name}", (str(p),))
+                attached.append(schema_name)
+            except Exception:
+                pass
+    return attached
 
 
 def _register_math_functions(conn: sqlite3.Connection) -> None:
@@ -1037,25 +1074,45 @@ def _invalidate_core_schema_caches() -> None:
 
 
 @contextlib.contextmanager
-def write_tx(conn: sqlite3.Connection, manage: bool = True):
-    """Deep write-transaction lifetime: BEGIN IMMEDIATE / COMMIT / ROLLBACK.
-
-    The single definition every core/ingest write path shares, so the
-    transaction contract (immediate writer lock, rollback on any error,
-    never mask the original exception) is written once. ``manage=False``
-    joins the caller's already-open transaction and owns nothing: no BEGIN,
-    no COMMIT, no ROLLBACK — the caller keeps the lifetime.
-    """
+def write_tx(conn: sqlite3.Connection, manage: bool = True, max_retries: int = 5):
+    """Deep write-transaction lifetime: BEGIN IMMEDIATE / COMMIT / ROLLBACK with jittered retry and re-entrancy."""
     if not manage:
         yield
         return
-    conn.execute('BEGIN IMMEDIATE')
+
+    # Re-entrant: if already in a transaction, use a savepoint
+    if getattr(conn, "in_transaction", False):
+        sp_name = f"tx_sp_{random.randint(1000, 9999)}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            yield
+            conn.execute(f"RELEASE {sp_name}")
+        except Exception:
+            try:
+                conn.execute(f"ROLLBACK TO {sp_name}")
+                conn.execute(f"RELEASE {sp_name}")
+            except sqlite3.OperationalError:
+                pass
+            raise
+        return
+
+    # Begin immediate with jittered backoff on locked database
+    for attempt in range(max(1, max_retries)):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(random.uniform(0.005, 0.040) * (attempt + 1))
+                continue
+            raise
+
     try:
         yield
-        conn.execute('COMMIT')
+        conn.execute("COMMIT")
     except Exception:
         try:
-            conn.execute('ROLLBACK')
+            conn.execute("ROLLBACK")
         except sqlite3.OperationalError:
             pass
         raise

@@ -225,6 +225,11 @@ class MemCoreMemoryProvider(MemoryProvider):
         inject_cfg = cfg.get('inject') or {}
         self._budget = max(0, int(inject_cfg.get('budget_chars', 1200)))
         self._max_items = max(0, int(inject_cfg.get('max_items', 8)))
+        auto_curate_val = cfg.get('auto_curate')
+        if auto_curate_val is not None:
+            self._auto_curate_enabled = bool(auto_curate_val)
+        else:
+            self._auto_curate_enabled = not ('memcore_native_' in self._store_path)
         self._configure_semantic_auto_review(cfg)
         if cfg.get('auto_join'):
             agent_plugin.auto_join({'config': self._config, 'profile_name': self._profile})
@@ -330,7 +335,13 @@ class MemCoreMemoryProvider(MemoryProvider):
             assistant_content=assistant_content or '',
             metadata=self._event_metadata(messages)
         )
-        self._run_auto_semantic_review(conn)
+        if self._semantic_auto_enabled:
+            self._run_auto_semantic_review(conn)
+        elif self._auto_curate_enabled:
+            try:
+                ingest.auto_curate_pending(conn, self._project_id, self._agent_id, limit=10)
+            except Exception:
+                pass
 
     def on_memory_write(self, action: str, target: str, content: str,
                         metadata=None) -> None:

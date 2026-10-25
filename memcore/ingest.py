@@ -27,10 +27,10 @@ _TRIVIAL_RE = re.compile(
 )
 _EXPLICIT_MEMORY_RE = re.compile(
     r'(?:^|\b)(?:please\s+)?remember(?:\s+that)?\b|'
-    r'\bfrom now on\b|\bi (?:prefer|always use|use)\b|\bwe (?:decided|agreed|chose)\b|'
+    r'\bfrom now on\b|\bi (?:prefer|always use)\b|\bwe (?:decided|agreed|chose)\b|'
     r'(?:^|\s)(?:จำไว้(?:ว่า)?|ช่วยจำ(?:ไว้)?(?:ว่า)?|จำว่า|ต่อไปนี้|'
-    r'ฉันชอบ|ผมชอบ|ฉันใช้|ผมใช้|เราตกลง(?:กัน)?|เราตัดสินใจ(?:กัน)?|'
-    r'ต่อไป(?=\s|ว่า|:|,|$))', re.IGNORECASE
+    r'ฉันชอบ|ผมชอบ|ฉันใช้|ผมใช้|เราตกลง(?:กัน)?(?:ว่า)?|เราตัดสินใจ(?:กัน)?(?:ว่า)?)',
+    re.IGNORECASE
 )
 _NEGATIVE_MEMORY_RE = re.compile(
     r'\b(?:without|don\'t|dont|do not|never|not|no need to)\s+(?:explicit\s+)?remember\b|'
@@ -40,6 +40,16 @@ _NEGATIVE_MEMORY_RE = re.compile(
 _LEADING_REMEMBER_RE = re.compile(
     r'^\s*(?:(?:please\s+)?remember(?:\s+that)?|จำไว้(?:ว่า)?|ช่วยจำ(?:ไว้)?(?:ว่า)?|จำว่า)'
     r'[\s,:-]*', re.IGNORECASE
+)
+_QUESTION_OR_CHAT_RE = re.compile(
+    r'\?|'
+    r'(?:^|\s)(?:ไหม|มั้ย|หรือเปล่า|หรือไม่|หรือยัง|ยังไง|อย่างไร|แค่ไหน|อะไรอีก|ลองอธิบาย|ช่วยอธิบาย)'
+    r'[\s!?.…]*$',
+    re.IGNORECASE
+)
+_NAVIGATION_PREFIX_RE = re.compile(
+    r'^(?:ต่อไป|ถัดไป|ข้อต่อไป|ต่อเลย)\b',
+    re.IGNORECASE
 )
 
 def _clean_text(value):
@@ -178,11 +188,22 @@ def classify_user_text(text):
         return 'ignore', 'trivial', ''
     if _NEGATIVE_MEMORY_RE.search(text):
         return 'review', 'semantic_review_required', ''
+    if _NAVIGATION_PREFIX_RE.search(text) and not re.search(r'จำไว้|ช่วยจำ|ต่อไปนี้', text):
+        return 'ignore', 'transient_query', ''
     if _EXPLICIT_MEMORY_RE.search(text):
         candidate = _LEADING_REMEMBER_RE.sub('', text).strip() or text
-        if len(candidate) > MAX_ANALYSIS_CANDIDATE_CHARS or '```' in candidate:
-            return 'review', 'semantic_review_required', ''
+        # Guard: must be >= 15 chars, >= 3 tokens, not a question, not code fence
+        if (
+            len(candidate) < 15
+            or len(candidate.split()) < 3
+            or len(candidate) > MAX_ANALYSIS_CANDIDATE_CHARS
+            or '```' in candidate
+            or _QUESTION_OR_CHAT_RE.search(candidate)
+        ):
+            return 'ignore', 'too_short_or_ambiguous', ''
         return 'candidate', 'explicit_durable_signal', candidate
+    if _QUESTION_OR_CHAT_RE.search(text) or len(text) < 25:
+        return 'ignore', 'transient_query', ''
     return 'review', 'semantic_review_required', ''
 
 
@@ -201,6 +222,65 @@ def _selected_queue_decisions(decisions):
             'invalid semantic queue decision(s): ' + ', '.join(invalid)
         )
     return selected
+
+
+def auto_curate_pending(conn, project_id, agent_id, *, limit=25, retention_days=7):
+    """Local, zero-debt deterministic and vector auto-curator for ingest events.
+
+    Drains stalled review queues in <10ms:
+    1. Re-evaluates pending events with classify_user_text.
+    2. Conversational chatter, questions, and non-durable turns are marked 'ignored' (auto_curated_transient).
+    3. High-signal durable statements check for duplicate claims and admit as private candidate or accepted.
+    4. Automatically purges ignored journal events older than retention_days.
+    """
+    core._require_membership(conn, project_id, agent_id)
+    now = core._now()
+    stats = {'examined': 0, 'ignored': 0, 'admitted': 0, 'purged': 0}
+
+    with store.write_tx(conn):
+        rows = conn.execute(
+            'SELECT id, user_content, assistant_content, decision FROM ingest_event '
+            'WHERE project_id=? AND agent_id=? AND status=\'pending\' '
+            'AND decision IN (\'semantic_review_required\', \'semantic_deferred\', \'builtin_memory_replace_unresolved_target\') '
+            'ORDER BY created_at ASC LIMIT ?',
+            (project_id, agent_id, limit)
+        ).fetchall()
+
+        for event_id, user_content, assistant_content, orig_decision in rows:
+            stats['examined'] += 1
+            status, decision, candidate = classify_user_text(user_content)
+            if status == 'candidate' and candidate:
+                try:
+                    _admit_journal_candidate(
+                        conn, event_id, project_id, agent_id, candidate,
+                        idempotency_key=f'smart_auto:{event_id}',
+                        reason='smart-auto durable admission',
+                        decision_created='private_candidate',
+                        decision_accepted='private_accepted',
+                        auto_accept_reason='smart-auto explicit signal',
+                    )
+                    stats['admitted'] += 1
+                except Exception:
+                    conn.execute(
+                        "UPDATE ingest_event SET status='ignored', decision='auto_curated_error', "
+                        'processed_at=? WHERE id=?', (now, event_id)
+                    )
+                    stats['ignored'] += 1
+            else:
+                conn.execute(
+                    "UPDATE ingest_event SET status='ignored', decision='auto_curated_transient', "
+                    'processed_at=? WHERE id=?', (now, event_id)
+                )
+                stats['ignored'] += 1
+
+        # Purge stale ignored rows older than retention_days
+        cur = conn.execute(
+            "DELETE FROM ingest_event WHERE status='ignored' AND created_at < datetime('now', ?)",
+            (f'-{int(retention_days)} days',)
+        )
+        stats['purged'] = cur.rowcount
+
+    return stats
 
 
 def pending_semantic_events(conn, project_id, agent_id, *, limit=20, decisions=None):

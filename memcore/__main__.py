@@ -1990,6 +1990,27 @@ def main(argv=None):
     p.set_defaults(func=cmd_doctor)
 
     def _cmd_install(a):
+        if not getattr(a, 'dry_run', False) and not getattr(a, 'print_only', False):
+            try:
+                if not getattr(a, 'db', None):
+                    a.db = DEFAULT_DB
+                conn = _open(a)
+                try:
+                    with store.write_tx(conn):
+                        conn.execute(
+                            "INSERT OR IGNORE INTO project (id, name, description) VALUES ('proj-default', 'default', 'Default shared project')"
+                        )
+                        conn.execute(
+                            "INSERT OR IGNORE INTO agent (id, name, profile_key) VALUES ('agent-hermes', 'hermes', 'hermes')"
+                        )
+                        conn.execute(
+                            "INSERT OR IGNORE INTO project_membership (project_id, agent_id, role) VALUES ('proj-default', 'agent-hermes', 'owner')"
+                        )
+                finally:
+                    conn.close()
+                print(f"[MemCore Setup Wizard] Store initialized at {a.db} (WAL + FTS5 + default bindings ready)")
+            except Exception:
+                pass
         rc = run_install(_memcore_server_spec(), a, remove=False)
         if not getattr(a, 'dry_run', False) and not getattr(a, 'print_only', False):
             _sync_memcore_antigravity_schema()
@@ -2005,9 +2026,13 @@ def main(argv=None):
     def _cmd_mcp(a):
         sys.exit(mcp_server.main())
 
-    p_inst = sub.add_parser('install', help='Auto-register MemCore MCP server in all detected agent CLIs/IDEs', parents=[common])
+    p_inst = sub.add_parser('install', help='Run Setup Wizard & auto-register MemCore MCP server across agent CLIs/IDEs', parents=[common])
     add_install_arguments(p_inst)
     p_inst.set_defaults(func=_cmd_install)
+
+    p_setup = sub.add_parser('setup', help='Run full MemCore Setup Wizard (init store, bindings, skills & MCP clients)', parents=[common])
+    add_install_arguments(p_setup)
+    p_setup.set_defaults(func=_cmd_install)
 
     p_uninst = sub.add_parser('uninstall', help='Remove MemCore MCP server registration from agent CLIs/IDEs', parents=[common])
     add_install_arguments(p_uninst)

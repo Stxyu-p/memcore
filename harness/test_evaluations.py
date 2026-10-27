@@ -610,7 +610,6 @@ class TestE11_Daemonless(EvalTestBase):
 
 
 # ── E12: Token budget ────────────────────────────────────────────────
-@unittest.expectedFailure
 class TestE12_TokenBudget(unittest.TestCase):
     """E12 — Core recall + header must stay under a defined prompt budget."""
 

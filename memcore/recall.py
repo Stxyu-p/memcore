@@ -128,14 +128,21 @@ def version_at(conn, memory_id, agent_id, as_of):
 
 
 
+RECALL_BLOCK_TOKEN_BUDGET = 800  # E12: ceiling for one injected recall block
+_RECALL_ROW_META_TOKENS = 12     # per-row header/metadata estimate, as in pack_search_results
+
+
 def visible_memories(conn, project_id, agent_id, include_disabled=False,
-                     include_rejected=False):
-    """All memories agent_id may read in project_id.
+                     include_rejected=False, budget_tokens=RECALL_BLOCK_TOKEN_BUDGET):
+    """All memories agent_id may read in project_id, ranked and budget-bounded.
 
     Scope rule lives in the WHERE clause, never in Python post-filtering:
       project scope -> every member reads it
       private scope -> owner only
     Excludes rejected/superseded/disabled from 'current truth' by default.
+    Rows are returned best-first (pinned, then newest) and stop at
+    budget_tokens so the recall block cannot overflow the prompt;
+    pass budget_tokens=None for the unbounded listing.
     """
     if _membership_role(conn, project_id, agent_id) is None:
         return []
@@ -163,7 +170,26 @@ def visible_memories(conn, project_id, agent_id, include_disabled=False,
         'ORDER BY m.pinned DESC, m.updated_at DESC, m.id ASC',
         (project_id, agent_id)
     )
-    return cur.fetchall()
+    return _fit_rows_to_budget(cur.fetchall(), budget_tokens)
+
+
+def _fit_rows_to_budget(rows, budget_tokens):
+    """Keep the highest-ranked rows whose rendered size fits the prompt budget.
+
+    Same convention as pack_search_results: ~4 chars/token plus 12 tokens of
+    per-row metadata. Always keeps the first row so one large memory still
+    surfaces instead of an empty recall block.
+    """
+    if not rows or not budget_tokens or budget_tokens <= 0:
+        return rows
+    kept, used = [], 0
+    for row in rows:
+        cost = (len(str(row[5] or '')) + 3) // 4 + _RECALL_ROW_META_TOKENS
+        if kept and used + cost > budget_tokens:
+            break
+        kept.append(row)
+        used += cost
+    return kept
 
 
 

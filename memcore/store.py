@@ -6,19 +6,75 @@ All operations use short transactions and WAL + busy_timeout.
 """
 import contextlib
 import hashlib
-import hmac
 import math
 import os
 import pathlib
 import random
-import re
 import sqlite3
-import struct
 import time
 import unicodedata
-from typing import Any
 
-from . import embedding
+from .schema_defs import _BITEMPORAL_VALID_UNTIL
+from .schema_defs import _CURRENT_VERSION_OWNERSHIP
+from .schema_defs import _FTS_TRIGGERS
+from .schema_defs import _IDEMPOTENCY
+from .schema_defs import _INGEST_JOURNAL
+from .schema_defs import _INTEGRITY_HARDENING
+from .schema_defs import _ISO_NORMALIZE
+from .schema_defs import _MEMORY_EMBEDDING
+from .schema_defs import _PERFORMANCE_FAST_PATHS
+from .schema_defs import _PERFORMANCE_ROUND2
+from .schema_defs import _PROVENANCE_SEAL
+from .schema_defs import _REINFORCEMENT_DECAY
+from .schema_defs import _SCHEMA_REVISION
+from .schema_defs import _SCOPE_DETAIL
+from .schema_defs import _SEMANTIC_ANALYSIS
+from .schema_defs import _UNICODE_FINGERPRINT_REPAIR
+
+from .store_backup import (
+    verify_backups,
+)
+
+from .store_errors import (
+    StoreError,
+)
+
+from .store_seals import (
+    verify_all_seals,
+)
+
+from .store_backup import (
+    BACKUP_DIRNAME,
+    BACKUP_MAX_AGE_DAYS,
+    BACKUP_MIN_COUNT,
+    _SNAPSHOT_RE,
+    _is_managed_snapshot,
+    _managed_snapshots,
+    backup_store,
+    _prune_backups,
+    verify_backups,
+)
+
+from .store_errors import (
+    StoreError,
+)
+
+from .store_seals import (
+    corroboration_funnel,
+    _active_provenance_key,
+    seal_event,
+    verify_event_seal,
+    verify_all_seals,
+)
+
+from .store_vectors import (
+    pack_vector,
+    unpack_vector,
+    store_embedding,
+    get_embedding,
+)
+
+
 
 
 def apply_wal_pragmas(conn: sqlite3.Connection, busy_timeout_ms: int = 15000) -> None:
@@ -29,6 +85,7 @@ def apply_wal_pragmas(conn: sqlite3.Connection, busy_timeout_ms: int = 15000) ->
     conn.execute("PRAGMA temp_store = MEMORY")
     conn.execute("PRAGMA journal_size_limit = 8388608")
     conn.execute("PRAGMA wal_autocheckpoint = 200")
+
 
 
 def attach_trinity_spokes(
@@ -55,6 +112,7 @@ def attach_trinity_spokes(
             except Exception:
                 pass
     return attached
+
 
 
 def _register_math_functions(conn: sqlite3.Connection) -> None:
@@ -85,6 +143,7 @@ def _register_math_functions(conn: sqlite3.Connection) -> None:
         pass
 
 
+
 def _register_vector_functions(conn: sqlite3.Connection) -> None:
     """Load sqlite-vec extension if available, enabling in-process SIMD vector distance operations."""
     try:
@@ -101,6 +160,7 @@ def _register_vector_functions(conn: sqlite3.Connection) -> None:
         pass
 
 
+
 def _resolve_schema_path() -> pathlib.Path:
     # 1. Inside package (installed wheel / site-packages)
     pkg_schema = pathlib.Path(__file__).resolve().parent / 'schema' / 'schema.sql'
@@ -113,33 +173,15 @@ def _resolve_schema_path() -> pathlib.Path:
     return pkg_schema
 
 
+
 SCHEMA_PATH = _resolve_schema_path()
+
 _MIGRATION_LOCK_VERSION = '__migration_lock__'
+
 _MIGRATION_LOCK_TTL_SECONDS = 30.0
+
 _MIGRATION_LOCK_WAIT_SECONDS = 10.0
 
-# Migrations run in order; each is a list of SQL statements.
-# 0001 = initial contract (schema.sql). Later migrations append here.
-# schema.sql itself stays FROZEN — contract defects are reported, not patched.
-
-from .schema_defs import (
-    _BITEMPORAL_VALID_UNTIL,
-    _CURRENT_VERSION_OWNERSHIP,
-    _FTS_TRIGGERS,
-    _IDEMPOTENCY,
-    _INGEST_JOURNAL,
-    _INTEGRITY_HARDENING,
-    _ISO_NORMALIZE,
-    _MEMORY_EMBEDDING,
-    _PERFORMANCE_FAST_PATHS,
-    _PERFORMANCE_ROUND2,
-    _PROVENANCE_SEAL,
-    _REINFORCEMENT_DECAY,
-    _SCHEMA_REVISION,
-    _SCOPE_DETAIL,
-    _SEMANTIC_ANALYSIS,
-    _UNICODE_FINGERPRINT_REPAIR,
-)
 
 
 MIGRATIONS = [
@@ -177,15 +219,13 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
 ]
 
 
-class StoreError(Exception):
-    pass
-
 
 def _table_exists(conn, table):
     cur = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
     )
     return cur.fetchone() is not None
+
 
 
 def _migration_history_violations(conn):
@@ -212,6 +252,7 @@ def _migration_history_violations(conn):
     return violations
 
 
+
 def _current_version(conn):
     if not _table_exists(conn, 'schema_migrations'):
         return None
@@ -224,6 +265,7 @@ def _current_version(conn):
     return row[0] if row else None
 
 
+
 #: Maximum fraction of fully-zero 4K pages tolerated when opening an
 #: existing store. The 2026-10-03 incident left 683/710 pages zeroed (96.6%)
 #: with a valid header — SQLite opened it without complaint and every query
@@ -232,6 +274,7 @@ def _current_version(conn):
 #: is not SQLite behaviour but an external writer (snapshot/restore tooling,
 #: AV quarantine, truncated copy) having damaged the file.
 ZERO_PAGE_RATIO_LIMIT = 0.5
+
 
 
 def _zero_page_ratio(path: pathlib.Path, sample_pages: int = 64) -> float:
@@ -259,6 +302,7 @@ def _zero_page_ratio(path: pathlib.Path, sample_pages: int = 64) -> float:
             if not any(chunk):
                 zeroed += 1
     return zeroed / pages
+
 
 
 def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connection:
@@ -331,6 +375,7 @@ def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connecti
         raise StoreError(f'failed to initialize store at {p}: {e}') from e
 
 
+
 def _open_existing_connection(db_path: str, *, readonly: bool,
                               check_same_thread: bool = True) -> sqlite3.Connection:
     """Open an existing store without WAL negotiation or migration work.
@@ -372,6 +417,7 @@ def _open_existing_connection(db_path: str, *, readonly: bool,
         raise StoreError(f'failed to initialize store connection at {p}: {e}') from e
 
 
+
 def open_runtime_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connection:
     """Fast writable opener; requires a store already bootstrapped by ``open_store``."""
     return _open_existing_connection(
@@ -379,342 +425,11 @@ def open_runtime_store(db_path: str, check_same_thread: bool = True) -> sqlite3.
     )
 
 
+
 def open_runtime_store_readonly(db_path: str) -> sqlite3.Connection:
     """Fast read-only opener for a store validated during provider initialization."""
     return _open_existing_connection(db_path, readonly=True)
 
-
-#: Backup freshness contract. A store with no recent verified backup has no
-#: recovery path, which is exactly the condition that let a zero-filled
-#: memory.db go unnoticed for months on 2026-10-03.
-BACKUP_DIRNAME = 'backups'
-BACKUP_MAX_AGE_DAYS = 7
-BACKUP_MIN_COUNT = 3
-
-#: Snapshot filenames this module owns: ``<store-stem>-<YYYYmmddTHHMMSSZ>[_<seq>].db``.
-#: Anything else in the backup directory is a hand-made or legacy file and must
-#: not be counted as a managed recovery point.
-_SNAPSHOT_RE = re.compile(
-    r'^(?P<stem>.+)-(?P<stamp>\d{8}T\d{6}Z)(?:_(?P<seq>\d+))?\.db$'
-)
-
-
-def _is_managed_snapshot(path: pathlib.Path, stem: str) -> bool:
-    match = _SNAPSHOT_RE.match(path.name)
-    return bool(match) and match.group('stem') == stem
-
-
-def _managed_snapshots(backup_dir: pathlib.Path, stem: str):
-    """Snapshots written by ``backup_store``, newest first, by modification time."""
-    if not backup_dir.is_dir():
-        return []
-    candidates = [
-        p for p in backup_dir.glob('*.db')
-        if p.is_file() and _is_managed_snapshot(p, stem)
-    ]
-    return sorted(
-        candidates,
-        key=lambda p: (p.stat().st_mtime, p.name),
-        reverse=True,
-    )
-
-
-def backup_store(source_db: str, *, keep: int = 14) -> pathlib.Path:
-    """Snapshot a store with SQLite's own online backup API.
-
-    Uses ``Connection.backup`` rather than a file copy: it is transaction-safe
-    against concurrent writers and produces a consistent image even while WAL
-    traffic is in flight. A plain ``shutil.copy`` of a WAL-mode database can
-    capture a torn state.
-
-    The snapshot is written to a temporary file, integrity-checked, then moved
-    into place, so a failure never leaves a corrupt file in the backup dir.
-    """
-    src_path = pathlib.Path(source_db).expanduser()
-    if not src_path.is_file():
-        raise StoreError(f'store does not exist: {src_path}')
-    backup_dir = src_path.parent / BACKUP_DIRNAME
-    backup_dir.mkdir(parents=True, exist_ok=True)
-
-    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
-    dest = backup_dir / f'{src_path.stem}-{stamp}.db'
-    if dest.exists():
-        seq = 1
-        while (backup_dir / f'{src_path.stem}-{stamp}_{seq}.db').exists():
-            seq += 1
-        dest = backup_dir / f'{src_path.stem}-{stamp}_{seq}.db'
-    tmp = dest.with_suffix('.db.partial')
-
-    src = sqlite3.connect(str(src_path), timeout=10, isolation_level=None)
-    try:
-        dst = sqlite3.connect(str(tmp), timeout=10, isolation_level=None)
-        try:
-            src.backup(dst)
-            row = dst.execute('PRAGMA integrity_check').fetchone()
-            if not row or row[0] != 'ok':
-                raise StoreError(
-                    f'backup snapshot failed integrity check: {row[0] if row else "no result"}'
-                )
-        finally:
-            dst.close()
-        os.replace(tmp, dest)
-    except Exception:
-        for leftover in (tmp,):
-            try:
-                leftover.unlink()
-            except OSError:
-                pass
-        raise
-    finally:
-        src.close()
-
-    _prune_backups(backup_dir, keep, src_path.stem)
-    return dest
-
-
-
-def _prune_backups(backup_dir: pathlib.Path, keep: Any, stem: str) -> None:
-    """Retain the ``keep`` newest managed snapshots; never touch other files."""
-    if not isinstance(keep, int) or isinstance(keep, bool) or keep < 1:
-        return
-    for stale in _managed_snapshots(backup_dir, stem)[keep:]:
-        try:
-            stale.unlink()
-        except OSError:
-            pass
-
-
-def verify_backups(source_db: str, *, max_age_days: Any = BACKUP_MAX_AGE_DAYS,
-                   min_count: Any = BACKUP_MIN_COUNT) -> dict:
-    """Content-free recovery-readiness report for a store's backup set.
-
-    ``recovery_ready`` means exactly one thing: a verified snapshot of this store
-    exists and is younger than ``max_age_days``. Snapshot count is reported but
-    deliberately does NOT gate readiness — every snapshot passes an integrity
-    check at creation time, so one good snapshot is a usable recovery path.
-    Requiring several would make a freshly provisioned store permanently
-    "unhealthy" for no real gain.
-
-    Only files this module wrote are counted, so a hand-placed .bak in the
-    directory cannot make a store look recoverable. Never reads memory text.
-    """
-    src_path = pathlib.Path(source_db).expanduser()
-    backup_dir = src_path.parent / BACKUP_DIRNAME
-    report = {
-        'backup_dir': str(backup_dir),
-        'backup_dir_exists': backup_dir.is_dir(),
-        'snapshot_count': 0,
-        'newest_snapshot': None,
-        'newest_age_days': None,
-        'oldest_age_days': None,
-        'max_age_days': max_age_days,
-        'min_count': min_count,
-        'recovery_ready': False,
-        'problems': [],
-    }
-    if not report['backup_dir_exists']:
-        report['problems'].append('no_backup_dir')
-        return report
-
-    snapshots = _managed_snapshots(backup_dir, src_path.stem)
-    report['snapshot_count'] = len(snapshots)
-    if not snapshots:
-        report['problems'].append('no_snapshots')
-        return report
-
-    now = time.time()
-    ages = []
-    for path in snapshots:
-        try:
-            ages.append((now - path.stat().st_mtime) / 86400.0)
-        except OSError:
-            continue
-    if not ages:
-        report['problems'].append('unreadable_snapshot_metadata')
-        return report
-
-    report['newest_age_days'] = round(min(ages), 2)
-    report['oldest_age_days'] = round(max(ages), 2)
-    report['newest_snapshot'] = snapshots[0].name
-
-    eff_max_age = (
-        max_age_days
-        if isinstance(max_age_days, (int, float)) and not isinstance(max_age_days, bool) and max_age_days > 0
-        else BACKUP_MAX_AGE_DAYS
-    )
-    eff_min_count = (
-        min_count
-        if isinstance(min_count, int) and not isinstance(min_count, bool) and min_count >= 1
-        else BACKUP_MIN_COUNT
-    )
-
-    if min(ages) > eff_max_age:
-        report['problems'].append(f'stale_backup:{report["newest_age_days"]}d')
-        report['recovery_ready'] = False
-    else:
-        report['recovery_ready'] = True
-        if len(snapshots) < eff_min_count:
-            # Informational only: a verified snapshot is a recovery path on its
-            # own; the target count matters for depth, not for recoverability.
-            report['problems'].append(f'below_target_snapshots:{len(snapshots)}')
-    return report
-
-
-def corroboration_funnel(conn, accept_n: int = 3, golden_n: int = 5) -> dict:
-    """Content-free corroboration funnel for one store.
-
-    Reports how live (candidate/accepted/conflict) claim fingerprints are
-    distributed by distinct writer count: at_1, at_2 .., at_accept,
-    at_golden. Never reads memory text — only fingerprint group sizes and
-    owner-agent counts.
-
-    This is the number that tells whether ADR-0018's Golden Rule can ever
-    fire. On 2026-10-03 the live store held 73 fingerprints, ALL at sources=1,
-    which is why `corroborate` had never promoted anything. The mechanism was
-    correct; it had no reachable inputs.
-    """
-    rows = conn.execute(
-        "SELECT fp, sources FROM ("
-        "SELECT claim_fingerprint AS fp, COUNT(DISTINCT owner_agent_id) AS sources "
-        "FROM memory WHERE claim_fingerprint IS NOT NULL "
-        "AND lifecycle IN ('candidate','accepted','conflict') "
-        "GROUP BY claim_fingerprint)"
-    ).fetchall()
-    at_1 = sum(1 for _, s in rows if s == 1)
-    at_2 = sum(1 for _, s in rows if s == 2)
-    at_accept = sum(1 for _, s in rows if s >= accept_n)
-    at_golden = sum(1 for _, s in rows if s >= golden_n)
-    return {
-        'fingerprints': len(rows),
-        'at_1': at_1,
-        'at_2': at_2,
-        'at_accept': at_accept,
-        'at_golden': at_golden,
-        'accept_n': accept_n,
-        'golden_n': golden_n,
-        'reachable': at_accept > 0,
-    }
-
-
-def _active_provenance_key(conn) -> tuple:
-    """Return (key_id, key_material bytes), creating the key on first use.
-
-    The key is store-local and random (os.urandom 32 bytes, hex-encoded). It
-    is not a high-grade secret — it lives next to the data — but it makes
-    post-write attribution tampering detectable, which is the threat that
-    matters here (a writer claiming another agent's identity after the fact).
-    """
-    row = conn.execute(
-        'SELECT key_id, key_material FROM provenance_key '
-        "ORDER BY created_at DESC LIMIT 1"
-    ).fetchone()
-    if row:
-        return row[0], bytes.fromhex(row[1])
-    key_id = 'pk-' + os.urandom(8).hex()
-    key_material = os.urandom(32).hex()
-    conn.execute(
-        'INSERT INTO provenance_key (key_id, key_material) VALUES (?, ?)',
-        (key_id, key_material),
-    )
-    return key_id, bytes.fromhex(key_material)
-
-
-def seal_event(project_id: str, agent_id: str, content_hash: str,
-               key_material: bytes) -> str:
-    """HMAC-SHA256 seal over the attribution triple. Stdlib only."""
-    msg = f'{project_id}\0{agent_id}\0{content_hash}'.encode('utf-8')
-    return hmac.new(key_material, msg, hashlib.sha256).hexdigest()
-
-
-def verify_event_seal(conn, event_id: str) -> dict:
-    """Check one event's seal. Returns {sealed, valid, key_id}.
-
-    Unsealed (pre-migration) rows report sealed=False, valid=None — they are
-    historical, not failures.
-    """
-    row = conn.execute(
-        'SELECT project_id, agent_id, content_hash, provenance_seal '
-        'FROM ingest_event WHERE id=?', (event_id,),
-    ).fetchone()
-    if row is None:
-        return {'sealed': False, 'valid': False, 'key_id': None,
-                'reason': 'event_not_found'}
-    project_id, agent_id, content_hash, seal = row
-    if not seal:
-        return {'sealed': False, 'valid': None, 'key_id': None,
-                'reason': 'pre_migration_row'}
-    key_row = conn.execute(
-        'SELECT key_id, key_material FROM provenance_key '
-        'ORDER BY created_at DESC LIMIT 1'
-    ).fetchone()
-    if key_row is None:
-        return {'sealed': True, 'valid': False, 'key_id': None,
-                'reason': 'no_key'}
-    key_id, key_material = key_row[0], bytes.fromhex(key_row[1])
-    expected = seal_event(project_id, agent_id, content_hash, key_material)
-    valid = hmac.compare_digest(expected, seal)
-    return {'sealed': True, 'valid': valid, 'key_id': key_id,
-            'reason': 'ok' if valid else 'mismatch'}
-
-
-def verify_all_seals(conn, limit: int = 10000) -> dict:
-    """Content-free seal census: {sealed, valid, invalid, unsealed}.
-
-    Never reads event text — only IDs and seal columns.
-    """
-    rows = conn.execute(
-        'SELECT id FROM ingest_event ORDER BY created_at DESC LIMIT ?',
-        (limit,),
-    ).fetchall()
-    report = {'checked': 0, 'sealed': 0, 'valid': 0, 'invalid': 0,
-              'unsealed': 0, 'invalid_ids': []}
-    for (event_id,) in rows:
-        result = verify_event_seal(conn, event_id)
-        report['checked'] += 1
-        if not result['sealed']:
-            report['unsealed'] += 1
-        elif result['valid']:
-            report['sealed'] += 1
-            report['valid'] += 1
-        else:
-            report['sealed'] += 1
-            report['invalid'] += 1
-            if len(report['invalid_ids']) < 10:
-                report['invalid_ids'].append(event_id)
-    return report
-
-
-#: Pass-through aliases kept on the public store surface (SDK and tests import
-#: ``store.pack_vector`` / ``store.unpack_vector``); the implementation lives in
-#: the embedding seam.
-pack_vector = embedding.pack_vector
-unpack_vector = embedding.unpack_vector
-
-
-def store_embedding(conn: sqlite3.Connection, memory_id: str, version_id: str,
-                    model: str, vector: list[float]) -> None:
-    """Persist an embedding vector for a specific memory version."""
-    blob = pack_vector(vector)
-    dim = len(vector)
-    conn.execute(
-        'INSERT OR REPLACE INTO memory_embedding '
-        '(memory_id, version_id, model, dim, vector) '
-        'VALUES (?, ?, ?, ?, ?)',
-        (memory_id, version_id, model, dim, blob)
-    )
-
-
-def get_embedding(conn: sqlite3.Connection, memory_id: str,
-                  version_id: str) -> list[float] | None:
-    """Retrieve and unpack the embedding vector for a memory version, or None if absent."""
-    cur = conn.execute(
-        'SELECT vector FROM memory_embedding WHERE memory_id=? AND version_id=?',
-        (memory_id, version_id)
-    )
-    row = cur.fetchone()
-    if not row or not row[0]:
-        return None
-    return unpack_vector(row[0])
 
 
 def open_store_readonly(db_path: str) -> sqlite3.Connection:
@@ -739,6 +454,7 @@ def open_store_readonly(db_path: str) -> sqlite3.Connection:
         raise StoreError(f'failed to validate read-only store: {e}') from e
 
 
+
 def apply_migrations(conn):
     """Bootstrap migration bookkeeping and apply all pending migrations.
 
@@ -760,6 +476,7 @@ def apply_migrations(conn):
     _invalidate_core_schema_caches()
 
 
+
 def _invalidate_core_schema_caches() -> None:
     """H4: drop core's per-connection table-columns cache after migrations.
 
@@ -772,6 +489,7 @@ def _invalidate_core_schema_caches() -> None:
         _core._clear_table_cols_cache()
     except Exception:
         pass
+
 
 
 @contextlib.contextmanager
@@ -819,6 +537,7 @@ def write_tx(conn: sqlite3.Connection, manage: bool = True, max_retries: int = 5
         raise
 
 
+
 @contextlib.contextmanager
 def _savepoint(conn, name: str):
     """Per-item atomicity inside a caller-owned transaction.
@@ -841,11 +560,13 @@ def _savepoint(conn, name: str):
         raise
 
 
+
 def _migration_lock_row(conn):
     return conn.execute(
         'SELECT lock_holder, lock_until FROM schema_migrations WHERE version=?',
         (_MIGRATION_LOCK_VERSION,)
     ).fetchone()
+
 
 
 def _acquire_migration_lock(conn):
@@ -889,6 +610,7 @@ def _acquire_migration_lock(conn):
             time.sleep(0.05)
 
 
+
 def _release_migration_lock(conn, holder):
     deadline = time.time() + _MIGRATION_LOCK_WAIT_SECONDS
     while True:
@@ -910,6 +632,7 @@ def _release_migration_lock(conn, holder):
             time.sleep(0.05)
 
 
+
 def _renew_migration_lock(conn, holder):
     """Renew only while this process still owns the migration lease."""
     conn.execute('BEGIN IMMEDIATE')
@@ -929,6 +652,7 @@ def _renew_migration_lock(conn, holder):
         except sqlite3.OperationalError:
             pass
         raise
+
 
 
 def _run_migrations(conn):
@@ -973,6 +697,7 @@ def _run_migrations(conn):
         _release_migration_lock(conn, holder)
 
 
+
 def _script_statements(sql):
     """Yield complete SQLite statements, preserving trigger BEGIN/END blocks."""
     buf = ''
@@ -987,10 +712,12 @@ def _script_statements(sql):
         raise StoreError('incomplete SQL statement in migration')
 
 
+
 def _legacy_fingerprint(content):
     """Fingerprint algorithm used by migration 0010 before Unicode NFC hardening."""
     normalized = ' '.join(str(content or '').lower().strip().split())
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:16]
+
 
 
 def _canonical_fingerprint(content):
@@ -999,6 +726,7 @@ def _canonical_fingerprint(content):
         'NFC', ' '.join(str(content or '').lower().strip().split())
     )
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:16]
+
 
 
 def _backfill_current_fingerprints(conn):
@@ -1016,6 +744,7 @@ def _backfill_current_fingerprints(conn):
         )
 
 
+
 def _current_version_ownership_violations(conn):
     """Rows whose current-version pointer is absent or owned by another memory."""
     return conn.execute(
@@ -1024,6 +753,7 @@ def _current_version_ownership_violations(conn):
         'WHERE m.current_version_id IS NULL OR v.id IS NULL OR v.memory_id != m.id '
         'ORDER BY m.id'
     ).fetchall()
+
 
 
 def _repair_unicode_fingerprints(conn):
@@ -1087,6 +817,7 @@ def _repair_unicode_fingerprints(conn):
         )
 
 
+
 def _ensure_column(conn, table: str, col: str, col_def: str) -> None:
     """Idempotent ALTER TABLE ADD COLUMN (SQLite has no IF NOT EXISTS here)."""
     cols = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
@@ -1096,6 +827,7 @@ def _ensure_column(conn, table: str, col: str, col_def: str) -> None:
         except sqlite3.OperationalError as exc:
             if 'duplicate column' not in str(exc).lower():
                 raise
+
 
 
 def _pre_0013_ownership_guard(conn):
@@ -1108,10 +840,12 @@ def _pre_0013_ownership_guard(conn):
         )
 
 
+
 def _pre_0015_reinforcement(conn):
     _ensure_column(conn, 'memory', 'recall_count',
                    'INTEGER NOT NULL DEFAULT 0')
     _ensure_column(conn, 'memory', 'last_recalled', 'TEXT')
+
 
 
 def _pre_0017_bitemporal(conn):
@@ -1127,6 +861,7 @@ def _pre_0017_bitemporal(conn):
         '  WHERE s.supersedes_version_id = memory_version.id)')
 
 
+
 #: Declarative per-migration Python steps. Pre-hooks run inside the migration
 #: transaction before its SQL (ADD COLUMN is not idempotent in SQL, so the
 #: ALTERs live here behind _ensure_column); post-hooks run after the SQL and
@@ -1140,10 +875,12 @@ _PRE_MIGRATION_HOOKS = {
         conn, 'memory', 'scope_detail', 'TEXT'),
     '0017_bitemporal_valid_until': _pre_0017_bitemporal,
 }
+
 _POST_MIGRATION_HOOKS = {
     '0010_performance_fast_paths': _backfill_current_fingerprints,
     '0012_unicode_fingerprint_repair': _repair_unicode_fingerprints,
 }
+
 
 
 def _run_migration_body(conn, name, sql, rebuild_fk: bool) -> None:
@@ -1198,6 +935,7 @@ def _run_migration_body(conn, name, sql, rebuild_fk: bool) -> None:
             conn.execute('PRAGMA foreign_keys = ON')
 
 
+
 def _apply_migration(conn, name, sql):
     """Apply one migration under a bounded retry loop.
 
@@ -1225,6 +963,7 @@ def _apply_migration(conn, name, sql):
             time.sleep(0.2)
 
 
+
 def check_migration_lock(conn):
     """Return active or stale crash-visible migration lock info for doctor."""
     try:
@@ -1238,6 +977,7 @@ def check_migration_lock(conn):
         return []
 
 
+
 def _fts_sync_report(conn) -> dict:
     """FTS rowid count vs version count; in_sync is the health contract."""
     fts_rows = conn.execute(
@@ -1246,6 +986,7 @@ def _fts_sync_report(conn) -> dict:
         'SELECT COUNT(*) FROM memory_version').fetchone()[0]
     return {'fts_rows': fts_rows, 'version_rows': ver_rows,
             'in_sync': fts_rows == ver_rows}
+
 
 
 def _orphan_counts(conn) -> dict:
@@ -1265,6 +1006,7 @@ def _orphan_counts(conn) -> dict:
     }
 
 
+
 def _idempotency_violation_count(conn) -> int:
     """idempotency_key predates FKs: validate refs and cross-row identity."""
     return conn.execute(
@@ -1278,6 +1020,7 @@ def _idempotency_violation_count(conn) -> int:
         '   OR (m.id IS NOT NULL AND ik.project_id IS NOT NULL '
         '       AND m.project_id != ik.project_id)'
     ).fetchone()[0]
+
 
 
 def inspect_storage_health(conn, db_path) -> dict:

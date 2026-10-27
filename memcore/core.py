@@ -21,8 +21,12 @@ class _CoreFacade(types.ModuleType):
 
     def __setattr__(self, name: str, value: Any) -> None:
         super().__setattr__(name, value)
-        for m in (_write, _recall, _doctor, _imports):
-            if hasattr(m, name):
+        # Patch every loaded submodule that already owns the name, not a fixed
+        # list: the engine is split across modules, and a caller patching
+        # core.X expects the module that actually *reads* X to see the patch.
+        prefix = (__package__ or '') + '.'
+        for mod_name, m in list(sys.modules.items()):
+            if m is not self and mod_name.startswith(prefix) and hasattr(m, name):
                 setattr(m, name, value)
 
 

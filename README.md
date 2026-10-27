@@ -176,6 +176,12 @@ memory:
   provider: memcore
 ```
 
+> **Do not add `memcore/__init__.py`.** The engine root must stay a pure PEP 420
+> namespace package so `find_spec('memcore')` never reports an `origin`; the
+> plugin's import guard relies on that to reject a shadowing `memcore/` folder on
+> `sys.path` and load the real checkout. `harness/test_plugin_import_guard.py`
+> enforces this.
+
 ---
 
 ## Part of the Global Agent Trinity

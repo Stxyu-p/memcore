@@ -6,53 +6,95 @@ freshness/decay ranking, and scope-enforced reads.
 """
 from __future__ import annotations
 
-import array
-from datetime import datetime, timezone
-import json
-import math
-import operator
-import re
 import sqlite3
-import unicodedata
+
+from . import store
+from .write import MemCoreError
+from .write import _eval_now_iso
+from .write import _membership_role
+from .write import _table_cols
+from .write import check_source_staleness
+from .write import fingerprint
 from typing import Any
 
-from . import ablation as _ablation
-from . import embedding
-from . import store
-from .write import (
-    MemCoreError,
-    _membership_role,
-    _now,
-    _new_id,
-    _audit,
-    fingerprint,
-    check_source_staleness,
-    _table_cols,
-    _clear_table_cols_cache,
-    _conn_schema_marker,
-    _TABLE_COLS_CACHE_MAX,
-    _CONN_TABLE_COLS,
-    _eval_now_iso,
-    _coerce_now,
-    REINFORCEMENT_WINDOW_DAYS,
+from .recall_decay import (
+    _FRESHNESS_PROJECTION_SQL,
+    _freshness_params,
+    _has_recall_cols,
+    _retention_order,
+)
+
+from .recall_lanes import (
+    DISTINCT_OVERFETCH,
+    _decay_ablated,
+    _fetch_query_vector,
+    _fuse_rrf_candidates,
+    _recall_tombstone_guard,
+    _run_fts_lane,
+    _run_substring_lane,
+    _run_summary_lane,
+    _run_vector_lane,
+    _search_detail_filter,
+)
+
+from .recall_text import (
+    _expand_aliases,
+    _extract_non_ascii_substr_terms,
+    _fts_query,
+    _query_tokens,
+)
+
+from .recall_decay import (
+    _DECAY_LAMBDA_DEFAULT,
+    _DECAY_SIGMA,
+    _DECAY_MU,
+    _DECAY_HALF_LIFE_DAYS_BY_TYPE,
+    _DECAY_SALIENCE_BY_VERIFICATION,
+    _DECAY_SALIENCE_BY_LIFECYCLE,
+    _decay_lambda_sql,
+    _decay_salience_sql,
+    _DECAY_LAMBDA_SQL_M,
+    _DECAY_SALIENCE_SQL_M,
+    _RETENTION_AGE_SQL_M,
+    _RETENTION_ACCESS_SQL_M,
+    _RETENTION_EXPR_WITH_RECALL_M,
+    _RETENTION_EXPR_NO_RECALL_M,
+    _has_recall_cols,
+    _retention_order,
+    _FRESHNESS_PROJECTION_SQL,
+    _freshness_params,
+    _LIFECYCLE_ORDER,
+    _VERIF_ORDER,
     FRESHNESS_AGING_DAYS,
     FRESHNESS_STALE_DAYS,
 )
 
-# Ã¢â€â‚¬Ã¢â€â‚¬ reads (scope enforced in SQL WHERE) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+from .recall_lanes import (
+    _recall_tombstone_guard,
+    _run_substring_lane,
+    cosine_similarity,
+    _vector_search_lane,
+    _search_detail_filter,
+    _run_fts_lane,
+    _fuse_rrf_candidates,
+    _decay_ablated,
+    _fetch_query_vector,
+    _run_vector_lane,
+    _run_summary_lane,
+    DISTINCT_OVERFETCH,
+)
 
-def _recall_tombstone_guard(alias='m'):
-    """SQL predicate excluding claims blocked by active scope-aware tombstones."""
-    return (
-        f'{alias}.claim_fingerprint IS NOT NULL AND '
-        'NOT EXISTS (SELECT 1 FROM tombstone t '
-        f'WHERE t.claim_fingerprint={alias}.claim_fingerprint '
-        'AND t.overridden_by IS NULL AND ('
-        "t.scope='global' OR "
-        f't.scope={alias}.project_id OR '
-        f"({alias}.scope='private' AND "
-        f"t.scope='private:' || {alias}.project_id || ':' || {alias}.owner_agent_id)))"
-    )
+from .recall_text import (
+    _FLEET_ALIASES,
+    _expand_aliases,
+    _thai_bigrams,
+    _query_tokens,
+    _fts_query,
+    _extract_non_ascii_substr_terms,
+    MAX_SUBSTR_TERMS,
+)
+
+
 
 
 def version_at(conn, memory_id, agent_id, as_of):
@@ -83,6 +125,7 @@ def version_at(conn, memory_id, agent_id, as_of):
         'ORDER BY datetime(v.valid_from) DESC LIMIT 1',
         (memory_id, agent_id, as_of, as_of),
     ).fetchone()
+
 
 
 def visible_memories(conn, project_id, agent_id, include_disabled=False,
@@ -123,6 +166,7 @@ def visible_memories(conn, project_id, agent_id, include_disabled=False,
     return cur.fetchall()
 
 
+
 def private_memories(conn, project_id, agent_id):
     """ONLY this agent's private memories in a project. Others' never appear."""
     if _membership_role(conn, project_id, agent_id) is None:
@@ -138,245 +182,6 @@ def private_memories(conn, project_id, agent_id):
     )
     return cur.fetchall()
 
-
-# —— Lane 3.2: Fleet alias map (static, query-side only).
-# Add entries ONLY from failing baseline paraphrase queries.
-# Substring containment on lowered raw query, so glued Thai matches.
-_FLEET_ALIASES = {
-    'ai gateway': '9router',
-    'ทีม': 'fleet roster',
-    'พี่โชค': 'thai',
-    'สแกน': 'scan pacing',
-}
-
-
-def _expand_aliases(query: str) -> str:
-    """Expand known fleet aliases in the raw query before tokenization.
-
-    Substring match on lowered query; matched values appended with spaces.
-    Eval-only: MEMCORE_ABLATE_ALIAS_EXPANSION=1 returns query unchanged.
-    """
-    try:
-        if _ablation.is_alias_expansion_ablated():
-            return query
-    except Exception:
-        pass
-    q = str(query).lower()
-    expansions = []
-    for key, val in _FLEET_ALIASES.items():
-        if key in q:
-            expansions.append(val)
-    if expansions:
-        return query + ' ' + ' '.join(expansions)
-    return query
-
-
-def _thai_bigrams(token: str) -> list[str]:
-    """Generate character bigrams from a Thai/Unicode token (ord>127, len>=4).
-
-    Used as extra OR-terms in FTS5 query (as prefix terms) and exact-fallback
-    (as substring ORs) to catch glued-word substrings. Capped by caller
-    (total OR-terms <= 32).
-    Eval-only: MEMCORE_ABLATE_THAI_BIGRAM=1 returns [].
-    """
-    try:
-        if _ablation.is_thai_bigram_ablated():
-            return []
-    except Exception:
-        pass
-    if len(token) < 4:
-        return []
-    # Only emit for tokens containing non-ASCII
-    if all(ord(ch) <= 127 for ch in token):
-        return []
-    return [token[i:i+2] for i in range(len(token) - 1)]
-
-
-def _query_tokens(query: str) -> list[str]:
-    """Split a raw query into word-ish tokens (Unicode L/N/M + underscore).
-
-    Shared by _fts_query and the search exact-fallback so both see the
-    same token stream.
-    """
-    tokens, buf = [], []
-    for ch in str(query):
-        category = unicodedata.category(ch)
-        if ch == '_' or category[:1] in ('L', 'N', 'M'):
-            buf.append(ch)
-        elif buf:
-            tokens.append(''.join(buf))
-            buf = []
-    if buf:
-        tokens.append(''.join(buf))
-    return tokens
-
-
-def _fts_query(query: str) -> str:
-    """Sanitize a raw Unicode user string into a safe FTS5 expression.
-
-    Keep Unicode letters/numbers/marks plus underscore, split on punctuation,
-    then quote each token. For Thai/Unicode tokens (ord>127, len>=4) also
-    emit character bigrams as extra prefix OR-terms ("bg"*) to catch
-    glued-word substrings — plain "bg" never matches in FTS5 unicode61,
-    only prefix "bg"* matches token starts.
-    Total OR-terms capped at 32 (ponytail: O(query_len) terms; upgrade path
-    is a proper segmenter only if owner approves a dep).
-    """
-    tokens = _query_tokens(query)
-    if not tokens:
-        return ''
-
-    # Build OR-terms: each token + its Thai bigrams as prefix terms (if applicable)
-    terms = []
-    for token in tokens:
-        terms.append('"%s"' % token)
-        # Lane 3.1: add Thai char bigrams as prefix terms for glued words
-        for bg in _thai_bigrams(token):
-            terms.append('"%s"*' % bg)
-            if len(terms) >= 32:
-                break
-        if len(terms) >= 32:
-            break
-
-    return ' OR '.join(terms)
-
-
-# _eval_now_iso and _coerce_now imported from .write
-
-
-#: Retention-ranking coefficients (Adopt-1; reference: ai-memory decay.rs).
-#: retention = salience * exp(-lambda(type) * age_days)
-#:             + sigma * ln(1 + recall_count) * exp(-mu * days_since_access)
-#: Higher score ranks first. Derived ONLY from existing columns; decay never
-#: hides rows and never tombstones — it only refines rank inside the
-#: existing CASE ordering family.
-_DECAY_LAMBDA_DEFAULT = 0.02  # scalar fall-back, ~35-day half-life
-_DECAY_SIGMA = 0.6  # reinforcement magnitude
-_DECAY_MU = 0.04  # reinforcement recency fall-off per day
-#: Per-memory_type half-life map (days). Types absent here fall back to the
-#: scalar _DECAY_LAMBDA_DEFAULT, byte-identical to the single-lambda formula.
-_DECAY_HALF_LIFE_DAYS_BY_TYPE = {
-    'fact': 60.0,
-    'decision': 90.0,
-    'preference': 90.0,
-    'note': 30.0,
-    'observation': 14.0,
-}
-_DECAY_SALIENCE_BY_VERIFICATION = {
-    'user_authoritative': 1.5,
-    'runtime_verified': 1.25,
-    'source_backed': 1.1,
-}
-_DECAY_SALIENCE_BY_LIFECYCLE = {
-    'accepted': 1.0,
-    'conflict': 0.9,
-}
-
-
-def _decay_lambda_sql(alias='m'):
-    """Per-type decay rate: CASE over memory_type, scalar default fallback."""
-    if alias == 'm' and '_DECAY_LAMBDA_SQL_M' in globals():
-        return _DECAY_LAMBDA_SQL_M
-    whens = ' '.join(
-        "WHEN '%s' THEN %.17g" % (mem_type, math.log(2) / half_life)
-        for mem_type, half_life in sorted(_DECAY_HALF_LIFE_DAYS_BY_TYPE.items())
-    )
-    return '(CASE %s.type %s ELSE %.17g END)' % (alias, whens, _DECAY_LAMBDA_DEFAULT)
-
-
-def _decay_salience_sql(alias='m'):
-    """Verification/lifecycle weight; unknown values fall back to 1.0/0.8."""
-    if alias == 'm' and '_DECAY_SALIENCE_SQL_M' in globals():
-        return _DECAY_SALIENCE_SQL_M
-    ver = ' '.join(
-        "WHEN '%s' THEN %s" % (value, weight)
-        for value, weight in sorted(_DECAY_SALIENCE_BY_VERIFICATION.items())
-    )
-    life = ' '.join(
-        "WHEN '%s' THEN %s" % (value, weight)
-        for value, weight in sorted(_DECAY_SALIENCE_BY_LIFECYCLE.items())
-    )
-    return (
-        '((CASE %s.verification %s ELSE 1.0 END) * '
-        '(CASE %s.lifecycle %s ELSE 0.8 END))' % (alias, ver, alias, life)
-    )
-
-
-_DECAY_LAMBDA_SQL_M = _decay_lambda_sql('m')
-_DECAY_SALIENCE_SQL_M = _decay_salience_sql('m')
-
-#: Pre-assembled retention ORDER-BY fragments for the default 'm' alias
-#: (the only alias search/export use). Hoisting the %-formatting here removes
-#: per-call string building from the search hot path; the fragment text is
-#: byte-identical to what _retention_order() used to assemble each call.
-_RETENTION_AGE_SQL_M = (
-    'max(0.0, COALESCE(julianday(?) - julianday(m.updated_at), 0.0))')
-_RETENTION_ACCESS_SQL_M = (
-    'CASE WHEN m.last_recalled IS NULL THEN 0.0 ELSE %.17g * '
-    'ln(1.0 + COALESCE(m.recall_count, 0)) * exp(-%.17g * '
-    'max(0.0, COALESCE(julianday(?) - julianday(m.last_recalled), 0.0))) END'
-    % (_DECAY_SIGMA, _DECAY_MU)
-)
-_RETENTION_EXPR_WITH_RECALL_M = (
-    'COALESCE(%s * exp(-%s * %s) + %s, 0.0)'
-    % (_DECAY_SALIENCE_SQL_M, _DECAY_LAMBDA_SQL_M,
-       _RETENTION_AGE_SQL_M, _RETENTION_ACCESS_SQL_M)
-)
-_RETENTION_EXPR_NO_RECALL_M = (
-    'COALESCE(%s * exp(-%s * %s) + 0.0, 0.0)'
-    % (_DECAY_SALIENCE_SQL_M, _DECAY_LAMBDA_SQL_M, _RETENTION_AGE_SQL_M)
-)
-
-#: Hard cap on the per-connection table-columns cache. Entries are keyed by
-#: id(conn), and sqlite3 connections support neither weakrefs nor attribute
-#: slots, so entries cannot auto-evict — the cap drops the cache wholesale
-#: when it grows past the bound.
-# schema table cols cache imported from .write
-
-
-def _has_recall_cols(conn) -> bool:
-    cols = _table_cols(conn, 'memory')
-    return 'recall_count' in cols and 'last_recalled' in cols
-
-
-def _retention_order(conn, enabled, alias='m'):
-    """ORDER-BY fragment + params for the continuous retention tie-break.
-
-    Returns ('', ()) when disabled (MEMCORE_ABLATE_DECAY=1): the caller then
-    emits the legacy CASE+bm25 ordering byte-identically. Enabled, it returns
-    (fragment, [now_iso, (now_iso when recall columns exist)]) where now_iso
-    comes from the simulated clock (FAKE_NOW else real time). Never raises:
-    unreadable columns degrade to the age-only term.
-    """
-    if not enabled:
-        return '', ()
-    store._register_math_functions(conn)
-    has_recall = _has_recall_cols(conn)
-    now_iso = _eval_now_iso()
-    if alias == 'm':
-        # Hot path (search/export): pre-assembled constant fragments, no
-        # per-call %-formatting.
-        if has_recall:
-            return _RETENTION_EXPR_WITH_RECALL_M, (now_iso, now_iso)
-        return _RETENTION_EXPR_NO_RECALL_M, (now_iso,)
-    age = ('max(0.0, COALESCE(julianday(?) - julianday(%s.updated_at), 0.0))'
-           % alias)
-    if has_recall:
-        access = (
-            'CASE WHEN %s.last_recalled IS NULL THEN 0.0 ELSE %.17g * '
-            'ln(1.0 + COALESCE(%s.recall_count, 0)) * exp(-%.17g * '
-            'max(0.0, COALESCE(julianday(?) - julianday(%s.last_recalled), 0.0))) END'
-            % (alias, _DECAY_SIGMA, alias, _DECAY_MU, alias)
-        )
-        params = (now_iso, now_iso)
-    else:
-        access = '0.0'
-        params = (now_iso,)
-    fragment = (
-        'COALESCE(%s * exp(-%s * %s) + %s, 0.0)'
-        % (_decay_salience_sql(alias), _decay_lambda_sql(alias), age, access)
-    )
-    return fragment, params
 
 
 #: Memories recalled within this window resist freshness decay.
@@ -425,165 +230,6 @@ def record_recall(conn, memory_ids) -> int:
         return 0
 
 
-#: Freshness label projected at read time (never written). Must agree with the
-#: SEQUENTIAL sweep in apply_freshness_decay, which advances a row at most ONE
-#: step per run: 'current' -> 'aging', and only a row already stored 'aging' can
-#: reach 'stale'. Two errors came from projecting 'current' -> 'stale' in a single
-#: hop (overstating decay: a 95-day row read 'stale' while the sweep writes
-#: 'aging') and from stopping there (understating it: a row the sweep had already
-#: aged kept reading 'aging' past the stale threshold). Both directions now
-#: mirror the sweep. A stored 'stale' is terminal and always wins.
-_FRESHNESS_PROJECTION_SQL = (
-    "(CASE WHEN m.freshness = 'stale' THEN 'stale' "
-    "WHEN m.freshness = 'aging' "
-    "  AND NOT (m.last_recalled IS NOT NULL AND julianday(?) - julianday(m.last_recalled) < ?) "
-    "  AND julianday(?) - julianday(m.updated_at) >= ? THEN 'stale' "
-    "WHEN m.freshness = 'aging' THEN 'aging' "
-    "WHEN m.last_recalled IS NOT NULL AND julianday(?) - julianday(m.last_recalled) < ? THEN 'current' "
-    "WHEN julianday(?) - julianday(m.updated_at) >= ? THEN 'aging' "
-    "ELSE 'current' END)"
-)
-
-
-def _freshness_params(now_iso: str) -> tuple:
-    return (
-        now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_STALE_DAYS,
-        now_iso, REINFORCEMENT_WINDOW_DAYS, now_iso, FRESHNESS_AGING_DAYS
-    )
-
-
-_LIFECYCLE_ORDER = {'accepted': 0, 'conflict': 1}
-_VERIF_ORDER = {'user_authoritative': 0, 'runtime_verified': 1, 'source_backed': 2}
-
-
-def _run_substring_lane(conn, project_id, agent_id, substr_terms, detail_filter,
-                        detail_params, retention_tail, retention_params, now_iso,
-                        limit):
-    """Unicode substring lane: unranked ``instr(content, term)`` OR-terms.
-
-    unicode61 never segments glued Thai, so this exists purely to bridge that.
-    It carries NO bm25 rank, which is why search() runs it only as a fallback and
-    never lets it lead the result. Terms are ordered longest-first so SQLite's
-    OR evaluation short-circuits early on selective matches.
-    """
-    sorted_terms = sorted(dict.fromkeys(substr_terms), key=len, reverse=True)
-    or_clauses = ' OR '.join(['instr(v.content, ?) > 0'] * len(sorted_terms))
-    return conn.execute(
-        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
-        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
-        '       v.content, m.owner_agent_id, 0.0 AS rank, '
-        '       m.claim_fingerprint '
-        'FROM memory m JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
-        'WHERE m.project_id = ? '
-        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-        '  AND ' + _recall_tombstone_guard('m') + ' '
-        '  AND (' + or_clauses + ') ' + detail_filter +
-        'ORDER BY m.pinned DESC, '
-        "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, "
-        "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 "
-        "WHEN 'source_backed' THEN 2 ELSE 3 END, "
-        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
-        retention_tail + ', '
-        'm.updated_at DESC, m.id ASC LIMIT ?',
-        _freshness_params(now_iso) +
-        (project_id, agent_id) + tuple(sorted_terms) + detail_params +
-        tuple(retention_params) + (min(500, limit * DISTINCT_OVERFETCH),)
-    ).fetchall()
-
-
-#: Vector cosine lives in the embedding seam (single implementation, C-level
-#: array/operator math). This module-level alias keeps the public name
-#: ``core.cosine_similarity`` working for callers and tests.
-cosine_similarity = embedding.cosine_similarity
-
-
-def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
-                        limit: int = 20, detail_filter: str = '',
-                        detail_params: tuple = ()) -> list[tuple]:
-    """Retrieve candidate memories having embeddings and rank by cosine similarity.
-
-    Returns rows matching the standard 9-tuple shape:
-    (id, scope, lifecycle, verification, freshness, content, owner_agent_id, rank, claim_fingerprint)
-    """
-    if not query_vec:
-        return []
-    if not store._table_exists(conn, 'memory_embedding'):
-        return []
-
-    q_arr = array.array('f', query_vec)
-    query_norm_sq = sum(x * x for x in q_arr)
-    if query_norm_sq <= 0.0:
-        return []
-    query_norm = math.sqrt(query_norm_sq)
-    q_len = len(q_arr)
-    mul = operator.mul
-
-    now_iso = _eval_now_iso()
-    fresh_params = _freshness_params(now_iso)
-    q_blob = q_arr.tobytes()
-
-    # Fast path: in-process SIMD vector distance via sqlite-vec when available
-    try:
-        sql_simd = (
-            'SELECT m.id, m.scope, m.lifecycle, m.verification, '
-            '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
-            '       v.content, m.owner_agent_id, '
-            '       (vec_distance_cosine(e.vector, ?) - 1.0) AS rank, '
-            '       m.claim_fingerprint, m.pinned '
-            'FROM memory m '
-            'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
-            'JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
-            'WHERE m.project_id = ? '
-            "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-            "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-            '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter
-        )
-        params_simd = fresh_params + (q_blob, project_id, agent_id) + detail_params
-        candidates = conn.execute(sql_simd, params_simd).fetchall()
-    except Exception:
-        # Fallback: pure Python scan when sqlite-vec is not compiled/available
-        sql = (
-            'SELECT m.id, m.scope, m.lifecycle, m.verification, '
-            '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
-            '       v.content, m.owner_agent_id, e.vector, '
-            '       m.claim_fingerprint, m.pinned '
-            'FROM memory m '
-            'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
-            'JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
-            'WHERE m.project_id = ? '
-            "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-            "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-            '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter
-        )
-        params = fresh_params + (project_id, agent_id) + detail_params
-        cur = conn.execute(sql, params)
-        candidates = []
-        for row in cur.fetchall():
-            mid, scope, lifecycle, verif, freshness, content, owner, blob, fp, pinned = row
-            v_arr = array.array('f')
-            v_arr.frombytes(blob)
-            if len(v_arr) != q_len:
-                continue
-            dot = sum(map(mul, q_arr, v_arr))
-            doc_norm_sq = sum(map(mul, v_arr, v_arr))
-            if doc_norm_sq <= 0.0:
-                sim = 0.0
-            else:
-                sim = dot / (query_norm * math.sqrt(doc_norm_sq))
-            # rank: lower is better to match bm25 convention (e.g. -sim)
-            rank = -sim
-            candidates.append((mid, scope, lifecycle, verif, freshness, content, owner, rank, fp, pinned))
-
-    def _cand_sort_key(c):
-        pinned_order = 0 if c[9] else 1
-        lifecycle_order = _LIFECYCLE_ORDER.get(c[2], 2)
-        verif_order = _VERIF_ORDER.get(c[3], 3)
-        return (pinned_order, lifecycle_order, verif_order, c[7])
-
-    candidates.sort(key=_cand_sort_key)
-    return [c[:9] for c in candidates[:limit]]
-
 
 def _merge_exact_fallback(base_rows, exact_rows, limit, user_query,
                           query_tok=None, query_numbers=None,
@@ -614,185 +260,6 @@ def _merge_exact_fallback(base_rows, exact_rows, limit, user_query,
         query_numbers=query_numbers, query_tokens=query_tokens)[:limit]
 
 
-def _extract_non_ascii_substr_terms(user_query: str) -> list[str]:
-    """Match terms for the Unicode substring fallback lane (single pass).
-
-    unicode61 never segments glued Thai, so non-ASCII queries need a
-    substring fallback. Match terms = NON-ASCII word tokens of the
-    PRE-expansion query + their char bigrams. ASCII tokens are deliberately
-    excluded — FTS already handles them, and instr-ORing them (e.g. 'agent'
-    matching 'agents') flips negation guards. Alias expansion can never break
-    the verbatim check (pre-expansion query only); glued->spaced still
-    bridges via bigrams. Capped at MAX_SUBSTR_TERMS.
-    """
-    if not any(ord(ch) > 127 for ch in user_query):
-        return []
-    terms: list[str] = []
-    seen_terms: set[str] = set()
-    for token in _query_tokens(user_query):
-        if all(ord(ch) <= 127 for ch in token) or token in seen_terms:
-            continue
-        seen_terms.add(token)
-        terms.append(token)
-        for bg in _thai_bigrams(token):
-            if bg in seen_terms:
-                continue
-            seen_terms.add(bg)
-            terms.append(bg)
-            if len(terms) >= MAX_SUBSTR_TERMS:
-                break
-        if len(terms) >= MAX_SUBSTR_TERMS:
-            break
-    return terms
-
-
-def _search_detail_filter(conn, scope_detail):
-    """(sql, params) for a scope_detail narrowing.
-
-    Returns (None, ()) when the column is absent (pre-0016 store): the
-    caller must then refuse the narrowed query rather than silently run it
-    unscoped.
-    """
-    if scope_detail is None:
-        return '', ()
-    if 'scope_detail' not in _table_cols(conn, 'memory'):
-        return None, ()
-    return '  AND m.scope_detail = ? ', (str(scope_detail),)
-
-
-def _run_fts_lane(conn, project_id, agent_id, match_expr, detail_filter,
-                  detail_params, retention_tail, retention_params, now_iso,
-                  fts_limit):
-    """FTS5 bm25 lane: ranked primary candidates as 9-tuple rows."""
-    cur = conn.execute(
-        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
-        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
-        '       v.content, m.owner_agent_id, '
-        '       bm25(memory_version_fts) AS rank, m.claim_fingerprint '
-        'FROM memory_version_fts fts '
-        'JOIN memory_version v ON v.rowid = fts.rowid '
-        'JOIN memory m ON m.id = v.memory_id '
-        'WHERE memory_version_fts MATCH ? '
-        '  AND v.id = m.current_version_id '
-        '  AND m.project_id = ? '
-        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-        '  AND ' + _recall_tombstone_guard('m') + ' ' + detail_filter +
-        'ORDER BY m.pinned DESC, ' +
-        "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
-        "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
-        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
-        retention_tail + ', ' +
-        'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
-        _freshness_params(now_iso) +
-        (match_expr, project_id, agent_id) + detail_params +
-        tuple(retention_params) + (fts_limit,)
-    )
-    return cur.fetchall()
-
-
-def _fuse_rrf_candidates(fts_rows, vec_rows, k_rrf=60):
-    """Reciprocal Rank Fusion over the FTS and vector lanes (id-deduped)."""
-    fts_rank_map = {row[0]: idx for idx, row in enumerate(fts_rows)}
-    vec_rank_map = {row[0]: idx for idx, row in enumerate(vec_rows)}
-    doc_map = {}
-    for row in fts_rows:
-        doc_map[row[0]] = row
-    for row in vec_rows:
-        if row[0] not in doc_map:
-            doc_map[row[0]] = row
-    fused = []
-    for mid in set(fts_rank_map) | set(vec_rank_map):
-        score = 0.0
-        if mid in fts_rank_map:
-            score += 1.0 / (k_rrf + fts_rank_map[mid])
-        if mid in vec_rank_map:
-            score += 1.0 / (k_rrf + vec_rank_map[mid])
-        r = doc_map[mid]
-        # (id, scope, lifecycle, verification, freshness, content, owner, -score, fp)
-        fused.append((r[0], r[1], r[2], r[3], r[4], r[5], r[6], -score, r[8]))
-
-    def _fused_sort_key(c):
-        lifecycle_order = _LIFECYCLE_ORDER.get(c[2], 2)
-        verif_order = _VERIF_ORDER.get(c[3], 3)
-        return (lifecycle_order, verif_order, c[7])
-
-    fused.sort(key=_fused_sort_key)
-    return fused
-
-
-def _decay_ablated() -> bool:
-    """MEMCORE_ABLATE_DECAY flag (ablation is eval-only); never raises."""
-    try:
-        return bool(_ablation.is_decay_ablated())
-    except Exception:
-        return False
-
-
-def _fetch_query_vector(user_query):
-    """Best-effort query embedding for the vector lane; None when unavailable."""
-    try:
-        return embedding.get_embedding(user_query, timeout=0.15)
-    except Exception:
-        return None
-
-
-def _run_vector_lane(conn, project_id, agent_id, query_vec, limit,
-                     detail_filter, detail_params, min_sim: float = 0.25):
-    """Vector lane wrapper: never raises — degraded search beats no search."""
-    if not query_vec:
-        return []
-    try:
-        raw = _vector_search_lane(
-            conn, project_id, agent_id, query_vec,
-            limit=limit * DISTINCT_OVERFETCH,
-            detail_filter=detail_filter, detail_params=detail_params
-        )
-        return [r for r in raw if -r[7] >= min_sim]
-    except Exception:
-        return []
-
-
-def _run_summary_lane(conn, project_id, agent_id, raw_query, detail_filter,
-                      detail_params, retention_tail, retention_params, now_iso,
-                      limit):
-    """Situational trigger (when_to_use) lexical matching lane."""
-    if 'when_to_use' not in _table_cols(conn, 'memory_version'):
-        return []
-    tokens = [
-        t.lower() for t in dict.fromkeys(_query_tokens(raw_query))
-        if len(t) >= 2
-    ][:16]
-    if not tokens:
-        return []
-    match_exprs = ['(CASE WHEN instr(lower(v.when_to_use), ?) > 0 THEN 1 ELSE 0 END)' for _ in tokens]
-    or_clauses = ' OR '.join(['instr(lower(v.when_to_use), ?) > 0'] * len(tokens))
-    score_sql = '-(' + ' + '.join(match_exprs) + ')'
-    cur = conn.execute(
-        'SELECT m.id, m.scope, m.lifecycle, m.verification, '
-        '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
-        '       v.content, m.owner_agent_id, '
-        '       ' + score_sql + ' AS rank, m.claim_fingerprint '
-        'FROM memory m '
-        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
-        'WHERE v.when_to_use IS NOT NULL AND v.when_to_use != \'\' '
-        '  AND m.project_id = ? '
-        "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
-        "  AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-        '  AND ' + _recall_tombstone_guard('m') + ' '
-        '  AND (' + or_clauses + ') ' + detail_filter +
-        'ORDER BY m.pinned DESC, ' +
-        "CASE m.lifecycle WHEN 'accepted' THEN 0 WHEN 'conflict' THEN 1 ELSE 2 END, " +
-        "CASE m.verification WHEN 'user_authoritative' THEN 0 WHEN 'runtime_verified' THEN 1 WHEN 'source_backed' THEN 2 ELSE 3 END, " +
-        "CASE m.freshness WHEN 'current' THEN 0 WHEN 'aging' THEN 1 ELSE 2 END" +
-        retention_tail + ', ' +
-        'rank ASC, m.updated_at DESC, m.id ASC LIMIT ?',
-        _freshness_params(now_iso) +
-        tuple(tokens) + (project_id, agent_id) + tuple(tokens) + detail_params +
-        tuple(retention_params) + (min(500, limit * DISTINCT_OVERFETCH),)
-    )
-    return cur.fetchall()
-
 
 def _is_single_source_stale(source_file: str | None, source_hash: str | None) -> bool:
     """Read-only SHA-256 check for a single source file (never mutates DB)."""
@@ -810,8 +277,10 @@ def _is_single_source_stale(source_file: str | None, source_hash: str | None) ->
         return False
 
 
+
 #: Public alias for single source file staleness check
 is_single_source_stale = _is_single_source_stale
+
 
 
 def _source_file_is_stale_readonly(conn, memory_ids) -> set[str]:
@@ -830,6 +299,7 @@ def _source_file_is_stale_readonly(conn, memory_ids) -> set[str]:
         if _is_single_source_stale(source_file, source_hash):
             stale_ids.add(mid)
     return stale_ids
+
 
 
 def _filter_strict_rows(conn, rows):
@@ -852,6 +322,7 @@ def _filter_strict_rows(conn, rows):
     return out
 
 
+
 def _filter_changed_since(conn, rows, changed_since: str):
     """Filter candidate rows to those updated at or after changed_since."""
     if not rows or not changed_since:
@@ -866,6 +337,7 @@ def _filter_changed_since(conn, rows, changed_since: str):
         ).fetchall()
     }
     return [r for r in rows if r[0] in qualifying]
+
 
 
 def _search_changed_since_only(conn, project_id, agent_id, changed_since,
@@ -897,6 +369,7 @@ def _search_changed_since_only(conn, project_id, agent_id, changed_since,
     if mode == 'strict':
         rows = _filter_strict_rows(conn, rows)
     return rows[:limit]
+
 
 
 def _search_historical(conn, project_id, agent_id, user_query, raw_query,
@@ -985,6 +458,7 @@ def _search_historical(conn, project_id, agent_id, user_query, raw_query,
         if len(out) >= limit:
             break
     return out
+
 
 
 def search(conn, project_id, agent_id, query, limit=20,
@@ -1130,6 +604,7 @@ def search(conn, project_id, agent_id, query, limit=20,
     return results[:limit]
 
 
+
 def finalize_recall(conn, rows):
     """Apply recall side effects and freshness labels to already selected rows.
 
@@ -1162,6 +637,7 @@ def finalize_recall(conn, rows):
     return out
 
 
+
 def recall(conn, project_id, agent_id, query, limit=20,
            scope_detail=None, query_vec=None, get_head=None, repo_root=None,
            *, mode: str = 'standard', as_of: str | None = None,
@@ -1184,21 +660,6 @@ def recall(conn, project_id, agent_id, query, limit=20,
         finalized = [r for r in finalized if len(r) > 4 and r[2] == 'accepted' and r[4] == 'current']
     return finalized
 
-
-#: How much deeper than ``limit`` search() reads before collapsing duplicate
-#: claim copies. The fleet corroborates by re-writing one claim from several
-#: agents, so a shallow window can be entirely copies of a single fact; reading
-#: a few times deeper lets distinct claims fill the freed slots.
-#: Measured sweep on the live-store copy: 1 -> mean result overlap 0.86 and
-#: SLOWER (fewer distinct rows to sort); 2 -> identical results on every probe;
-#: 3 -> no gain over 2. So 2 is the value: same recall, less work.
-DISTINCT_OVERFETCH = 2
-
-#: Cap on `instr(v.content, ?)` OR-terms in the Thai substring lane. Each term
-#: is a full table scan of the joined version rows, so this is the single
-#: biggest lever on Thai-query latency (measured: a 32-term glued Thai query
-#: costs ~5ms, ASCII ~1ms). Lower it if recall ever degrades for long queries.
-MAX_SUBSTR_TERMS = 32
 
 
 def _collapse_duplicate_claims(rows, limit=None):
@@ -1235,11 +696,6 @@ def _collapse_duplicate_claims(rows, limit=None):
     out = keep + folded
     return out[:limit] if limit else out
 
-
-#: Age thresholds mirroring apply_freshness_decay's defaults, applied when
-#: projecting the freshness label at read time.
-FRESHNESS_AGING_DAYS = 30
-FRESHNESS_STALE_DAYS = 90
 
 
 def _demote_numeric_mismatch(query, rows, query_tok=None, query_numbers=None,
@@ -1311,6 +767,7 @@ def _demote_numeric_mismatch(query, rows, query_tok=None, query_numbers=None,
     return keep + demoted
 
 
+
 def conflict_memories(conn, project_id, agent_id):
     """Readable conflict memories for one member; private scope never leaks."""
     if _membership_role(conn, project_id, agent_id) is None:
@@ -1328,6 +785,7 @@ def conflict_memories(conn, project_id, agent_id):
     return cur.fetchall()
 
 
+
 def superseded_history(conn, memory_id, agent_id):
     """Readable versions of one memory, oldest first; scope enforced in SQL."""
     if not isinstance(memory_id, str) or not isinstance(agent_id, str):
@@ -1343,6 +801,7 @@ def superseded_history(conn, memory_id, agent_id):
         (memory_id, agent_id, agent_id)
     )
     return cur.fetchall()
+
 
 
 def get_memories(conn, project_id, agent_id, memory_ids, *,
@@ -1457,6 +916,7 @@ def get_memories(conn, project_id, agent_id, memory_ids, *,
     return ordered
 
 
+
 def pack_search_results(results, max_tokens=None, preview_chars=180):
     """Pack search result dicts within a token budget using progressive disclosure.
 
@@ -1524,6 +984,3 @@ def pack_search_results(results, max_tokens=None, preview_chars=180):
             packed.append(row)
         break
     return packed
-
-
-# ————————————————————————————————————————————————————————————————————————————————————————

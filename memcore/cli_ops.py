@@ -267,6 +267,22 @@ def _default_export_binding():
 
 
 
+def cmd_compact(args):
+    """Run governed project memory compaction."""
+    from .compaction import compact_project_memories
+    conn = _open(args)
+    project_id = args.project
+    agent_id = getattr(args, 'agent', None) or 'curator'
+    days = getattr(args, 'days', 14)
+    dry_run = getattr(args, 'dry_run', False)
+    res = compact_project_memories(conn, project_id=project_id, agent_id=agent_id,
+                                  older_than_days=days, dry_run=dry_run)
+    if dry_run:
+        print(f"Dry-run: found {res['compacted_count']} candidate memories eligible for compaction in project '{project_id}'")
+    else:
+        print(f"Compacted {res['compacted_count']} memories in project '{project_id}' -> new decision memory {res['new_memory_id']}")
+
+
 def cmd_export(args):
     """Write governed memory to a file every coding agent already reads."""
     conn = None

@@ -75,6 +75,7 @@ from .cli_ops import (
     _export_config_candidates,
     _default_export_binding,
     cmd_export,
+    cmd_compact,
     _print_export_results,
     cmd_stats,
     cmd_import,
@@ -281,6 +282,18 @@ def main(argv=None):
     p.add_argument('--force', action='store_true',
                    help='rewrite even when the content is unchanged')
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser('compact', help='consolidate accepted historical memories into snapshots',
+                       parents=[common])
+    p.add_argument('--project', required=True,
+                   help='project id/UUID or unique name')
+    p.add_argument('--agent', default='curator',
+                   help='agent identity performing compaction (default: curator)')
+    p.add_argument('--days', type=float, default=14.0,
+                   help='cutoff age in days for compaction eligibility (default: 14)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='preview compaction candidates without applying')
+    p.set_defaults(func=cmd_compact)
 
     p = sub.add_parser('journal-stats', help='content-free ingest journal health', parents=[common])
     p.add_argument('--project', default=None,

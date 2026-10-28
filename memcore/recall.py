@@ -1010,3 +1010,55 @@ def pack_search_results(results, max_tokens=None, preview_chars=180):
             packed.append(row)
         break
     return packed
+
+
+def query_triples(conn, project_id: str, subject: str | None = None,
+                  predicate: str | None = None, object_: str | None = None,
+                  active_only: bool = True) -> list[dict]:
+    """Query knowledge triples with MemCore canonical governance.
+
+    active_only=True filters to triples whose parent memory is currently 'accepted'
+    and where the triple's version matches the memory's current_version_id.
+    """
+    if not store._table_exists(conn, 'memory_triple'):
+        return []
+
+    query = """
+        SELECT mt.id, mt.memory_id, mt.version_id, mt.subject, mt.predicate, mt.object,
+               mt.created_at, m.project_id, m.lifecycle, m.verification, m.freshness
+        FROM memory_triple mt
+        JOIN memory m ON mt.memory_id = m.id
+        WHERE m.project_id = ?
+    """
+    params = [project_id]
+    if active_only:
+        query += " AND m.lifecycle NOT IN ('rejected', 'disabled', 'superseded') AND m.current_version_id = mt.version_id"
+    if subject is not None:
+        query += " AND mt.subject = ?"
+        params.append(subject)
+    if predicate is not None:
+        query += " AND mt.predicate = ?"
+        params.append(predicate)
+    if object_ is not None:
+        query += " AND mt.object = ?"
+        params.append(object_)
+    query += " ORDER BY mt.created_at DESC"
+
+    rows = conn.execute(query, params).fetchall()
+    results = []
+    for r in rows:
+        results.append({
+            "id": r[0],
+            "memory_id": r[1],
+            "version_id": r[2],
+            "subject": r[3],
+            "predicate": r[4],
+            "object": r[5],
+            "created_at": r[6],
+            "project_id": r[7],
+            "lifecycle": r[8],
+            "verification": r[9],
+            "freshness": r[10]
+        })
+    return results
+

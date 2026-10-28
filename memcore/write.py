@@ -189,11 +189,31 @@ def _insert_memory_rows(conn, project_id, agent_id, content, scope, memory_type,
 
 
 
+def store_triples(conn, memory_id: str, version_id: str, triples: list | None) -> int:
+    """Store entity-relation knowledge triples bound to a memory version."""
+    if not triples or not store._table_exists(conn, 'memory_triple'):
+        return 0
+    import uuid
+    inserted = 0
+    for triple in triples:
+        if len(triple) == 3:
+            s, p, o = str(triple[0]).strip(), str(triple[1]).strip(), str(triple[2]).strip()
+            if s and p and o:
+                t_id = f"trip_{uuid.uuid4().hex[:12]}"
+                conn.execute(
+                    "INSERT INTO memory_triple(id, memory_id, version_id, subject, predicate, object) VALUES (?, ?, ?, ?, ?, ?)",
+                    (t_id, memory_id, version_id, s, p, o)
+                )
+                inserted += 1
+    return inserted
+
+
 def create_memory(conn, project_id, agent_id, content, scope='private',
                   memory_type='fact', lifecycle='candidate', idempotency_key=None,
                   reason=None, scope_detail=None, source_file=None,
                   source_commit=None, source_hash=None, when_to_use=None,
-                  auto_source_file: bool = True, _manage_transaction=True):
+                  auto_source_file: bool = True, triples: list | None = None,
+                  _manage_transaction=True):
     """Create a memory + first immutable version. Tombstone guard applies.
 
     Returns (memory_id, version_id) or existing ids if idempotency_key replays.
@@ -258,6 +278,8 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             prepared['source_file'], when_to_use=clean_when
         )
         _store_embedding_safe(conn, mem_id, ver_id, embed_vec)
+        if triples:
+            store_triples(conn, mem_id, ver_id, triples)
         _audit(conn, 'create', agent_id, mem_id, project_id,
                {'memory_id': mem_id, 'version_id': ver_id,
                 'scope': scope, 'content': content,
@@ -347,7 +369,8 @@ def _close_and_insert_version(conn, memory_id, agent_id, new_content, reason,
 
 def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=None,
               source_file=None, source_commit=None, source_hash=None,
-              when_to_use=None, auto_source_file: bool = True):
+              when_to_use=None, auto_source_file: bool = True,
+              triples: list | None = None):
     """Correct a memory in place while preserving immutable version history.
 
     The old claim receives a scope-appropriate refusal fingerprint, its
@@ -404,6 +427,8 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
             conn, memory_id, agent_id, new_content, reason, old_ver, new_fp,
             source_hash, source_commit, source_file, when_to_use=effective_when)
         _store_embedding_safe(conn, memory_id, new_ver, embed_vec)
+        if triples:
+            store_triples(conn, memory_id, new_ver, triples)
 
         tombstone_created = False
         if old_fp != new_fp and not _tombstone_active(

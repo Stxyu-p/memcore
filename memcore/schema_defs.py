@@ -322,3 +322,23 @@ CREATE TABLE IF NOT EXISTS memory_embedding (
 );
 CREATE INDEX IF NOT EXISTS idx_embedding_version ON memory_embedding(version_id);
 """
+
+_MEMORY_TRIPLES = """
+-- 0019: governed entity-relation knowledge triples linked to canonical memories.
+CREATE TABLE IF NOT EXISTS memory_triple (
+    id          TEXT PRIMARY KEY,
+    memory_id   TEXT NOT NULL,
+    version_id  TEXT NOT NULL,
+    subject     TEXT NOT NULL,
+    predicate   TEXT NOT NULL,
+    object      TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (memory_id) REFERENCES memory(id) ON DELETE CASCADE,
+    FOREIGN KEY (version_id) REFERENCES memory_version(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_triple_sub_pred ON memory_triple(subject, predicate);
+CREATE INDEX IF NOT EXISTS idx_triple_obj ON memory_triple(object);
+CREATE INDEX IF NOT EXISTS idx_triple_memory ON memory_triple(memory_id);
+CREATE INDEX IF NOT EXISTS idx_triple_version ON memory_triple(version_id);
+"""
+

@@ -22,6 +22,7 @@ from .schema_defs import _INGEST_JOURNAL
 from .schema_defs import _INTEGRITY_HARDENING
 from .schema_defs import _ISO_NORMALIZE
 from .schema_defs import _MEMORY_EMBEDDING
+from .schema_defs import _MEMORY_TRIPLES
 from .schema_defs import _PERFORMANCE_FAST_PATHS
 from .schema_defs import _PERFORMANCE_ROUND2
 from .schema_defs import _PROVENANCE_SEAL
@@ -216,6 +217,7 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0016_scope_detail', _SCOPE_DETAIL),
     ('0017_bitemporal_valid_until', _BITEMPORAL_VALID_UNTIL),
     ('0018_memory_embedding', _MEMORY_EMBEDDING),
+    ('0019_memory_triples', _MEMORY_TRIPLES),
 ]
 
 

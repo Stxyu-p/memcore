@@ -295,13 +295,15 @@ def _process_pending_event(conn, event_id):
         # ponytail: hold is audit-only on every lane; the removed
         # mark_contradiction demoted the established row from an explicit
         # write, so one bad signal could bury a good fact with no recovery.
+        is_tainted = bool(metadata.get('tainted'))
         result = _admit_journal_candidate(
             conn, event_id, project_id, agent_id, candidate,
             idempotency_key=f'ingest:{event_id}',
-            reason='native provider journal analysis',
-            decision_created='private_accepted',
-            decision_accepted='private_accepted',
-            auto_accept_reason='explicit durable signal auto-accept',
+            reason='native provider journal analysis' + (' [tainted]' if is_tainted else ''),
+            decision_created='private_candidate' if is_tainted else 'private_accepted',
+            decision_accepted=None if is_tainted else 'private_accepted',
+            auto_accept_reason=None if is_tainted else 'explicit durable signal auto-accept',
+            extra_sweep=is_tainted,
         )
         return result, False
 

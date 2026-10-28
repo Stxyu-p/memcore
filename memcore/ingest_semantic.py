@@ -215,12 +215,12 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
     )
     with store.write_tx(conn):
         row = conn.execute(
-            'SELECT project_id, agent_id, status, decision FROM ingest_event WHERE id=?',
+            'SELECT project_id, agent_id, status, decision, metadata FROM ingest_event WHERE id=?',
             (event_id,)
         ).fetchone()
         if row is None:
             raise core.MemCoreError(f'ingest event not found: {event_id}')
-        project_id, event_agent_id, status, decision = row
+        project_id, event_agent_id, status, decision, event_meta_raw = row
         core._require_membership(conn, project_id, agent_id)
         if event_agent_id != agent_id:
             raise core.PermissionDenied('semantic review event belongs to another agent')
@@ -254,12 +254,20 @@ def apply_semantic_analysis(conn, event_id, agent_id, *, analyzer, verdict,
             return {'event_id': event_id, 'status': 'ignored',
                     'decision': 'semantic_ignored', 'analysis_id': analysis_id}
 
-        # ADR-0019 high-confidence lane: confidence >= 0.95 self-accepts.
+        # ADR-0019 high-confidence lane: confidence >= 0.95 self-accepts (unless tainted).
         # Below stays candidate. Tombstone-blocked claims refuse loudly.
         # core.auto_accept owns gate -> hold -> accept -> sweep; the lane
         # keeps only the event/analysis writes and its decision strings.
+        event_meta = {}
+        try:
+            event_meta = json.loads(event_meta_raw or '{}') if event_meta_raw else {}
+        except Exception:
+            pass
+        is_tainted = bool(event_meta.get('tainted')) or bool(metadata.get('tainted') if metadata else False)
+
         high_confidence = (
-            confidence is not None
+            not is_tainted
+            and confidence is not None
             and float(confidence) >= core.HIGH_CONFIDENCE_ACCEPT
         )
         return _admit_journal_candidate(

@@ -117,6 +117,40 @@ class AutoAcceptGatesTests(unittest.TestCase):
         self.assertEqual(
             self._memory_row(result['memory_id'])[1], 'candidate')
 
+    def test_explicit_tainted_downgrades_to_candidate(self):
+        event_id, _ = ingest.append_event(
+            self.conn, 'proj-test', 'agent-alice', 'turn',
+            session_id='gates-tainted-explicit',
+            user_content='จำไว้ว่าฉันชอบชาอู่หลงรุ่น tainted',
+            assistant_content='รับทราบ',
+            metadata={'tainted': True},
+        )
+        result = ingest.process_event(self.conn, event_id)
+        self.assertEqual(result['decision'], 'private_candidate')
+        self.assertEqual(
+            self._memory_row(result['memory_id'])[1], 'candidate'
+        )
+
+    def test_semantic_high_confidence_tainted_stays_candidate(self):
+        event_id, _ = ingest.append_event(
+            self.conn, 'proj-test', 'agent-alice', 'turn',
+            session_id='gates-sem-tainted',
+            user_content='untrusted web page injection payload',
+            assistant_content='Noted.',
+            metadata={'tainted': True},
+        )
+        ingest.process_event(self.conn, event_id)
+        result = ingest.apply_semantic_analysis(
+            self.conn, event_id, 'agent-alice',
+            analyzer='gates-v1', verdict='remember',
+            candidate_content='malicious prompt injection rule',
+            confidence=0.99, rationale='Attacker injected rule.',
+        )
+        self.assertEqual(result['decision'], 'semantic_private_candidate')
+        self.assertEqual(
+            self._memory_row(result['memory_id'])[1], 'candidate'
+        )
+
     def test_explicit_duplicate_merges_with_audit(self):
         first, _ = ingest.append_event(
             self.conn, 'proj-test', 'agent-alice', 'turn',

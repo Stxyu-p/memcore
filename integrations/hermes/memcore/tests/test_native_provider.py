@@ -726,3 +726,28 @@ class NativeProviderTest(unittest.TestCase):
             )), 1)
         finally:
             conn.close()
+
+    def test_event_metadata_marks_tainted_on_untrusted_tools(self):
+        p = self.provider()
+        clean_msgs = [
+            {'role': 'user', 'content': 'hello'},
+            {'role': 'assistant', 'content': 'hi'},
+        ]
+        meta_clean = p._event_metadata(clean_msgs)
+        self.assertNotIn('tainted', meta_clean)
+
+        # Untrusted tool in tool message
+        web_msgs = [
+            {'role': 'user', 'content': 'search something'},
+            {'role': 'tool', 'name': 'web_search', 'content': 'results'},
+        ]
+        meta_web = p._event_metadata(web_msgs)
+        self.assertTrue(meta_web.get('tainted'))
+
+        # Untrusted tool in tool_calls
+        call_msgs = [
+            {'role': 'assistant', 'tool_calls': [{'function': {'name': 'browser_exec'}}]},
+        ]
+        meta_call = p._event_metadata(call_msgs)
+        self.assertTrue(meta_call.get('tainted'))
+

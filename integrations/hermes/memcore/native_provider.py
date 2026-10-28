@@ -314,10 +314,34 @@ class MemCoreMemoryProvider(MemoryProvider):
             return None
         return RecallStatus('MemCore', self._last_recall_count, '🧠')
 
+    UNTRUSTED_TOOLS = frozenset({
+        'web_search', 'web_extract', 'browser_exec', 'browser_vault',
+        'browser_navigate', 'curl', 'wget', 'fetch', 'http_request',
+    })
+
     def _event_metadata(self, messages=None, **extra):
         data = {'platform': self._platform}
         if messages is not None:
             data['message_count'] = len(messages)
+            is_tainted = False
+            for m in messages:
+                if not isinstance(m, dict):
+                    continue
+                if m.get('role') in ('tool', 'function') and m.get('name') in self.UNTRUSTED_TOOLS:
+                    is_tainted = True
+                    break
+                tool_calls = m.get('tool_calls') or []
+                if isinstance(tool_calls, list):
+                    for tc in tool_calls:
+                        if isinstance(tc, dict):
+                            fn_name = tc.get('function', {}).get('name') or tc.get('name')
+                            if fn_name in self.UNTRUSTED_TOOLS:
+                                is_tainted = True
+                                break
+                if is_tainted:
+                    break
+            if is_tainted:
+                data['tainted'] = True
         data.update({k: v for k, v in extra.items() if v is not None})
         return data
 

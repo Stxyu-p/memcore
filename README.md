@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" width="160" alt="MemCore Logo" />
+</p>
+
 # MemCore
 
 **Governed, Bitemporal, Local-First Memory Engine for Autonomous AI Agent Fleets**
@@ -9,6 +13,7 @@ Capture broadly. Recall narrowly. Never trust raw conversational history.
 [![Storage](https://img.shields.io/badge/storage-SQLite_WAL_+_FTS5-07405E?style=flat-square)](#why-memcore)
 [![Latency](https://img.shields.io/badge/latency-%3C_3ms_hybrid_recall-10b981?style=flat-square)](#sub-millisecond-hybrid-rrf-recall)
 [![Governance](https://img.shields.io/badge/governance-Bitemporal_+_Tombstones-8b5cf6?style=flat-square)](#the-four-pillars-of-governed-memory)
+[![Security](https://img.shields.io/badge/security-Tainted_Context_Guard-00D2FF?style=flat-square)](#tainted-context-guard-anti-poisoning)
 [![License: MIT](https://img.shields.io/badge/license-MIT-slate?style=flat-square)](LICENSE)
 
 ---
@@ -69,6 +74,16 @@ MemCore fuses lexical exactness (SQLite FTS5 BM25 with Unicode matching for tech
 - **100% In-Process:** Runs directly inside Python via SQLite WAL. Zero external servers, zero Docker containers, zero open network ports.
 - **Two-Stage 1-Bit Binary Quantization:** Compresses 384-dimensional dense vectors into 48-byte binary sign blobs. Pre-filters thousands of candidate memories using microsecond bitwise Hamming POPCOUNT before running exact float32 cosine reranking.
 - **Salience L1 Previews:** Optional 180-character progressive summaries prioritize negations (`never`, `must not`, `ห้าม`), numerical bounds, and file paths, saving up to 80% on prompt context overhead.
+
+---
+
+## Tainted Context Guard (Anti-Poisoning)
+
+Protects shared project memory against indirect prompt injection, malicious websites, and poisoned tool outputs:
+
+- **Untrusted I/O Tracking:** Turns that execute untrusted tools (`web_search`, `web_extract`, `browser_*`, `curl`, `wget`) are automatically stamped with `tainted: True`.
+- **Auto-Accept Veto:** In a tainted turn, all auto-accept lanes are disabled. Both explicit durable signals (`"จำไว้ว่า..."`) and high-confidence semantic review verdicts ($\ge 0.95$) are downgraded to `candidate` status.
+- **Consensus Requirement:** Tainted claims cannot enter `accepted` or Golden Rule status until independently corroborated by 3 distinct agents or approved by an operator.
 
 ---
 

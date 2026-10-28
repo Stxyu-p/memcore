@@ -9,6 +9,9 @@
   `memory_remember`, `memory_write/add`) and semantic `remember` with
   confidence ≥ 0.95 skip `candidate`. Assistant observations stay
   candidate-only.
+- Tainted context guard: turns touching untrusted tools (`web_search`, `browser_*`,
+  `curl`, `wget`) stamp `tainted: True`, vetoing auto-accept lanes and forcing
+  claims to remain candidate-only until 3-agent corroboration.
 - Recall: fingerprint dedup (corroborating copies collapse to one line) +
   word-boundary per-row cap (220 chars, Thai hard-cut fallback) instead of
   silently skipping oversized rows.

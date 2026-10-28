@@ -283,6 +283,28 @@ def cmd_compact(args):
         print(f"Compacted {res['compacted_count']} memories in project '{project_id}' -> new decision memory {res['new_memory_id']}")
 
 
+def cmd_export_project(args):
+    """Export canonical project memories and tombstones to .memcore.jsonl."""
+    from .export_project import export_project_snapshot
+    conn = _open(args)
+    project_id = args.project
+    out_path = getattr(args, 'out', None) or '.memcore.jsonl'
+    res = export_project_snapshot(conn, project_id=project_id, out_path=out_path)
+    print(f"Exported {res['memory_count']} canonical memories and {res['tombstone_count']} tombstones to '{res['out_path']}' (seal: {res['seal_sha256'][:12]}...)")
+
+
+def cmd_import_project(args):
+    """Import project memories and tombstones from .memcore.jsonl snapshot."""
+    from .export_project import import_project_snapshot
+    conn = _open(args)
+    project_id = args.project
+    agent_id = getattr(args, 'agent', None) or 'curator'
+    in_path = getattr(args, 'in_file', None) or getattr(args, 'in', None) or '.memcore.jsonl'
+    res = import_project_snapshot(conn, project_id=project_id, agent_id=agent_id, in_path=in_path)
+    print(f"Imported {res['imported_memories']} memories, {res['imported_tombstones']} tombstones (skipped {res['skipped_existing']} existing) from '{in_path}'")
+
+
+
 def cmd_export(args):
     """Write governed memory to a file every coding agent already reads."""
     conn = None

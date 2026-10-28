@@ -76,6 +76,8 @@ from .cli_ops import (
     _default_export_binding,
     cmd_export,
     cmd_compact,
+    cmd_export_project,
+    cmd_import_project,
     _print_export_results,
     cmd_stats,
     cmd_import,
@@ -294,6 +296,24 @@ def main(argv=None):
     p.add_argument('--dry-run', action='store_true',
                    help='preview compaction candidates without applying')
     p.set_defaults(func=cmd_compact)
+
+    p = sub.add_parser('export-project', help='export canonical project memories and tombstones to .memcore.jsonl',
+                       parents=[common])
+    p.add_argument('--project', required=True,
+                   help='project id/UUID or unique name')
+    p.add_argument('--out', default='.memcore.jsonl',
+                   help='output JSONL file path (default: .memcore.jsonl)')
+    p.set_defaults(func=cmd_export_project)
+
+    p = sub.add_parser('import-project', help='import project memories and tombstones from .memcore.jsonl snapshot',
+                       parents=[common])
+    p.add_argument('--project', required=True,
+                   help='project id/UUID or unique name')
+    p.add_argument('--agent', default='curator',
+                   help='agent identity performing import (default: curator)')
+    p.add_argument('--in', dest='in_file', default='.memcore.jsonl',
+                   help='input JSONL file path (default: .memcore.jsonl)')
+    p.set_defaults(func=cmd_import_project)
 
     p = sub.add_parser('journal-stats', help='content-free ingest journal health', parents=[common])
     p.add_argument('--project', default=None,

@@ -8,6 +8,7 @@ import operator
 from . import ablation as _ablation
 from . import embedding
 from . import store
+from .store_vectors import pack_binary_vector, hamming_distance
 from .write import _eval_now_iso
 from .write import _table_cols
 
@@ -129,12 +130,14 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
         params_simd = fresh_params + (q_blob, project_id, agent_id) + detail_params
         candidates = conn.execute(sql_simd, params_simd).fetchall()
     except Exception:
-        # Fallback: pure Python scan when sqlite-vec is not compiled/available
+        # Fallback: pure Python scan with Stage-1 Hamming pre-filter when available
+        has_bin = 'binary_vector' in _table_cols(conn, 'memory_embedding')
+        bin_col = ', e.binary_vector' if has_bin else ''
         sql = (
             'SELECT m.id, m.scope, m.lifecycle, m.verification, '
             '       ' + _FRESHNESS_PROJECTION_SQL + ' AS freshness, '
             '       v.content, m.owner_agent_id, e.vector, '
-            '       m.claim_fingerprint, m.pinned '
+            '       m.claim_fingerprint, m.pinned' + bin_col + ' '
             'FROM memory m '
             'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
             'JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
@@ -145,9 +148,24 @@ def _vector_search_lane(conn, project_id, agent_id, query_vec: list[float],
         )
         params = fresh_params + (project_id, agent_id) + detail_params
         cur = conn.execute(sql, params)
+        raw_rows = cur.fetchall()
+
+        prune_cutoff = max(limit * 4, 30)
+        if has_bin and len(raw_rows) > prune_cutoff:
+            q_bin = pack_binary_vector(query_vec)
+            scored_rows = []
+            for r in raw_rows:
+                bin_blob = r[10] if len(r) > 10 else None
+                h_dist = hamming_distance(q_bin, bin_blob) if bin_blob else 9999
+                scored_rows.append((h_dist, r))
+            scored_rows.sort(key=lambda x: x[0])
+            eval_rows = [x[1] for x in scored_rows[:prune_cutoff]]
+        else:
+            eval_rows = raw_rows
+
         candidates = []
-        for row in cur.fetchall():
-            mid, scope, lifecycle, verif, freshness, content, owner, blob, fp, pinned = row
+        for row in eval_rows:
+            mid, scope, lifecycle, verif, freshness, content, owner, blob, fp, pinned = row[:10]
             v_arr = array.array('f')
             v_arr.frombytes(blob)
             if len(v_arr) != q_len:

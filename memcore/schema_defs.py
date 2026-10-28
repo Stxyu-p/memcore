@@ -342,3 +342,8 @@ CREATE INDEX IF NOT EXISTS idx_triple_memory ON memory_triple(memory_id);
 CREATE INDEX IF NOT EXISTS idx_triple_version ON memory_triple(version_id);
 """
 
+_BINARY_VECTOR_COLUMN = """
+-- 0020: add 1-bit binary vector column for microsecond two-stage vector pruning
+ALTER TABLE memory_embedding ADD COLUMN binary_vector BLOB;
+"""
+

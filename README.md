@@ -57,6 +57,9 @@ Result: ✅ Only active canonical truth returned; SHA-256 of settings.py verifie
    - Memories bound to a `source_file` automatically transition their freshness status to `stale` the instant that file's SHA-256 hash changes on disk. Unrelated Git commits leave it untouched.
 4. **Hard SQL-Enforced Visibility Scopes:**
    - Project-shared (`project`) and agent-private (`private`) boundaries are enforced directly in SQLite `WHERE` clauses — never in fragile Python post-filtering. Agent A can never read Agent B's private notes.
+5. **Governed Knowledge Triples & Type-Specific Retention:**
+   - Structured `(subject, predicate, object)` triples inherit complete canonical governance: when a parent memory is superseded or tombstoned, its triples are invalidated atomically.
+   - Distinct retention policies: `constraint` memories (e.g. "never push without review") have zero decay ($\lambda = 0.0$) and high salience (1.6x), while transient `note` memories decay in days and are eligible for lossless batch compaction.
 
 ---
 
@@ -64,6 +67,7 @@ Result: ✅ Only active canonical truth returned; SHA-256 of settings.py verifie
 
 MemCore fuses lexical exactness (SQLite FTS5 BM25 with Unicode matching for technical identifiers, ports, and Thai/CJK terms) with dense vector semantics (`Xenova/multilingual-e5-small`) using Reciprocal Rank Fusion ($k=60$):
 - **100% In-Process:** Runs directly inside Python via SQLite WAL. Zero external servers, zero Docker containers, zero open network ports.
+- **Two-Stage 1-Bit Binary Quantization:** Compresses 384-dimensional dense vectors into 48-byte binary sign blobs. Pre-filters thousands of candidate memories using microsecond bitwise Hamming POPCOUNT before running exact float32 cosine reranking.
 - **Salience L1 Previews:** Optional 180-character progressive summaries prioritize negations (`never`, `must not`, `ห้าม`), numerical bounds, and file paths, saving up to 80% on prompt context overhead.
 
 ---
@@ -128,6 +132,7 @@ with MemCore(project="platform", agent="hermes") as mc:
 - **`memory_promote`**: Promote a private memory to shared project scope.
 - **`memory_reject`**: Reject a memory claim and install a cryptographic tombstone refusal guard.
 - **`memory_feedback`**: Mark recalled memories `accepted`, `rejected`, or `stale` based on actual task results.
+- **`memory_triple_query`**: Query structured entity-relation triples governed by active parent memories.
 - **`memory_status`**: Inspect database health, WAL mode, active memories, and governance metrics.
 
 ---
@@ -141,6 +146,13 @@ memcore doctor
 # Store and search memories directly from shell
 memcore remember "Python 3.10+ required for core services" --project platform --agent hermes
 memcore search "python version" --project platform --agent hermes
+
+# Consolidate historical accepted memories into decision snapshots (bitemporal compaction)
+memcore compact --project platform --days 14
+
+# Zero-daemon Git synchronization: export and import cryptographically sealed project snapshots
+memcore export-project --project platform --out .memcore.jsonl
+memcore import-project --project platform --in .memcore.jsonl
 
 # Create and verify atomic database backups
 memcore backup

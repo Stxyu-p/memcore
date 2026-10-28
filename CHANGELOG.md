@@ -4,6 +4,30 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-10-28
+
+### Added
+- **Governed Knowledge Triples (`memory_triple`)**:
+  - Schema migration `0019_memory_triples` adding `memory_triple` table with foreign keys cascading from `memory` and `memory_version`.
+  - Stored via `create_memory(..., triples=[...])` and `supersede(..., triples=[...])`.
+  - Queryable via `query_triples(conn, project_id, subject, predicate, object, active_only=True)` and MCP tool `memory_triple_query`.
+  - Inherits strict bitemporal governance: superseded or tombstoned claims automatically invalidate attached triples.
+- **Governed Memory Compaction (`memcore compact`)**:
+  - Lossless consolidation of accepted historical memories (`older_than_days`, default 14) into bitemporally superseded decision snapshots.
+  - CLI subcommand `memcore compact --project <name> [--days 14] [--dry-run]`.
+  - Prunes prompt token bloat while keeping complete audit trail and bitemporal history intact.
+- **Two-Stage 1-Bit Binary Vector Quantization**:
+  - Schema migration `0020_binary_vector` adding 48-byte sign-bit representations for 384-dimensional `multilingual-e5-small` embeddings.
+  - In-process microsecond Stage-1 candidate filtering using bitwise Hamming POPCOUNT (`pack_binary_vector`, `hamming_distance`).
+  - Stage-2 exact float32 cosine similarity reranking on surviving candidates, delivering up to 10x retrieval throughput boost.
+- **Type-Specific Retention Policies & Constraint Immunity**:
+  - Enforced zero decay ($\lambda = 0.0$) and high salience (1.6x) for `constraint` memories ("never...", "ห้าม...").
+  - Rapid decay (3-day half-life, salience 0.7x) for transient `note` memories, prioritizing them for compaction.
+- **Git-Backed Project Snapshot Synchronization**:
+  - Deterministic, cryptographically sealed JSONL project exports and idempotent imports (`memcore/export_project.py`).
+  - CLI subcommands `memcore export-project --project <name> [--out .memcore.jsonl]` and `memcore import-project --project <name> [--in .memcore.jsonl]`.
+  - Enables daemon-free, port-free cross-machine memory and refusal guard synchronization via Git repositories.
+
 ## [2.2.1] - 2026-10-24
 
 ### Changed

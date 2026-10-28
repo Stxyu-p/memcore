@@ -29,11 +29,21 @@ _DECAY_MU = 0.04  # reinforcement recency fall-off per day
 #: Per-memory_type half-life map (days). Types absent here fall back to the
 #: scalar _DECAY_LAMBDA_DEFAULT, byte-identical to the single-lambda formula.
 _DECAY_HALF_LIFE_DAYS_BY_TYPE = {
-    'fact': 60.0,
+    'constraint': 999999999.0,
     'decision': 90.0,
     'preference': 90.0,
-    'note': 30.0,
+    'fact': 60.0,
+    'note': 3.0,
     'observation': 14.0,
+}
+
+_DECAY_SALIENCE_BY_TYPE = {
+    'constraint': 1.6,
+    'decision': 1.2,
+    'preference': 1.15,
+    'fact': 1.0,
+    'note': 0.7,
+    'observation': 0.8,
 }
 
 _DECAY_SALIENCE_BY_VERIFICATION = {
@@ -62,9 +72,13 @@ def _decay_lambda_sql(alias='m'):
 
 
 def _decay_salience_sql(alias='m'):
-    """Verification/lifecycle weight; unknown values fall back to 1.0/0.8."""
+    """Type, verification, and lifecycle weight; unknown values fall back to 1.0/0.8."""
     if alias == 'm' and '_DECAY_SALIENCE_SQL_M' in globals():
         return _DECAY_SALIENCE_SQL_M
+    typ = ' '.join(
+        "WHEN '%s' THEN %s" % (value, weight)
+        for value, weight in sorted(_DECAY_SALIENCE_BY_TYPE.items())
+    )
     ver = ' '.join(
         "WHEN '%s' THEN %s" % (value, weight)
         for value, weight in sorted(_DECAY_SALIENCE_BY_VERIFICATION.items())
@@ -74,8 +88,9 @@ def _decay_salience_sql(alias='m'):
         for value, weight in sorted(_DECAY_SALIENCE_BY_LIFECYCLE.items())
     )
     return (
-        '((CASE %s.verification %s ELSE 1.0 END) * '
-        '(CASE %s.lifecycle %s ELSE 0.8 END))' % (alias, ver, alias, life)
+        '((CASE %s.type %s ELSE 1.0 END) * '
+        '(CASE %s.verification %s ELSE 1.0 END) * '
+        '(CASE %s.lifecycle %s ELSE 0.8 END))' % (alias, typ, alias, ver, alias, life)
     )
 
 

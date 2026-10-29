@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memcore-omnix"
-version = "2.4.0"
+version = "2.5.0"
 description = "Governed, bitemporal, local-first memory engine for autonomous AI agent fleets"
 readme = "README.md"
 authors = [

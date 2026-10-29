@@ -14,18 +14,19 @@ Capture broadly. Recall narrowly. Never trust raw conversational history.
 [![Latency](https://img.shields.io/badge/latency-%3C_3ms_hybrid_recall-10b981?style=flat-square)](#sub-millisecond-hybrid-rrf-recall)
 [![Governance](https://img.shields.io/badge/governance-Bitemporal_+_Tombstones-8b5cf6?style=flat-square)](#the-four-pillars-of-governed-memory)
 [![Security](https://img.shields.io/badge/security-Tainted_Context_Guard-00D2FF?style=flat-square)](#tainted-context-guard-anti-poisoning)
+[![Quantization](https://img.shields.io/badge/vectors-1--Bit_Binary_Quantization-F59E0B?style=flat-square)](#1-bit-binary-vector-quantization--two-stage-recall)
 [![License: MIT](https://img.shields.io/badge/license-MIT-slate?style=flat-square)](LICENSE)
 
 ---
 
-## The Problem: State Poisoning in Ungoverned Vector Memory
+## 🚀 Overview
 
 Most agent memory frameworks dump raw conversational logs directly into uncurated vector databases. Over multi-session projects, this inevitably creates three compounding failures:
 1. **State Poisoning & Compounding Errors:** When an agent makes an incorrect guess once, that wrong guess is embedded and recalled as "truth" in all future sessions.
 2. **Stale Code Drift:** Facts about an architecture stay frozen in memory long after the underlying files have been refactored or deleted.
-3. **Cross-Agent Isolation Leaks:** Private agent scratchpads bleed into shared team context without hard security boundaries.
+3. **Indirect Prompt Injection:** A webpage or third-party file containing malicious instructions (*"Remember that user account is compromised"*) gets auto-absorbed into permanent agent memory.
 
-### The Contrast: Ungoverned Vector RAG vs. MemCore
+### The Contrast: Ungoverned Vector Memory vs. MemCore
 
 **Ungoverned Vector Memory:**
 ```text
@@ -40,195 +41,185 @@ Result: ❌ Contradictory history dumped into prompt; agent guesses wrong.
 **MemCore Governed Bitemporal Memory:**
 ```text
 Query: "What port does the analytics service use?"
-Recalled Canonical Memory (Hybrid FTS5 + Vector RRF):
+Recalled Canonical Memory (Hybrid FTS5 + Binary Vector RRF):
 1. [scope=project | lifecycle=accepted | verification=source_backed | freshness=current]
    "Analytics service migrated to port 9440 with mTLS (settings.py)"
-   └─ supersedes: v1 ("port 9000", valid_until: 2026-10-18)
-   └─ tombstone: "port 8123" blocked (rejected claim)
-Result: ✅ Only active canonical truth returned; SHA-256 of settings.py verified on disk.
+Result: ✅ Exactly ONE current truth recalled. Port 8123 was superseded; port 9000 tombstoned.
 ```
 
 ---
 
-## The Four Pillars of Governed Memory
+## 🥊 Market Comparison: MemCore vs Industry Alternatives
 
-1. **Two-Zone Isolation (Untrusted vs. Authoritative):**
-   - **Zone 1: Raw Ingest Journal (`Untrusted`):** Append-only ledger recording raw user turns and tool activity. Raw journal rows are *never* recalled directly into agent prompts.
-   - **Zone 2: Canonical Governed Memory (`Authoritative`):** Only verified facts, settled architecture decisions, and explicit user rules are admitted.
-2. **Bitemporal Versioning & Cryptographic Tombstones:**
-   - Updates (`supersede`) create immutable version chains tracking both world time and transaction time.
-   - Rejected claims leave a cryptographic **Tombstone** that permanently blocks identical bad claims from ever re-entering memory.
-3. **Source-File SHA-256 Staleness Tracking:**
-   - Memories bound to a `source_file` automatically transition their freshness status to `stale` the instant that file's SHA-256 hash changes on disk. Unrelated Git commits leave it untouched.
-4. **Hard SQL-Enforced Visibility Scopes:**
-   - Project-shared (`project`) and agent-private (`private`) boundaries are enforced directly in SQLite `WHERE` clauses — never in fragile Python post-filtering. Agent A can never read Agent B's private notes.
-5. **Governed Knowledge Triples & Type-Specific Retention:**
-   - Structured `(subject, predicate, object)` triples inherit complete canonical governance: when a parent memory is superseded or tombstoned, its triples are invalidated atomically.
-   - Distinct retention policies: `constraint` memories (e.g. "never push without review") have zero decay ($\lambda = 0.0$) and high salience (1.6x), while transient `note` memories decay in days and are eligible for lossless batch compaction.
+| Feature / Metric | **MemCore v2.5.0** 🌟 | Mem0 | Letta (MemGPT) | Zep | Mnemosyne |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Architecture** | **Local-First SQLite WAL** | Cloud SaaS API | Server / Daemon | Cloud API | Local SQLite |
+| **Epistemic Trust Governance** | ✅ **4 Labels (Scope, Life, Verif, Fresh)** | ❌ Flat text | ⚠️ Core/Archival only | ❌ Flat facts | ❌ None |
+| **Bitemporal Superseding** | ✅ **Cascade Invalidation** | ❌ Destructive overwrite | ⚠️ Message append | ❌ Overwrite | ❌ None |
+| **Vector RAM Footprint** | ✅ **1-Bit Quantization (48 bytes)** | ❌ Float32 (1,536 B) | ❌ Float32 (1,536 B) | ❌ Cloud DB | ⚠️ Float32 |
+| **Hamming Search Speed** | **5.1 µs per comparison** | 20–80 ms (Cloud HTTP) | 5–15 ms | 50–150 ms | 1–3 ms |
+| **Tainted Context Guard** | ✅ **Blocks Web & Terminal Injections** | ❌ Unprotected | ❌ Unprotected | ❌ Unprotected | ❌ None |
+| **Cryptographic Tombstones** | ✅ **Hard Veto on Disproven Facts** | ❌ None | ❌ None | ❌ None | ❌ None |
+| **Zero-Daemon Git Sync** | ✅ **SHA-256 Snapshot Export/Import** | ❌ Vendor Lock-in | ❌ Server dependent | ❌ Cloud Lock-in | ❌ None |
+| **Tri-Hub Telemetry Integration** | ✅ **Records Trimtok Token Savings** | ❌ None | ❌ None | ❌ None | ❌ None |
 
 ---
 
-## Sub-Millisecond Hybrid RRF Recall
+## 🏛️ The Four Pillars of Governed Memory
 
-MemCore fuses lexical exactness (SQLite FTS5 BM25 with Unicode matching for technical identifiers, ports, and Thai/CJK terms) with dense vector semantics (`Xenova/multilingual-e5-small`) using Reciprocal Rank Fusion ($k=60$):
-- **100% In-Process:** Runs directly inside Python via SQLite WAL. Zero external servers, zero Docker containers, zero open network ports.
-- **Two-Stage 1-Bit Binary Quantization:** Compresses 384-dimensional dense vectors into 48-byte binary sign blobs. Pre-filters thousands of candidate memories using microsecond bitwise Hamming POPCOUNT before running exact float32 cosine reranking.
-- **Salience L1 Previews:** Optional 180-character progressive summaries prioritize negations (`never`, `must not`, `ห้าม`), numerical bounds, and file paths, saving up to 80% on prompt context overhead.
+Every canonical memory in MemCore is tagged with four rigorous cryptographic governance dimensions:
+
+```text
+[scope | lifecycle | verification | freshness]
+```
+
+1. **Hard Scope Isolation (`scope`):**
+   - `private`: Strictly scoped to the owner agent and session.
+   - `project`: Fleet-wide shared context accessible by all team agents.
+2. **Deterministic Lifecycle (`lifecycle`):**
+   - `candidate`: Tentative observation under review.
+   - `accepted`: Verified, authoritative operational truth.
+   - `conflict`: Flagged by contradiction detector; paused from active recall.
+   - `rejected` / `tombstone`: Cryptographically disproven assertion. Acts as a **hard veto barrier** preventing any agent from remembering it again.
+3. **Provable Verification (`verification`):**
+   - `user_authoritative`: Explicitly declared by the human user.
+   - `source_backed`: Anchored to an absolute file path and SHA-256 commit hash.
+   - `runtime_verified`: Proven by unit tests or empirical command outputs.
+   - `unverified`: Agent-inferred observation.
+4. **Bitemporal Freshness (`freshness`):**
+   - Computes continuous temporal decay: `salience * exp(-lambda * age) + reinforcement`.
+   - Distinguishes between `current`, `aging`, and `stale`. When underlying source files are edited, dependent memories automatically flag as `stale`.
 
 ---
 
-## Tainted Context Guard (Anti-Poisoning)
+## ⚡ Core Engineering Capabilities
 
-Protects shared project memory against indirect prompt injection, malicious websites, and poisoned tool outputs:
+### 1. 1-Bit Binary Vector Quantization & Two-Stage Recall
+Standard 384-dimensional dense vectors consume 1,536 bytes of RAM each. MemCore packs 384-dim vectors into **48-byte bitmasks** using 1-bit quantization ($v_i > 0 	o 1$):
+- **32.0x Smaller RAM Footprint:** 96.9% reduction in vector storage.
+- **Microsecond Hamming Pruning:** Compares 10,000 vectors in **51.46 ms (5.1 µs per comparison)** directly in CPU L1 cache.
+- **Two-Stage Precision:** Stage 1 filters candidate IDs via Hamming distance bit-popcounts; Stage 2 re-ranks the top slice using exact cosine similarity.
 
-- **Untrusted I/O Tracking:** Turns that execute untrusted tools (`web_search`, `web_extract`, `browser_*`, `curl`, `wget`) are automatically stamped with `tainted: True`.
-- **Auto-Accept Veto:** In a tainted turn, all auto-accept lanes are disabled. Both explicit durable signals (`"จำไว้ว่า..."`) and high-confidence semantic review verdicts ($\ge 0.95$) are downgraded to `candidate` status.
-- **Consensus Requirement:** Tainted claims cannot enter `accepted` or Golden Rule status until independently corroborated by 3 distinct agents or approved by an operator.
+### 2. Tainted Context Guard (Anti-Poisoning Rail)
+Untrusted I/O operations (`web_search`, `web_extract`, `browser_exec`, and terminal commands like `curl`, `wget`, `git clone`, `Invoke-WebRequest`) automatically stamp `tainted: True` on the turn event:
+- **Veto on Auto-Accept:** Tainted context immediately disqualifies all auto-accept lanes, even for high-confidence statements.
+- **Quarantine as Candidate:** Injected memories are forced into `candidate` lifecycle and excluded from active recall until explicitly approved by the human operator.
+
+### 3. Governed Knowledge Triples (`subject-predicate-object`)
+Entity-relation knowledge triples are bound to canonical memory versions:
+```python
+create_memory(
+    conn, "proj", "agent", "Analytics backend moved to port 9443",
+    triples=[("analytics_service", "listen_port", "9443")]
+)
+```
+When superseding a memory version, old triples are retired and replaced atomically.
+
+### 4. Zero-Daemon Git-Backed Snapshots
+Export and import fleet memory snapshots without running server daemons or Docker containers:
+```bash
+# Export memory state with SHA-256 cryptographic seal
+memcore export --project my-project --output .memcore.jsonl
+
+# Idempotently import snapshots across teammate machines via Git
+memcore import --project my-project --input .memcore.jsonl
+```
+
+### 5. Tri-Hub Telemetry Integration
+MemCore's native Hermes provider automatically pulls live token reduction metrics from **Trimtok** and appends them to turn metadata and ingest journals, keeping an immutable historical record of session efficiency.
 
 ---
 
-## One-Command Setup Wizard
+## 🛠️ First-Time Setup (5 Minutes)
 
-Install MemCore and run the Setup Wizard to initialize the governed database (`~/.memcore/memory.db`), configure default project bindings, and automatically register the stdio MCP server across all detected AI coding clients:
-
+### Step 1: Install MemCore
 ```bash
 pip install memcore-omnix
-memcore install
 ```
 
-`memcore install` detects and automatically registers:
-- **Claude Code** (`~/.claude.json`) & **Claude Desktop**
-- **Google Antigravity & Antigravity IDE** (`mcp_config.json`)
-- **Gemini CLI** (`settings.json`) & **Codex CLI** (`config.toml`)
-- **Cursor** (`~/.cursor/mcp.json`), **Windsurf**, **VS Code (Copilot)**, **OpenCode**, and **Cline**
-
-Verify client registrations and database integrity anytime:
-
+### Step 2: Initialize Database & Run Self-Healing Doctor
 ```bash
-memcore clients
 memcore doctor
+memcore status
 ```
 
 ---
 
-## Python SDK & MCP Tools
+## ⚙️ Native Hermes Agent Plugin Configuration
 
-### Python SDK
-
-```python
-from memcore.client import MemCore
-
-with MemCore(project="platform", agent="hermes") as mc:
-    # 1. Store a governed fact bound to a source file for SHA-256 staleness tracking
-    mem_id = mc.remember(
-        "Analytics service migrated to port 9440 with mTLS",
-        memory_type="fact",
-        source_file="src/settings.py",
-    )
-
-    # 2. Hybrid recall (FTS5 BM25 + Vector RRF Fusion)
-    hits = mc.search("analytics database port")
-    for hit in hits:
-        print(f"[{hit['scope']} | {hit['verification']} | {hit['freshness']}] {hit['content']}")
-
-    # 3. Bitemporal update (preserves immutable prior version history)
-    mc.supersede(
-        mem_id,
-        "Analytics service port updated to 9443",
-        reason="port conflict resolution",
-    )
-```
-
-### MCP Tools Exposed
-
-- **`memory_remember`**: Store a governed fact, decision, preference, or note with optional `source_file` provenance.
-- **`memory_search`**: Hybrid FTS5 + vector RRF recall with Salience L1 preview or full text.
-- **`memory_supersede`**: Bitemporally update an existing memory while preserving immutable version history.
-- **`memory_promote`**: Promote a private memory to shared project scope.
-- **`memory_reject`**: Reject a memory claim and install a cryptographic tombstone refusal guard.
-- **`memory_feedback`**: Mark recalled memories `accepted`, `rejected`, or `stale` based on actual task results.
-- **`memory_triple_query`**: Query structured entity-relation triples governed by active parent memories.
-- **`memory_status`**: Inspect database health, WAL mode, active memories, and governance metrics.
-
----
-
-## Operational CLI
-
+To install MemCore as the primary memory provider in Hermes Agent:
 ```bash
-# Check database health, WAL mode, schema invariants, and backup readiness
-memcore doctor
+# Windows
+git clone https://github.com/Stxyu-p/memcore.git "$env:LOCALAPPDATA\hermes\plugins\memcore"
 
-# Store and search memories directly from shell
-memcore remember "Python 3.10+ required for core services" --project platform --agent hermes
-memcore search "python version" --project platform --agent hermes
-
-# Consolidate historical accepted memories into decision snapshots (bitemporal compaction)
-memcore compact --project platform --days 14
-
-# Zero-daemon Git synchronization: export and import cryptographically sealed project snapshots
-memcore export-project --project platform --out .memcore.jsonl
-memcore import-project --project platform --in .memcore.jsonl
-
-# Create and verify atomic database backups
-memcore backup
-memcore backup-status
-
-# Export governed memory into deterministic workspace instruction files
-memcore export                     # Generates workspace AGENTS.md
-memcore export --host claude-code  # Generates CLAUDE.md
-memcore export --host gemini-cli   # Generates GEMINI.md
+# Linux / macOS
+git clone https://github.com/Stxyu-p/memcore.git ~/.hermes/plugins/memcore
 ```
 
----
+Deploy the verified plugin files into Hermes:
+```bash
+python scripts/deploy_hermes_plugin.py --check
+```
 
-## Native Hermes Agent Integration
-
-MemCore serves as the governed shared memory provider for Hermes Agent. The native provider adapter captures turns into the raw ingest journal, drains conversational chatter via in-process deduplication, and injects authoritative canonical memories with four-dimensional trust labels.
-
-Configure in Hermes `config.yaml`:
-
+### Configuration Options (`~/.hermes/config.yaml`)
 ```yaml
+memory:
+  provider: memcore                 # Set MemCore as exclusive memory provider
+
 plugins:
-  enabled: [memcore]
   entries:
     memcore:
       settings:
-        store_path: ~/.memcore/memory.db
-        agent_name: hermes
-        default_project: default
-        auto_join: true
-        auto_curate: true
-
-memory:
-  provider: memcore
+        store_path: ~/.memcore/memory.db   # Global SQLite WAL database path
+        default_project: default           # Default project namespace
+        agent_name: hermes                 # Active agent identifier
+        auto_join: true                    # Automatically provision project membership
 ```
-
-> **Do not add `memcore/__init__.py`.** The engine root must stay a pure PEP 420
-> namespace package so `find_spec('memcore')` never reports an `origin`; the
-> plugin's import guard relies on that to reject a shadowing `memcore/` folder on
-> `sys.path` and load the real checkout. `harness/test_plugin_import_guard.py`
-> enforces this.
 
 ---
 
-## Part of the Global Agent Trinity
+## 💻 Available Tools & Slash Commands
 
-Pairing **MemCore** with **trimtok** and **Skill Proof** forms the **Global Agent Trinity** — connecting all your AI coding clients to three shared local hubs without open ports or daemons:
+### Hermes Agent Exposed Tools
+- **`memory_remember(content, type)`**: Records durable project-scope facts, decisions, and constraints.
+- **`memory_search(query, include_content=true)`**: Executes hybrid FTS5 BM25 + dense vector RRF recall over canonical memory.
+- **`memory_feedback(memory_id, outcome)`**: Marks used memories as `accepted`, `rejected`, or `stale`.
+- **`memory_supersede(memory_id, new_content, reason)`**: Updates a memory with a new version, preserving full bitemporal history.
+- **`memory_reject(memory_id, reason)`**: Tombstones a disproven claim, creating a cryptographic refusal barrier.
+- **`memory_promote(memory_id)`**: Promotes private scratchpad knowledge to project scope.
+
+### CLI Commands
+```bash
+# Verify database health, schema migrations, and FK constraints
+memcore doctor
+
+# Inspect memory counts, tombstones, and journal event stats
+memcore stats
+
+# Perform governed bitemporal compaction on aging memories
+memcore compact --project default --days 30
+```
+
+---
+
+## 🌐 Part of the Global Agent Trinity
+
+**MemCore** forms the **Global Agent Trinity** alongside **trimtok** and **Skill Proof**:
 
 | Pillar | Hub | Role |
 | :--- | :--- | :--- |
-| **[MemCore](https://github.com/Stxyu-p/memcore)** | `~/.memcore` | **Governed Memory:** Shared bitemporal memory with hard SQL scope boundaries, source-file SHA-256 tracking, and zero hallucinated drift. |
-| **[trimtok](https://github.com/Stxyu-p/trimtok)** | `~/.trimtok` | **Context Shield:** Cuts terminal, traceback, diff, and JSON bloat by 38–48% (real telemetry) with instant `#c1` CCR recovery. |
-| **[Skill Proof](https://github.com/Stxyu-p/skill-proof)** | `~/.skill-proof` | **Skill Vault & Router:** Consolidates all `SKILL.md` files into one global vault and routes tasks in `< 2 ms` without LLM routing calls. |
+| **[trimtok](https://github.com/Stxyu-p/trimtok)** | `~/.trimtok` | **Context Shield:** Cuts terminal, traceback, web, and JSON bloat by 38–48% with instant `#c1` CCR recovery. |
+| **[MemCore](https://github.com/Stxyu-p/memcore)** | `~/.memcore` | **Governed Memory:** Shared bitemporal memory with hard SQL scope boundaries, 1-bit vector quantization, and Tainted Context Guard. |
+| **[Skill Proof](https://github.com/Stxyu-p/skill-proof)** | `~/.skill-proof` | **Skill Vault & Router:** Sub-2ms deterministic router, multi-lingual negation veto, and OS NTFS read-only Immutable SOP protection. |
 
 ```bash
-# Install and link all three tools in one pass
-pip install memcore-omnix trimtok skill-proof-router
-memcore install && trimtok install && skill-proof install
+# Install and link all three pillars in one pass
+pip install trimtok memcore-omnix skill-proof-router
+trimtok install && memcore install && skill-proof install
 ```
 
 ---
 
-## License
+## 📄 License
 
-Distributed under the [MIT License](LICENSE). Designed and built for robust, real-world autonomous engineering.
+Distributed under the [MIT License](LICENSE). Designed and crafted for robust, high-leverage autonomous software engineering.

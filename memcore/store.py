@@ -907,7 +907,12 @@ def _run_migration_body(conn, name, sql, rebuild_fk: bool) -> None:
         if pre_hook is not None:
             pre_hook(conn)
         for stmt in _script_statements(sql):
-            conn.execute(stmt)
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError as exc:
+                if 'duplicate column' in str(exc).lower():
+                    continue
+                raise
         post_hook = _POST_MIGRATION_HOOKS.get(name)
         if post_hook is not None:
             post_hook(conn)

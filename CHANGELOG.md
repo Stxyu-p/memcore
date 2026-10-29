@@ -4,6 +4,23 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-10-29
+
+### Added
+- **Terminal Injection Guard (`_TAINTED_CMD_RE`):**
+  - Closes the critical security gap where indirect prompt injection commands (`curl`, `wget`, `git clone`, `Invoke-WebRequest`, `iwr`) executed via `terminal` previously escaped untrusted tool detection. All external network fetches now stamp `tainted: True`, vetoing auto-accept lanes and forcing memories to remain strictly quarantined as `candidate`.
+- **Trimtok Live Telemetry Integration:**
+  - `_event_metadata` now automatically queries and attaches live Trimtok compression metrics (`trimtok v5.X usage: ... events, ... folds, ... chars saved`) into MemCore turn events and audit journals.
+- **Idempotent Migration Runner:**
+  - Migration execution handles duplicate column errors gracefully, preventing operational failures when replaying migrations against partially upgraded schemas.
+
+## [2.4.0] - 2026-10-29
+
+### Added
+- **Tainted Context Guard against Indirect Prompt Injection:**
+  - Untrusted I/O tools (`web_search`, `web_extract`, `browser_exec`) automatically veto auto-accept lanes, preventing malicious webpage instructions from injecting unverified facts directly into memory.
+- **Official Simplified Vector Brand Logo Assets.**
+
 ## [2.3.0] - 2026-10-28
 
 ### Added

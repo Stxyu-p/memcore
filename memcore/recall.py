@@ -6,6 +6,7 @@ freshness/decay ranking, and scope-enforced reads.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 
 from . import store
@@ -553,7 +554,7 @@ def search(conn, project_id, agent_id, query, limit=20,
     substr_terms = _extract_non_ascii_substr_terms(user_query)
 
     # Lane 3.3: Local vector search lane (semantic similarity)
-    if query_vec is None:
+    if query_vec is None and os.environ.get('MEMCORE_DISABLE_VECTOR') != '1':
         query_vec = _fetch_query_vector(user_query)
     vec_rows = _run_vector_lane(
         conn, project_id, agent_id, query_vec, limit,

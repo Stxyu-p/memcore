@@ -33,7 +33,7 @@ class PerformanceFastPathTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_schema_installs_fast_path_indexes(self):
-        self.assertEqual(store.MIGRATIONS[-1][0], '0018_memory_embedding')
+        self.assertEqual(store.MIGRATIONS[-1][0], '0020_binary_vector')
         memory_indexes = {
             row[1] for row in self.conn.execute("PRAGMA index_list('memory')").fetchall()
         }
@@ -100,7 +100,7 @@ class PerformanceFastPathTests(unittest.TestCase):
                 upgraded.execute('SELECT claim_fingerprint FROM memory WHERE id=\'m\'').fetchone()[0],
                 core.fingerprint('Legacy durable claim')
             )
-            self.assertEqual(store._current_version(upgraded), '0018_memory_embedding')
+            self.assertEqual(store._current_version(upgraded), '0020_binary_vector')
         finally:
             upgraded.close()
 
@@ -130,9 +130,7 @@ class PerformanceFastPathTests(unittest.TestCase):
             )
             core.reject(conn, memory_id, 'a', 'legacy unicode reject')
             conn.execute(
-                "DELETE FROM schema_migrations WHERE version IN "
-                "('0012_unicode_fingerprint_repair','0013_current_version_ownership',"
-                "'0014_provenance_seal','0015_reinforcement_decay','0016_scope_detail','0017_bitemporal_valid_until','0018_memory_embedding')"
+                "DELETE FROM schema_migrations WHERE version >= '0012_unicode_fingerprint_repair'"
             )
         finally:
             conn.close()
@@ -201,8 +199,7 @@ class PerformanceFastPathTests(unittest.TestCase):
             # Remove both 0013 and 0014 so the runner replays them in order;
             # the ownership check inside 0013 must fire before 0014 runs.
             conn.execute(
-                "DELETE FROM schema_migrations WHERE version IN "
-                "('0013_current_version_ownership','0014_provenance_seal','0015_reinforcement_decay','0016_scope_detail','0017_bitemporal_valid_until','0018_memory_embedding')"
+                "DELETE FROM schema_migrations WHERE version >= '0013_current_version_ownership'"
             )
             conn.execute(
                 'UPDATE memory SET current_version_id=?, claim_fingerprint=? WHERE id=?',

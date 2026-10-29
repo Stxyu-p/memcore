@@ -259,10 +259,13 @@ def _fuse_rrf_candidates(fts_rows, vec_rows, k_rrf=60):
         # (id, scope, lifecycle, verification, freshness, content, owner, -score, fp)
         fused.append((r[0], r[1], r[2], r[3], r[4], r[5], r[6], -score, r[8]))
 
+    _FRESH_ORDER = {'current': 0, 'aging': 1, 'stale': 2}
+
     def _fused_sort_key(c):
         lifecycle_order = _LIFECYCLE_ORDER.get(c[2], 2)
         verif_order = _VERIF_ORDER.get(c[3], 3)
-        return (lifecycle_order, verif_order, c[7])
+        fresh_order = _FRESH_ORDER.get(c[4], 2)
+        return (lifecycle_order, verif_order, fresh_order, c[7], fts_rank_map.get(c[0], 999))
 
     fused.sort(key=_fused_sort_key)
     return fused

@@ -42,7 +42,7 @@ class TestIngestJournal(IngestTestBase):
         self.assertIn('ingest_event', names)
         self.assertIn('ingest_derivation', names)
         self.assertIn('ingest_analysis', names)
-        self.assertEqual(store.MIGRATIONS[-1][0], '0018_memory_embedding')
+        self.assertEqual(store.MIGRATIONS[-1][0], '0020_binary_vector')
 
     def test_append_is_retry_safe(self):
         kwargs = dict(
@@ -268,10 +268,10 @@ class TestIngestJournal(IngestTestBase):
         ).fetchone()
         self.assertEqual(row, ('candidate', 'freshquasar preference'))
         self.assertEqual(core.search(
-            self.conn, self.project, self.alice, 'legacyzebra'
+            self.conn, self.project, self.alice, 'legacyzebra', query_vec=[]
         ), [])
         self.assertEqual(len(core.search(
-            self.conn, self.project, self.alice, 'freshquasar'
+            self.conn, self.project, self.alice, 'freshquasar', query_vec=[]
         )), 1)
 
     def test_builtin_replace_accepts_nested_adapter_old_text(self):

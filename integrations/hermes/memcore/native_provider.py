@@ -10,6 +10,7 @@ import importlib.util
 import json
 import logging
 import pathlib
+import re
 import time
 from typing import Any, Dict, List
 
@@ -318,6 +319,9 @@ class MemCoreMemoryProvider(MemoryProvider):
         'web_search', 'web_extract', 'browser_exec', 'browser_vault',
         'browser_navigate', 'curl', 'wget', 'fetch', 'http_request',
     })
+    _TAINTED_CMD_RE = re.compile(
+        r'(?i)\b(?:curl|wget|git\s+clone|invoke-webrequest|iwr|fetch|http_request|urllib|requests\.get)\b'
+    )
 
     def _event_metadata(self, messages=None, **extra):
         data = {'platform': self._platform}
@@ -338,10 +342,30 @@ class MemCoreMemoryProvider(MemoryProvider):
                             if fn_name in self.UNTRUSTED_TOOLS:
                                 is_tainted = True
                                 break
+                            if fn_name in ('terminal', 'bash', 'sh'):
+                                raw_args = tc.get('function', {}).get('arguments') or tc.get('arguments')
+                                cmd_str = ''
+                                if isinstance(raw_args, str):
+                                    cmd_str = raw_args
+                                elif isinstance(raw_args, dict):
+                                    cmd_str = str(raw_args.get('command') or '')
+                                if cmd_str and self._TAINTED_CMD_RE.search(cmd_str):
+                                    is_tainted = True
+                                    break
                 if is_tainted:
                     break
             if is_tainted:
                 data['tainted'] = True
+        # Tri-Hub Synergy: Attach trimtok cumulative compression telemetry
+        try:
+            import os, pathlib, sys
+            tt_dir = pathlib.Path(os.environ.get('LOCALAPPDATA', '')) / 'hermes/plugins/trimtok'
+            if tt_dir.is_dir() and str(tt_dir) not in sys.path:
+                sys.path.insert(0, str(tt_dir))
+            from trimtok.__init__ import _usage_summary
+            data['trimtok'] = _usage_summary().splitlines()[0]
+        except Exception:
+            pass
         data.update({k: v for k, v in extra.items() if v is not None})
         return data
 

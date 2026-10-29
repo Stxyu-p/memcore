@@ -51,16 +51,16 @@ Result: ✅ Exactly ONE current truth recalled. Port 8123 was superseded; port 9
 
 ## 🥊 Market Comparison: MemCore vs Industry Alternatives
 
-| Feature / Metric | **MemCore v2.5.0** 🌟 | Mem0 | Letta (MemGPT) | Zep | Mnemosyne |
+| Feature / Metric | **MemCore v2.5.0** 🌟 | Mem0 | Letta (MemGPT) | Zep | LangMem |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Architecture** | **Local-First SQLite WAL** | Cloud SaaS API | Server / Daemon | Cloud API | Local SQLite |
-| **Epistemic Trust Governance** | ✅ **4 Labels (Scope, Life, Verif, Fresh)** | ❌ Flat text | ⚠️ Core/Archival only | ❌ Flat facts | ❌ None |
-| **Bitemporal Superseding** | ✅ **Cascade Invalidation** | ❌ Destructive overwrite | ⚠️ Message append | ❌ Overwrite | ❌ None |
-| **Vector RAM Footprint** | ✅ **1-Bit Quantization (48 bytes)** | ❌ Float32 (1,536 B) | ❌ Float32 (1,536 B) | ❌ Cloud DB | ⚠️ Float32 |
-| **Hamming Search Speed** | **5.1 µs per comparison** | 20–80 ms (Cloud HTTP) | 5–15 ms | 50–150 ms | 1–3 ms |
-| **Tainted Context Guard** | ✅ **Blocks Web & Terminal Injections** | ❌ Unprotected | ❌ Unprotected | ❌ Unprotected | ❌ None |
+| **Architecture** | **Local-First SQLite WAL** | Cloud SaaS API | Server / Daemon | Cloud API | Cloud / PostgreSQL |
+| **Epistemic Trust Governance** | ✅ **4 Labels (Scope, Life, Verif, Fresh)** | ❌ Flat text | ⚠️ Core/Archival only | ❌ Flat facts | ❌ Flat facts |
+| **Bitemporal Superseding** | ✅ **Cascade Invalidation** | ❌ Destructive overwrite | ⚠️ Message append | ❌ Overwrite | ❌ Overwrite |
+| **Vector RAM Footprint** | ✅ **1-Bit Quantization (48 bytes)** | ❌ Float32 (1,536 B) | ❌ Float32 (1,536 B) | ❌ Cloud DB | ❌ Float32 (1,536 B) |
+| **Hamming Search Speed** | **5.1 µs per comparison** | 20–80 ms (Cloud HTTP) | 5–15 ms | 50–150 ms | 15–50 ms (Postgres) |
+| **Tainted Context Guard** | ✅ **Blocks Web & Terminal Injections** | ❌ Unprotected | ❌ Unprotected | ❌ Unprotected | ❌ Unprotected |
 | **Cryptographic Tombstones** | ✅ **Hard Veto on Disproven Facts** | ❌ None | ❌ None | ❌ None | ❌ None |
-| **Zero-Daemon Git Sync** | ✅ **SHA-256 Snapshot Export/Import** | ❌ Vendor Lock-in | ❌ Server dependent | ❌ Cloud Lock-in | ❌ None |
+| **Zero-Daemon Git Sync** | ✅ **SHA-256 Snapshot Export/Import** | ❌ Vendor Lock-in | ❌ Server dependent | ❌ Cloud Lock-in | ❌ Cloud Lock-in |
 | **Tri-Hub Telemetry Integration** | ✅ **Records Trimtok Token Savings** | ❌ None | ❌ None | ❌ None | ❌ None |
 
 ---

@@ -23,6 +23,7 @@ def config_for(path, agent='alice'):
             'store_path': path,
             'default_project': 'demo',
             'agent_name': agent,
+            'auto_curate': False,
             'inject': {'budget_chars': 1200, 'max_items': 8},
         }}}}
     }
@@ -70,6 +71,8 @@ class NativeProviderTest(unittest.TestCase):
         conn.close()
 
     def tearDown(self):
+        agent_plugin.reset_conn()
+        self.tmp.cleanup()
         if self._orig_embed_provider is None:
             os.environ.pop('MEMCORE_EMBEDDING_PROVIDER', None)
         else:
@@ -104,9 +107,30 @@ class NativeProviderTest(unittest.TestCase):
                      platform='cli', agent_identity='alice')
         return p
 
-    def tearDown(self):
-        agent_plugin.reset_conn()
-        self.tmp.cleanup()
+    def test_auto_curate_default_is_independent_of_store_path_name(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory(prefix='custom_store_') as root:
+            alternate_db = pathlib.Path(root) / 'memory.db'
+            shutil.copy2(self.db, alternate_db)
+            cfg = config_for(str(alternate_db))
+            cfg['plugins']['entries']['memcore']['settings'].pop('auto_curate')
+            p = MemCoreMemoryProvider()
+            p._load_config = lambda: cfg
+            p.initialize('session-default-auto-curate', hermes_home=root,
+                         platform='cli', agent_identity='alice')
+            self.assertTrue(p._auto_curate_enabled)
+
+    def test_auto_curate_explicit_config_is_honored(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                p = MemCoreMemoryProvider()
+                cfg = config_for(self.db)
+                cfg['plugins']['entries']['memcore']['settings']['auto_curate'] = enabled
+                p._load_config = lambda cfg=cfg: cfg
+                p.initialize(f'session-auto-curate-{enabled}', hermes_home=self.tmp.name,
+                             platform='cli', agent_identity='alice')
+                self.assertIs(p._auto_curate_enabled, enabled)
 
     def test_semantic_json_mode_validates_locally(self):
         from semantic_analyzer import HermesSemanticAnalyzer
@@ -750,4 +774,23 @@ class NativeProviderTest(unittest.TestCase):
         ]
         meta_call = p._event_metadata(call_msgs)
         self.assertTrue(meta_call.get('tainted'))
+
+    def test_event_metadata_does_not_add_relative_trimtok_path(self):
+        import sys
+        p = self.provider()
+        old = os.environ.pop('LOCALAPPDATA', None)
+        old_cwd = os.getcwd()
+        before = list(sys.path)
+        try:
+            with tempfile.TemporaryDirectory(prefix='metadata_cwd_') as cwd:
+                relative = pathlib.Path(cwd) / 'hermes' / 'plugins' / 'trimtok'
+                relative.mkdir(parents=True)
+                os.chdir(cwd)
+                p._event_metadata([])
+                os.chdir(old_cwd)
+            self.assertEqual(sys.path, before)
+        finally:
+            os.chdir(old_cwd)
+            if old is not None:
+                os.environ['LOCALAPPDATA'] = old
 

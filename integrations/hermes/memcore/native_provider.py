@@ -226,11 +226,7 @@ class MemCoreMemoryProvider(MemoryProvider):
         inject_cfg = cfg.get('inject') or {}
         self._budget = max(0, int(inject_cfg.get('budget_chars', 1200)))
         self._max_items = max(0, int(inject_cfg.get('max_items', 8)))
-        auto_curate_val = cfg.get('auto_curate')
-        if auto_curate_val is not None:
-            self._auto_curate_enabled = bool(auto_curate_val)
-        else:
-            self._auto_curate_enabled = not ('memcore_native_' in self._store_path)
+        self._auto_curate_enabled = bool(cfg.get('auto_curate', True))
         self._configure_semantic_auto_review(cfg)
         if cfg.get('auto_join'):
             agent_plugin.auto_join({'config': self._config, 'profile_name': self._profile})
@@ -359,9 +355,11 @@ class MemCoreMemoryProvider(MemoryProvider):
         # Tri-Hub Synergy: Attach trimtok cumulative compression telemetry
         try:
             import os, pathlib, sys
-            tt_dir = pathlib.Path(os.environ.get('LOCALAPPDATA', '')) / 'hermes/plugins/trimtok'
-            if tt_dir.is_dir() and str(tt_dir) not in sys.path:
-                sys.path.insert(0, str(tt_dir))
+            local_app_data = os.environ.get('LOCALAPPDATA')
+            if local_app_data:
+                tt_dir = pathlib.Path(local_app_data) / 'hermes/plugins/trimtok'
+                if tt_dir.is_dir() and str(tt_dir) not in sys.path:
+                    sys.path.insert(0, str(tt_dir))
             from trimtok.__init__ import _usage_summary
             data['trimtok'] = _usage_summary().splitlines()[0]
         except Exception:

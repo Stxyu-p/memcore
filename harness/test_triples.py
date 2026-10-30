@@ -1,6 +1,6 @@
 import unittest
 from memcore.store import open_store
-from memcore.write import create_memory, supersede
+from memcore.write import create_memory, supersede, reject
 from memcore.recall import query_triples
 
 class TestGovernedTriples(unittest.TestCase):
@@ -53,6 +53,45 @@ class TestGovernedTriples(unittest.TestCase):
         self.assertEqual(len(hits_all), 2)
         objects = {h["object"] for h in hits_all}
         self.assertEqual(objects, {"9440", "9443"})
+
+    def test_query_triples_excludes_private_scope(self):
+        create_memory(
+            self.conn, "test-proj", "test-agent", "private triple claim",
+            scope="private", lifecycle="accepted",
+            triples=[("private-subject", "secret", "private-object")],
+        )
+
+        self.assertEqual(
+            query_triples(self.conn, project_id="test-proj", subject="private-subject"),
+            [],
+        )
+        self.assertEqual(
+            query_triples(
+                self.conn, project_id="test-proj", subject="private-subject",
+                active_only=False,
+            ),
+            [],
+        )
+
+    def test_query_triples_excludes_tombstoned_project_claim(self):
+        memory_id, _ = create_memory(
+            self.conn, "test-proj", "test-agent", "tombstoned triple claim",
+            scope="project", lifecycle="accepted",
+            triples=[("gone-subject", "secret", "gone-object")],
+        )
+        reject(self.conn, memory_id, "test-agent", "disproved")
+
+        self.assertEqual(
+            query_triples(self.conn, project_id="test-proj", subject="gone-subject"),
+            [],
+        )
+        self.assertEqual(
+            query_triples(
+                self.conn, project_id="test-proj", subject="gone-subject",
+                active_only=False,
+            ),
+            [],
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -1036,7 +1036,7 @@ class TestSearch(CoreTestBase):
 
         # UPDATE path: supersede rewrites content; FTS must follow
         core.supersede(self.conn, mem_id, self.alice, 'rewritten content about quux2')
-        hits = core.search(self.conn, self.project, self.alice, 'quux2')
+        hits = core.search(self.conn, self.project, self.alice, 'quux2', query_vec=[])
         self.assertEqual(len(hits), 1, 'FTS did not pick up updated content')
 
     def test_search_supports_unicode_thai_query(self):

@@ -386,7 +386,7 @@ class ExportSafetyTests(ExportBase):
             self.conn, 'proj-e', 'agent-mika', 4)
         recalled = core.search(
             self.conn, 'proj-e', 'agent-mika', 'gateway listens upstream',
-            limit=4)
+            limit=4, query_vec=[])
         self.assertTrue(exported)
         self.assertEqual(
             [r[0] for r in exported], [r[0] for r in recalled],

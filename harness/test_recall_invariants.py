@@ -76,7 +76,8 @@ class RecallInvariantTests(unittest.TestCase):
 
     def test_collapse_never_loses_a_claim(self):
         rows = core.search(
-            self.conn, self.project, self.agents[0], "hermes profile use", limit=13)
+            self.conn, self.project, self.agents[0], "hermes profile use",
+            limit=13, query_vec=[])
         seen = {r[8] for r in rows}
         live = {
             self.conn.execute(

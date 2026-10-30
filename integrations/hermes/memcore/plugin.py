@@ -799,13 +799,14 @@ def _load_live_config():
 
 
 def _ctx_cfg(ctx):
-    cfg = None
     if isinstance(ctx, dict):
-        cfg = ctx.get('config')
+        if 'config' in ctx:
+            cfg = ctx['config']
+            return cfg if isinstance(cfg, dict) else {}
     else:
         cfg = getattr(ctx, 'config', None)
-    if isinstance(cfg, dict) and cfg:
-        return cfg
+        if isinstance(cfg, dict):
+            return cfg
     return _load_live_config()
 
 

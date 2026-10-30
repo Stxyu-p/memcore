@@ -131,6 +131,30 @@ class EmbeddingClientTests(unittest.TestCase):
         url, _, _ = embedding.resolve_config(provider='none')
         self.assertIsNone(url)
 
+    def test_resolve_config_honors_env_url_without_provider(self):
+        from unittest import mock
+
+        with mock.patch.dict('os.environ', {
+            'MEMCORE_EMBEDDING_URL': 'https://custom.example/v1/embeddings',
+            'MEMCORE_EMBEDDING_PROVIDER': '',
+            'MEMCORE_EMBEDDING_MODEL': 'custom-model',
+            'MEMCORE_EMBEDDING_KEY': 'test-key',
+        }, clear=False):
+            endpoint, model, key = embedding.resolve_config()
+        self.assertEqual(endpoint, 'https://custom.example/v1/embeddings')
+        self.assertEqual(model, 'custom-model')
+        self.assertEqual(key, 'test-key')
+
+    def test_env_url_overrides_provider_preset_url(self):
+        from unittest import mock
+
+        with mock.patch.dict('os.environ', {
+            'MEMCORE_EMBEDDING_URL': 'https://custom.example/v1/embeddings',
+        }, clear=False):
+            endpoint, model, _ = embedding.resolve_config(provider='ollama')
+        self.assertEqual(endpoint, 'https://custom.example/v1/embeddings')
+        self.assertEqual(model, 'nomic-embed-text')
+
     def test_authorization_header_sent_when_api_key_present(self):
         MockEmbeddingHandler.last_headers = None
         vec = embedding.get_embedding(

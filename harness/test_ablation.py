@@ -68,7 +68,9 @@ class AblationBase(unittest.TestCase):
                 pass
 
     def _search_hit(self, query, expected, k=3):
-        rows = core.search(self.conn, 'p-abl', 'a-abl', query, limit=k)
+        # These assertions measure the lexical alias/bigram lanes, not whether
+        # an installed semantic embedding model can independently find a hit.
+        rows = core.search(self.conn, 'p-abl', 'a-abl', query, limit=k, query_vec=[])
         texts = [r[5] for r in rows]
         return any(expected in t for t in texts), rows
 

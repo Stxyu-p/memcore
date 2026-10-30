@@ -65,7 +65,9 @@ class TestRecall2dot0(unittest.TestCase):
                 pass
 
     def _search_hit(self, query, expected_substring, k=3):
-        rows = core.search(self.conn, self.project, self.agent, query, limit=k)
+        # This suite proves lexical alias/bigram behavior; keep vector recall
+        # out of the measurement so installed models cannot mask ablations.
+        rows = core.search(self.conn, self.project, self.agent, query, limit=k, query_vec=[])
         texts = [r[5] for r in rows]
         return any(expected_substring in t for t in texts), rows
 

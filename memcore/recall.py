@@ -1030,6 +1030,8 @@ def query_triples(conn, project_id: str, subject: str | None = None,
         FROM memory_triple mt
         JOIN memory m ON mt.memory_id = m.id
         WHERE m.project_id = ?
+          AND m.scope = 'project'
+          AND """ + _recall_tombstone_guard('m') + """
     """
     params = [project_id]
     if active_only:

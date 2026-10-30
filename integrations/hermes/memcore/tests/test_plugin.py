@@ -66,6 +66,16 @@ class TestProjectResolution(unittest.TestCase):
 
 class TestBindingFromConfig(unittest.TestCase):
 
+    def test_empty_explicit_context_config_does_not_load_live_config(self):
+        with mock.patch.object(plugin, '_load_live_config', side_effect=AssertionError('live config read')):
+            self.assertEqual(plugin._ctx_cfg({'config': {}}), {})
+
+    def test_missing_context_config_still_loads_live_config(self):
+        expected = {'plugins': {'memcore': {'default_project': 'configured'}}}
+        with mock.patch.object(plugin, '_load_live_config', return_value=expected) as load:
+            self.assertEqual(plugin._ctx_cfg({}), expected)
+        load.assert_called_once_with()
+
     def test_profile_name_is_agent_default(self):
         agent, project = plugin.binding_from_config(
             make_config(project='demo'), profile_name='sora')

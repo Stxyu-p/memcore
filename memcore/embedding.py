@@ -113,7 +113,13 @@ def resolve_config(
     if p_name in ('none', 'off', 'disabled'):
         return None, '', None
     if p_name in ('local', 'onnx', 'e5', 'xenova', 'fastembed', 'model2vec') or not p_name:
-        return 'in-process', model or 'Xenova/multilingual-e5-small', None
+        if not p_name and os.environ.get('MEMCORE_EMBEDDING_URL'):
+            return (
+                os.environ['MEMCORE_EMBEDDING_URL'],
+                model or os.environ.get('MEMCORE_EMBEDDING_MODEL') or DEFAULT_MODEL,
+                api_key or os.environ.get('MEMCORE_EMBEDDING_KEY'),
+            )
+        return 'in-process', model or os.environ.get('MEMCORE_EMBEDDING_MODEL') or 'Xenova/multilingual-e5-small', None
 
     preset = PROVIDERS.get(p_name, {})
     target_url, target_model = _preset_targets(preset, model)

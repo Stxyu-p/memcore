@@ -33,7 +33,7 @@ class PerformanceFastPathTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_schema_installs_fast_path_indexes(self):
-        self.assertEqual(store.MIGRATIONS[-1][0], '0020_binary_vector')
+        self.assertEqual(store._current_version(self.conn), store.MIGRATIONS[-1][0])
         memory_indexes = {
             row[1] for row in self.conn.execute("PRAGMA index_list('memory')").fetchall()
         }
@@ -100,7 +100,7 @@ class PerformanceFastPathTests(unittest.TestCase):
                 upgraded.execute('SELECT claim_fingerprint FROM memory WHERE id=\'m\'').fetchone()[0],
                 core.fingerprint('Legacy durable claim')
             )
-            self.assertEqual(store._current_version(upgraded), '0020_binary_vector')
+            self.assertEqual(store._current_version(upgraded), store.MIGRATIONS[-1][0])
         finally:
             upgraded.close()
 

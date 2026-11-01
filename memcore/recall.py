@@ -1063,3 +1063,147 @@ def query_triples(conn, project_id: str, subject: str | None = None,
         })
     return results
 
+
+def list_memories(conn, project_id, agent_id, *, scope=None, lifecycle=None,
+                  memory_type=None, verification=None, freshness=None,
+                  limit=20, offset=0):
+    """Browse memories this agent may read, newest first. Scope-enforced.
+
+    Default hides terminal states (superseded/rejected/disabled) unless
+    ``lifecycle`` is given explicitly. Returns dict rows with full content and
+    a ``tombstoned`` flag; an empty list means empty or unauthorized project.
+    """
+    if _membership_role(conn, project_id, agent_id) is None:
+        return []
+    try:
+        limit = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit = 20
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+    where = ["m.project_id = ?", "(m.scope = 'project' OR m.owner_agent_id = ?)"]
+    params = [project_id, agent_id]
+    for col, val in (('m.scope', scope), ('m.lifecycle', lifecycle),
+                     ('m.type', memory_type), ('m.verification', verification),
+                     ('m.freshness', freshness)):
+        if val:
+            where.append(f'{col} = ?')
+            params.append(val)
+    if not lifecycle:
+        where.append("m.lifecycle NOT IN ('superseded','rejected','disabled')")
+    rows = conn.execute(
+        'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, '
+        '       m.type, m.pinned, m.critical, COALESCE(m.recall_count,0), '
+        '       m.updated_at, '
+        '       EXISTS(SELECT 1 FROM tombstone t WHERE '
+        '              t.claim_fingerprint=m.claim_fingerprint '
+        '              AND t.overridden_by IS NULL) AS tomb, '
+        '       v.content '
+        'FROM memory m '
+        'JOIN memory_version v ON v.id=m.current_version_id AND v.memory_id=m.id '
+        'WHERE ' + ' AND '.join(where) + ' '
+        'ORDER BY datetime(m.updated_at) DESC, m.id ASC LIMIT ? OFFSET ?',
+        params + [limit, offset],
+    ).fetchall()
+    return [
+        {'id': r[0], 'scope': r[1], 'lifecycle': r[2],
+         'verification': r[3], 'freshness': r[4], 'type': r[5],
+         'pinned': bool(r[6]), 'critical': bool(r[7]),
+         'recall_count': r[8], 'updated_at': r[9],
+         'tombstoned': bool(r[10]), 'content': r[11]}
+        for r in rows
+    ]
+
+
+def get_memory_detail(conn, project_id, agent_id, memory_id):
+    """Full governed record for one memory: labels, provenance, version chain,
+    tombstones, triples and linked decisions. None if absent or not accessible.
+
+    Private memories owned by another agent return None, not an error, so the
+    caller cannot use this path to probe for existence.
+    """
+    if _membership_role(conn, project_id, agent_id) is None:
+        return None
+    m = conn.execute(
+        'SELECT id, project_id, scope, owner_agent_id, type, lifecycle, '
+        '       verification, freshness, current_version_id, pinned, critical, '
+        '       created_at, updated_at, claim_fingerprint, '
+        '       COALESCE(recall_count,0), last_recalled '
+        'FROM memory WHERE id = ? AND project_id = ?',
+        (memory_id, project_id),
+    ).fetchone()
+    if m is None:
+        return None
+    if m[2] == 'private' and m[3] != agent_id:
+        return None
+    v = conn.execute(
+        'SELECT id, content, reason, created_by_agent_id, created_at, '
+        '       validated_at, valid_from, valid_until, supersedes_version_id, '
+        '       source_hash, source_commit, source_file, when_to_use '
+        'FROM memory_version WHERE id = ?', (m[8],)
+    ).fetchone()
+    versions = conn.execute(
+        'SELECT id, valid_from, valid_until, supersedes_version_id, '
+        '       created_by_agent_id, LENGTH(content) '
+        'FROM memory_version WHERE memory_id = ? '
+        'ORDER BY datetime(valid_from) ASC, id ASC', (memory_id,)
+    ).fetchall()
+    tombstones = conn.execute(
+        'SELECT id, scope, reason, created_at FROM tombstone '
+        'WHERE claim_fingerprint = ? AND overridden_by IS NULL '
+        'ORDER BY created_at DESC', (m[13],)
+    ).fetchall()
+    triples = conn.execute(
+        'SELECT subject, predicate, object FROM memory_triple '
+        'WHERE memory_id = ? AND version_id = ? ORDER BY id',
+        (memory_id, m[8])
+    ).fetchall()
+    links = []
+    if store._table_exists(conn, 'decision_link'):
+        links = conn.execute(
+            'SELECT dl.decision_id, d.title, d.status, d.lifecycle, dl.relation '
+            'FROM decision_link dl JOIN decision d ON d.id = dl.decision_id '
+            "WHERE dl.target_type = 'memory' AND dl.target_id = ? "
+            'ORDER BY dl.decision_id', (memory_id,)
+        ).fetchall()
+    return {
+        'memory': {
+            'id': m[0], 'project_id': m[1], 'scope': m[2],
+            'owner_agent_id': m[3], 'type': m[4], 'lifecycle': m[5],
+            'verification': m[6], 'freshness': m[7],
+            'current_version_id': m[8], 'pinned': bool(m[9]),
+            'critical': bool(m[10]), 'created_at': m[11],
+            'updated_at': m[12], 'claim_fingerprint': m[13],
+            'recall_count': m[14], 'last_recalled': m[15],
+        },
+        'version': (None if v is None else {
+            'id': v[0], 'content': v[1], 'reason': v[2],
+            'created_by_agent_id': v[3], 'created_at': v[4],
+            'validated_at': v[5], 'valid_from': v[6],
+            'valid_until': v[7], 'supersedes_version_id': v[8],
+            'source_hash': v[9], 'source_commit': v[10],
+            'source_file': v[11], 'when_to_use': v[12],
+        }),
+        'versions': [
+            {'id': r[0], 'valid_from': r[1], 'valid_until': r[2],
+             'supersedes_version_id': r[3], 'created_by_agent_id': r[4],
+             'content_chars': r[5]}
+            for r in versions
+        ],
+        'tombstones': [
+            {'id': r[0], 'scope': r[1], 'reason': r[2], 'created_at': r[3]}
+            for r in tombstones
+        ],
+        'triples': [
+            {'subject': r[0], 'predicate': r[1], 'object': r[2]}
+            for r in triples
+        ],
+        'decisions': [
+            {'id': r[0], 'title': r[1], 'status': r[2],
+             'lifecycle': r[3], 'relation': r[4]}
+            for r in links
+        ],
+    }
+

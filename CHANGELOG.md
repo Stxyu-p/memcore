@@ -4,6 +4,22 @@ All notable changes to MemCore are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Governed Decision Layer (`decision`):** structured records for why/how a choice was made — title, context, options, chosen, rationale, consequences, status, supersede chain, FTS, and memory/evidence links.
+- **Memory inspection CLI:** `memcore list` (filter by scope/lifecycle/type/verification/freshness, paginate, JSON) and `memcore show <id>` (labels, provenance, version chain, tombstones, triples, linked decisions).
+- **Operational snapshot:** `memcore pulse` reports counts, 24h writes/recalls, pending reviews, and a recent write activity feed.
+- **Agent-facing read tools:** `memory_list` and `memory_show` in the Hermes plugin; `memory_list` in the MCP server.
+
+### Changed
+- Browse/inspect queries now live in one core implementation (`core.list_memories`, `core.get_memory_detail`) shared by CLI, plugin, and MCP instead of three copies.
+- Migration-version tests assert the current migration dynamically instead of hardcoding an index.
+
+### Fixed
+- `export-project`/`import-project` resolve project and agent identities consistently and round-trip decisions.
+- Doctor reports decision FTS sync and unguarded rejected decisions.
+
 ## [2.5.0] - 2026-10-29
 
 ### Added

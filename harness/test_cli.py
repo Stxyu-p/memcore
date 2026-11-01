@@ -12,6 +12,12 @@ import unittest
 from memcore import __main__ as cli
 from memcore import core, store
 
+try:  # PyYAML is a declared dependency; skip binding tests on minimal envs.
+    import yaml  # noqa: F401
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
+
 
 class CliImportTests(unittest.TestCase):
     def setUp(self):
@@ -539,6 +545,7 @@ class CliImportTests(unittest.TestCase):
         self._stage_plugin_deployment(target=pathlib.Path(home) / 'plugins' / 'memcore')
         return home
 
+    @unittest.skipUnless(_HAS_YAML, 'PyYAML not installed')
     def test_doctor_accepts_matching_enabled_profile_binding(self):
         home = self._write_hermes_config('checker')
         conn = store.open_store(self.db)
@@ -564,6 +571,7 @@ class CliImportTests(unittest.TestCase):
                 os.environ['HERMES_HOME'] = old
         self.assertIn('default: OK', output.getvalue())
 
+    @unittest.skipUnless(_HAS_YAML, 'PyYAML not installed')
     def test_doctor_accepts_exact_project_id_binding(self):
         home = self._write_hermes_config('checker', project='uuid-project-123')
         conn = store.open_store(self.db)
@@ -590,6 +598,7 @@ class CliImportTests(unittest.TestCase):
                 os.environ['HERMES_HOME'] = old
         self.assertIn('default: OK', output.getvalue())
 
+    @unittest.skipUnless(_HAS_YAML, 'PyYAML not installed')
     def test_doctor_fails_closed_on_ambiguous_project_slug(self):
         home = self._write_hermes_config('checker', project='same-slug')
         conn = store.open_store(self.db)
@@ -612,6 +621,7 @@ class CliImportTests(unittest.TestCase):
                 os.environ['HERMES_HOME'] = old
         self.assertIn('ambiguous_project:same-slug', output.getvalue())
 
+    @unittest.skipUnless(_HAS_YAML, 'PyYAML not installed')
     def test_doctor_detects_enabled_profile_membership_drift(self):
         home = self._write_hermes_config('missing-agent')
         old = os.environ.get('HERMES_HOME')

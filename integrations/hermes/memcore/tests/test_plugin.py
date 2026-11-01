@@ -365,7 +365,7 @@ class TestToolsAgainstRealStore(ToolTestBase):
         shown = json.loads(plugin.tool_memory_show(
             {'memory_id': out['memory_id']}, self.ctx('mika')))
         self.assertFalse(shown['success'])
-        self.assertIn('private', shown['error'])
+        self.assertIn('not accessible', shown['error'])
 
     def test_remember_and_supersede_store_source_provenance(self):
         source = pathlib.Path(self.tmp.name) / 'config.py'

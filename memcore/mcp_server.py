@@ -443,33 +443,22 @@ def _tool_list(args: dict[str, Any]) -> dict[str, Any]:
     include_content = bool(args.get("include_content", False))
     with _client(args) as mc:
         assert mc.conn is not None
-        where = ["m.project_id = ?", "(m.scope = 'project' OR m.owner_agent_id = ?)"]
-        params: list[Any] = [mc.project, mc.agent]
-        for key, col in (("scope", "m.scope"), ("lifecycle", "m.lifecycle"),
-                         ("type", "m.type"), ("verification", "m.verification"),
-                         ("freshness", "m.freshness")):
-            val = args.get(key)
-            if val:
-                where.append(f"{col} = ?")
-                params.append(str(val))
-        if not args.get("lifecycle"):
-            where.append("m.lifecycle NOT IN ('superseded','rejected','disabled')")
-        rows = mc.conn.execute(
-            "SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, "
-            "       m.type, COALESCE(m.recall_count,0), m.updated_at, v.content "
-            "FROM memory m "
-            "JOIN memory_version v ON v.id=m.current_version_id AND v.memory_id=m.id "
-            "WHERE " + " AND ".join(where) + " "
-            "ORDER BY datetime(m.updated_at) DESC, m.id ASC LIMIT ? OFFSET ?",
-            params + [limit, offset],
-        ).fetchall()
+        rows = core.list_memories(
+            mc.conn, mc.project, mc.agent,
+            scope=args.get("scope"), lifecycle=args.get("lifecycle"),
+            memory_type=args.get("type"),
+            verification=args.get("verification"),
+            freshness=args.get("freshness"),
+            limit=limit, offset=offset,
+        )
         items = []
         for r in rows:
-            content = r[8] or ""
+            content = r["content"] or ""
             items.append({
-                "id": r[0], "scope": r[1], "lifecycle": r[2],
-                "verification": r[3], "freshness": r[4], "type": r[5],
-                "recall_count": r[6], "updated_at": r[7],
+                "id": r["id"], "scope": r["scope"], "lifecycle": r["lifecycle"],
+                "verification": r["verification"], "freshness": r["freshness"],
+                "type": r["type"], "recall_count": r["recall_count"],
+                "updated_at": r["updated_at"],
                 "content": content if include_content else content[:180],
                 "content_truncated": (not include_content) and len(content) > 180,
                 "content_chars": len(content),

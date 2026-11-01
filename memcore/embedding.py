@@ -15,8 +15,6 @@ import pathlib
 import struct
 import threading
 import time
-import urllib.error
-import urllib.request
 from typing import Any
 
 def _find_global_e5_dir() -> pathlib.Path | None:
@@ -389,6 +387,11 @@ def get_embeddings_batch(
     }
     if target_key:
         headers['Authorization'] = f'Bearer {target_key}'
+
+    # Lazy: urllib pulls http.client (~100ms) into every CLI startup, and the
+    # HTTP lane only runs when an endpoint is explicitly configured.
+    import urllib.error
+    import urllib.request
 
     req = urllib.request.Request(
         target_endpoint,

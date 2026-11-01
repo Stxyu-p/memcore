@@ -183,6 +183,8 @@ plugins:
 ### Hermes Agent Exposed Tools
 - **`memory_remember(content, type)`**: Records durable project-scope facts, decisions, and constraints.
 - **`memory_search(query, include_content=true)`**: Executes hybrid FTS5 BM25 + dense vector RRF recall over canonical memory.
+- **`memory_list(lifecycle, type, limit, offset)`**: Browses stored memories without a query; returns labels and previews.
+- **`memory_show(memory_id)`**: Inspects one memory in full: labels, provenance, version chain, tombstones, triples, linked decisions.
 - **`memory_feedback(memory_id, outcome)`**: Marks used memories as `accepted`, `rejected`, or `stale`.
 - **`memory_supersede(memory_id, new_content, reason)`**: Updates a memory with a new version, preserving full bitemporal history.
 - **`memory_reject(memory_id, reason)`**: Tombstones a disproven claim, creating a cryptographic refusal barrier.
@@ -195,6 +197,9 @@ memcore doctor
 
 # Inspect memory counts, tombstones, and journal event stats
 memcore stats
+
+# One-screen operational snapshot: counts, 24h writes/recalls, recent activity
+memcore pulse --project default --agent hermes
 
 # Browse what is actually stored (filter by scope/lifecycle/type, paginate)
 memcore list --project default --agent hermes --lifecycle accepted --limit 20

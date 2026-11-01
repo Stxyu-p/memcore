@@ -1,6 +1,7 @@
 """MemCore recall — query tokenization: fleet aliases, Thai bigrams, FTS5 query building."""
 from __future__ import annotations
 
+import re
 import unicodedata
 
 from . import ablation as _ablation
@@ -10,13 +11,38 @@ from . import ablation as _ablation
 
 # —— Lane 3.2: Fleet alias map (static, query-side only).
 # Add entries ONLY from failing baseline paraphrase queries.
-# Substring containment on lowered raw query, so glued Thai matches.
+# ASCII keys match whole words; Thai keys match substrings (glued script).
 _FLEET_ALIASES = {
     'ai gateway': '9router',
     'ทีม': 'fleet roster',
     'พี่โชค': 'thai',
     'สแกน': 'scan pacing',
+    # Bilingual bridges measured against the live store. Rule: Thai values must
+    # be short (<4 chars) or absent, because long Thai values feed the bigram
+    # lane and common bigrams match unrelated text. Prefer Thai key -> English
+    # value (safe) over English key -> long Thai value (noisy).
+    'laptop': 'thinkpad',
+    'notebook': 'thinkpad',
+    'battery': 'แบต',
+    'แบต': 'battery',
+    'processor': 'โปรเซสเซอร์ cpu',
+    'cpu': 'โปรเซสเซอร์ processor',
+    'โปรเซสเซอร์': 'processor cpu',
+    'หน่วยความจำ': 'ram',
+    'ไดรเวอร์': 'driver',
+    'อัปเดต': 'update',
+    'ติดตั้ง': 'install',
 }
+
+
+def _alias_matches(key: str, lowered_query: str) -> bool:
+    """ASCII aliases must match whole words ('ram' must not hit 'program')."""
+    if key.isascii():
+        return re.search(
+            r'(?<![a-z0-9])' + re.escape(key) + r'(?![a-z0-9])',
+            lowered_query,
+        ) is not None
+    return key in lowered_query
 
 
 
@@ -34,7 +60,7 @@ def _expand_aliases(query: str) -> str:
     q = str(query).lower()
     expansions = []
     for key, val in _FLEET_ALIASES.items():
-        if key in q:
+        if _alias_matches(key, q):
             expansions.append(val)
     if expansions:
         return query + ' ' + ' '.join(expansions)

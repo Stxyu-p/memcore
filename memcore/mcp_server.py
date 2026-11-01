@@ -161,6 +161,38 @@ TOOLS = [
         },
     },
     {
+        "name": "memory_list",
+        "description": (
+            "Browse stored memories without a query: filter by scope/lifecycle/type/verification/freshness, paginated. "
+            "Previews by default; include_content=true for full bodies."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "enum": ["project", "private"]},
+                "lifecycle": {
+                    "type": "string",
+                    "enum": ["candidate", "accepted", "conflict", "superseded", "rejected", "disabled"],
+                },
+                "type": {"type": "string", "description": "Memory type (fact, decision, preference, note, observation, ...)"},
+                "verification": {
+                    "type": "string",
+                    "enum": ["unverified", "source_backed", "runtime_verified", "user_authoritative"],
+                },
+                "freshness": {"type": "string", "enum": ["current", "aging", "stale"]},
+                "limit": {"type": "integer", "description": "Page size (default: 20, max: 100)"},
+                "offset": {"type": "integer", "description": "Pagination offset (default: 0)"},
+                "include_content": {
+                    "type": "boolean",
+                    "description": "Return full content instead of preview (default: false)",
+                },
+                "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
+                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "memory_get",
         "description": (
             "Layer-3 progressive disclosure: fetch full governed memory records (content, when_to_use, provenance, optional version history and evidence) by ID list."
@@ -405,6 +437,52 @@ def _tool_search(args: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _tool_list(args: dict[str, Any]) -> dict[str, Any]:
+    limit = max(1, min(100, int(args.get("limit") or 20)))
+    offset = max(0, int(args.get("offset") or 0))
+    include_content = bool(args.get("include_content", False))
+    with _client(args) as mc:
+        assert mc.conn is not None
+        where = ["m.project_id = ?", "(m.scope = 'project' OR m.owner_agent_id = ?)"]
+        params: list[Any] = [mc.project, mc.agent]
+        for key, col in (("scope", "m.scope"), ("lifecycle", "m.lifecycle"),
+                         ("type", "m.type"), ("verification", "m.verification"),
+                         ("freshness", "m.freshness")):
+            val = args.get(key)
+            if val:
+                where.append(f"{col} = ?")
+                params.append(str(val))
+        if not args.get("lifecycle"):
+            where.append("m.lifecycle NOT IN ('superseded','rejected','disabled')")
+        rows = mc.conn.execute(
+            "SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, "
+            "       m.type, COALESCE(m.recall_count,0), m.updated_at, v.content "
+            "FROM memory m "
+            "JOIN memory_version v ON v.id=m.current_version_id AND v.memory_id=m.id "
+            "WHERE " + " AND ".join(where) + " "
+            "ORDER BY datetime(m.updated_at) DESC, m.id ASC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
+        items = []
+        for r in rows:
+            content = r[8] or ""
+            items.append({
+                "id": r[0], "scope": r[1], "lifecycle": r[2],
+                "verification": r[3], "freshness": r[4], "type": r[5],
+                "recall_count": r[6], "updated_at": r[7],
+                "content": content if include_content else content[:180],
+                "content_truncated": (not include_content) and len(content) > 180,
+                "content_chars": len(content),
+            })
+        return {
+            "success": True,
+            "project": mc.project,
+            "agent": mc.agent,
+            "count": len(items),
+            "results": items,
+        }
+
+
 def _tool_get(args: dict[str, Any]) -> dict[str, Any]:
     raw_ids = args.get("memory_ids")
     single_id = args.get("memory_id")
@@ -574,6 +652,7 @@ def _tool_status(args: dict[str, Any]) -> dict[str, Any]:
 _HANDLERS = {
     "memory_remember": _tool_remember,
     "memory_search": _tool_search,
+    "memory_list": _tool_list,
     "memory_get": _tool_get,
     "memory_promote": _tool_promote,
     "memory_supersede": _tool_supersede,

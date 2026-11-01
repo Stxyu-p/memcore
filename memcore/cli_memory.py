@@ -284,6 +284,75 @@ def cmd_show(args):
         print('linked decisions: none')
 
 
+def cmd_pulse(args):
+    """One-screen operational snapshot: counts, recent writes/recalls, pending, freshness."""
+    from . import ingest
+    conn = _open_readonly(args)
+    try:
+        project_id = _project_or_exit(conn, args.project)
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        vis = "(m.scope = 'project' OR m.owner_agent_id = ?)"
+        base = f'FROM memory m WHERE m.project_id = ? AND {vis}'
+        params = [project_id, agent_id]
+        by_lifecycle = dict(conn.execute(
+            f'SELECT m.lifecycle, COUNT(*) {base} GROUP BY m.lifecycle', params
+        ).fetchall())
+        by_freshness = dict(conn.execute(
+            f'SELECT m.freshness, COUNT(*) {base} GROUP BY m.freshness', params
+        ).fetchall())
+        writes_24h = conn.execute(
+            f"SELECT COUNT(*) {base} "
+            "AND datetime(m.created_at) >= datetime('now','-1 day')", params
+        ).fetchone()[0]
+        recalled_24h = conn.execute(
+            f'SELECT COUNT(*) {base} AND m.last_recalled IS NOT NULL '
+            "AND datetime(m.last_recalled) >= datetime('now','-1 day')", params
+        ).fetchone()[0]
+        last = conn.execute(
+            'SELECT m.id, m.updated_at, v.content FROM memory m '
+            'JOIN memory_version v ON v.id=m.current_version_id AND v.memory_id=m.id '
+            f'WHERE m.project_id = ? AND {vis} '
+            'ORDER BY datetime(m.updated_at) DESC, m.id ASC LIMIT 1', params
+        ).fetchone()
+        decisions = conn.execute(
+            "SELECT COUNT(*) FROM decision WHERE project_id = ? "
+            "AND (scope = 'project' OR owner_agent_id = ?)", params
+        ).fetchone()[0]
+        journal = ingest.journal_stats(conn, project_id, agent_id)
+    finally:
+        conn.close()
+    total = sum(by_lifecycle.values())
+    preview = ''
+    if last is not None:
+        preview = ' '.join(str(last[2] or '').split())[:80]
+    data = {
+        'memories': {'total': total, 'by_lifecycle': by_lifecycle,
+                     'by_freshness': by_freshness},
+        'decisions': decisions,
+        'writes_24h': writes_24h,
+        'recalled_24h_distinct': recalled_24h,
+        'pending_reviews': journal.get('semantic_review_pending', 0),
+        'last_write': (None if last is None else
+                       {'id': last[0], 'at': last[1], 'preview': preview}),
+    }
+    if args.json:
+        _out(data)
+        return
+    print(f'memories: {total}  ' +
+          ' '.join(f'{k}={v}' for k, v in sorted(by_lifecycle.items())))
+    print(f'decisions: {decisions}')
+    print('freshness: ' +
+          ' '.join(f'{k}={v}' for k, v in sorted(by_freshness.items())))
+    print(f'writes (24h): {writes_24h}   recalled (24h, distinct): {recalled_24h}')
+    print(f"pending reviews: {data['pending_reviews']}")
+    if last is not None:
+        print(f'last write: {last[0]}  {last[1]}  {preview}')
+    else:
+        print('last write: none')
+
+
 def cmd_promote(args):
     conn = _open(args)
     try:

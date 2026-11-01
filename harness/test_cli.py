@@ -852,6 +852,20 @@ class CliListShowTests(unittest.TestCase):
         self.assertIn('port 9443', text)
         self.assertIn('tombstones: none active', text)
 
+    def test_pulse_reports_counts_and_last_write(self):
+        text = self._run(['pulse', '--project', 'ls', '--agent', 'ls'])
+        self.assertIn('memories: 1', text)
+        self.assertIn('decisions: 0', text)
+        self.assertIn(self.mem_id, text)
+
+    def test_pulse_json_is_machine_readable(self):
+        text = self._run(
+            ['pulse', '--project', 'ls', '--agent', 'ls', '--json']
+        )
+        data = json.loads(text)
+        self.assertEqual(data['memories']['total'], 1)
+        self.assertEqual(data['last_write']['id'], self.mem_id)
+
     def test_show_missing_memory_is_clean_error(self):
         with self.assertRaises(SystemExit) as ctx:
             self._run(['show', 'mem-nope', '--agent', 'ls'])

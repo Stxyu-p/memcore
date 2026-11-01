@@ -644,6 +644,154 @@ def tool_memory_search(args, ctx=None):
         return _tool_error('%s: %s' % (type(e).__name__, e))
 
 
+def tool_memory_list(args, ctx=None):
+    try:
+        agent_name, project = require_binding(_ctx_cfg(ctx), _ctx_profile(ctx))
+    except ConfigError as e:
+        return _tool_error(str(e))
+    conn, store_error = _tool_store_or_error(_ctx_cfg(ctx))
+    if store_error:
+        return store_error
+    assert conn is not None
+    try:
+        pid, aid = _require_bound_membership(conn, project, agent_name)
+        where = ["m.project_id = ?", "(m.scope = 'project' OR m.owner_agent_id = ?)"]
+        params = [pid, aid]
+        for key, col in (('lifecycle', 'm.lifecycle'),
+                         ('type', 'm.type'), ('verification', 'm.verification'),
+                         ('freshness', 'm.freshness')):
+            val = args.get(key)
+            if val:
+                where.append(f'{col} = ?')
+                params.append(val)
+        if not args.get('lifecycle'):
+            where.append("m.lifecycle NOT IN ('superseded','rejected','disabled')")
+        try:
+            limit = max(1, min(int(args.get('limit', 20)), 100))
+            offset = max(0, int(args.get('offset', 0)))
+        except (TypeError, ValueError):
+            return _tool_error('limit/offset must be integers')
+        rows = conn.execute(
+            'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, '
+            '       m.type, COALESCE(m.recall_count,0), m.updated_at, v.content '
+            'FROM memory m '
+            'JOIN memory_version v ON v.id=m.current_version_id AND v.memory_id=m.id '
+            'WHERE ' + ' AND '.join(where) + ' '
+            'ORDER BY datetime(m.updated_at) DESC, m.id ASC LIMIT ? OFFSET ?',
+            params + [limit, offset]
+        ).fetchall()
+        include = bool(args.get('include_content'))
+        items = []
+        for r in rows:
+            text, truncated = _preview_search_content(r[8], SEARCH_PREVIEW_CHARS)
+            items.append({
+                'id': r[0], 'scope': r[1], 'lifecycle': r[2],
+                'verification': r[3], 'freshness': r[4], 'type': r[5],
+                'recall_count': r[6], 'updated_at': r[7],
+                'content': r[8] if include else text,
+                'content_truncated': False if include else truncated,
+                'content_chars': len(r[8] or ''),
+            })
+        return _tool_ok(count=len(items), results=items)
+    except Exception as e:
+        return _tool_error('%s: %s' % (type(e).__name__, e))
+
+
+def tool_memory_show(args, ctx=None):
+    memory_id, err = _tool_str_arg(args, 'memory_id', required=True)
+    if err:
+        return _tool_error(err)
+    try:
+        agent_name, project = require_binding(_ctx_cfg(ctx), _ctx_profile(ctx))
+    except ConfigError as e:
+        return _tool_error(str(e))
+    conn, store_error = _tool_store_or_error(_ctx_cfg(ctx))
+    if store_error:
+        return store_error
+    assert conn is not None
+    try:
+        _pid, aid = _require_bound_memory(conn, project, agent_name, memory_id)
+        m = conn.execute(
+            'SELECT id, project_id, scope, owner_agent_id, type, lifecycle, '
+            '       verification, freshness, current_version_id, pinned, critical, '
+            '       created_at, updated_at, claim_fingerprint, '
+            '       COALESCE(recall_count,0), last_recalled '
+            'FROM memory WHERE id = ?', (memory_id,)
+        ).fetchone()
+        if m is None:
+            return _tool_error('memory not found')
+        if m[2] == 'private' and m[3] != aid:
+            return _tool_error('private memory is owned by another agent')
+        v = conn.execute(
+            'SELECT id, content, reason, created_by_agent_id, created_at, '
+            '       validated_at, valid_from, valid_until, supersedes_version_id, '
+            '       source_hash, source_commit, source_file, when_to_use '
+            'FROM memory_version WHERE id = ?', (m[8],)
+        ).fetchone()
+        versions = conn.execute(
+            'SELECT id, valid_from, valid_until, supersedes_version_id, '
+            '       created_by_agent_id, LENGTH(content) '
+            'FROM memory_version WHERE memory_id = ? '
+            'ORDER BY datetime(valid_from) ASC, id ASC', (memory_id,)
+        ).fetchall()
+        tombstones = conn.execute(
+            'SELECT id, scope, reason, created_at FROM tombstone '
+            'WHERE claim_fingerprint = ? AND overridden_by IS NULL '
+            'ORDER BY created_at DESC', (m[13],)
+        ).fetchall()
+        triples = conn.execute(
+            'SELECT subject, predicate, object FROM memory_triple '
+            'WHERE memory_id = ? AND version_id = ? ORDER BY id',
+            (memory_id, m[8])
+        ).fetchall()
+        links = conn.execute(
+            'SELECT dl.decision_id, d.title, d.status, d.lifecycle, dl.relation '
+            'FROM decision_link dl JOIN decision d ON d.id = dl.decision_id '
+            "WHERE dl.target_type = 'memory' AND dl.target_id = ? "
+            'ORDER BY dl.decision_id', (memory_id,)
+        ).fetchall()
+        return _tool_ok(
+            memory={
+                'id': m[0], 'project_id': m[1], 'scope': m[2],
+                'owner_agent_id': m[3], 'type': m[4], 'lifecycle': m[5],
+                'verification': m[6], 'freshness': m[7],
+                'current_version_id': m[8], 'pinned': bool(m[9]),
+                'critical': bool(m[10]), 'created_at': m[11],
+                'updated_at': m[12], 'claim_fingerprint': m[13],
+                'recall_count': m[14], 'last_recalled': m[15],
+            },
+            version=(None if v is None else {
+                'id': v[0], 'content': v[1], 'reason': v[2],
+                'created_by_agent_id': v[3], 'created_at': v[4],
+                'validated_at': v[5], 'valid_from': v[6],
+                'valid_until': v[7], 'supersedes_version_id': v[8],
+                'source_hash': v[9], 'source_commit': v[10],
+                'source_file': v[11], 'when_to_use': v[12],
+            }),
+            versions=[
+                {'id': r[0], 'valid_from': r[1], 'valid_until': r[2],
+                 'supersedes_version_id': r[3], 'created_by_agent_id': r[4],
+                 'content_chars': r[5]}
+                for r in versions
+            ],
+            tombstones=[
+                {'id': r[0], 'scope': r[1], 'reason': r[2], 'created_at': r[3]}
+                for r in tombstones
+            ],
+            triples=[
+                {'subject': r[0], 'predicate': r[1], 'object': r[2]}
+                for r in triples
+            ],
+            decisions=[
+                {'id': r[0], 'title': r[1], 'status': r[2],
+                 'lifecycle': r[3], 'relation': r[4]}
+                for r in links
+            ],
+        )
+    except Exception as e:
+        return _tool_error('%s: %s' % (type(e).__name__, e))
+
+
 def tool_memory_promote(args, ctx=None):
     memory_id, err = _tool_str_arg(args, 'memory_id', required=True)
     if err:
@@ -921,6 +1069,44 @@ TOOL_SCHEMAS = [
             'required': ['query'],
         },
         'handler': tool_memory_search,
+    },
+    {
+        'name': 'memory_list',
+        'description': 'Browse memories in the bound project: filter by scope/lifecycle/type, paginated. Previews by default; include_content for full bodies.',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'lifecycle': {
+                    'type': 'string',
+                    'enum': ['candidate', 'accepted', 'conflict',
+                             'superseded', 'rejected', 'disabled'],
+                },
+                'type': {'type': 'string'},
+                'verification': {
+                    'type': 'string',
+                    'enum': ['unverified', 'source_backed',
+                             'runtime_verified', 'user_authoritative'],
+                },
+                'freshness': {
+                    'type': 'string',
+                    'enum': ['current', 'aging', 'stale'],
+                },
+                'limit': {'type': 'integer'},
+                'offset': {'type': 'integer'},
+                'include_content': {'type': 'boolean'},
+            },
+        },
+        'handler': tool_memory_list,
+    },
+    {
+        'name': 'memory_show',
+        'description': 'Inspect one memory in full: labels, provenance, version chain, tombstones, triples, linked decisions.',
+        'parameters': {
+            'type': 'object',
+            'properties': {'memory_id': {'type': 'string'}},
+            'required': ['memory_id'],
+        },
+        'handler': tool_memory_show,
     },
     {
         'name': 'memory_promote',

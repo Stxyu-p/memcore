@@ -268,11 +268,12 @@ class TestRecallBlock(unittest.TestCase):
 
 class TestToolSchemas(unittest.TestCase):
 
-    def test_six_tools_registered(self):
+    def test_eight_tools_registered(self):
         names = [t['name'] for t in plugin.TOOL_SCHEMAS]
         self.assertEqual(names, [
-            'memory_remember', 'memory_search', 'memory_promote',
-            'memory_supersede', 'memory_reject', 'memory_feedback'])
+            'memory_remember', 'memory_search', 'memory_list', 'memory_show',
+            'memory_promote', 'memory_supersede', 'memory_reject',
+            'memory_feedback'])
 
     def test_no_identity_or_scope_params_in_schemas(self):
         forbidden = {'agent', 'agent_id', 'agent_name', 'project',
@@ -325,6 +326,46 @@ class TestToolsAgainstRealStore(ToolTestBase):
         self.assertEqual(len(seen['results']), 1)
         self.assertIn('go build', seen['results'][0]['content'])
         self.assertEqual(seen['results'][0]['freshness'], 'current')
+
+    def test_memory_list_browses_bound_project(self):
+        out = json.loads(plugin.tool_memory_remember(
+            {'content': 'Listable project fact'}, self.ctx('sora')))
+        self.assertTrue(out['success'], out)
+        listed = json.loads(plugin.tool_memory_list(
+            {'limit': 10}, self.ctx('sora')))
+        self.assertTrue(listed['success'], listed)
+        ids = [r['id'] for r in listed['results']]
+        self.assertIn(out['memory_id'], ids)
+        row = [r for r in listed['results'] if r['id'] == out['memory_id']][0]
+        self.assertEqual(row['lifecycle'], 'accepted')
+        self.assertEqual(row['type'], 'note')
+
+    def test_memory_show_returns_provenance_and_versions(self):
+        out = json.loads(plugin.tool_memory_remember(
+            {'content': 'Showable fact', 'source_commit': 'abc123'},
+            self.ctx('sora')))
+        self.assertTrue(out['success'], out)
+        shown = json.loads(plugin.tool_memory_show(
+            {'memory_id': out['memory_id']}, self.ctx('sora')))
+        self.assertTrue(shown['success'], shown)
+        self.assertEqual(shown['memory']['id'], out['memory_id'])
+        self.assertEqual(shown['version']['content'], 'Showable fact')
+        self.assertEqual(shown['version']['source_commit'], 'abc123')
+        self.assertEqual(len(shown['versions']), 1)
+
+    def test_memory_show_blocks_other_agents_private_memory(self):
+        out = json.loads(plugin.tool_memory_remember(
+            {'content': 'private-ish fact'}, self.ctx('sora')))
+        self.assertTrue(out['success'], out)
+        conn = plugin._get_conn(self.store)
+        conn.execute(
+            "UPDATE memory SET scope='private' WHERE id=?", (out['memory_id'],)
+        )
+        conn.commit()
+        shown = json.loads(plugin.tool_memory_show(
+            {'memory_id': out['memory_id']}, self.ctx('mika')))
+        self.assertFalse(shown['success'])
+        self.assertIn('private', shown['error'])
 
     def test_remember_and_supersede_store_source_provenance(self):
         source = pathlib.Path(self.tmp.name) / 'config.py'

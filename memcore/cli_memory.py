@@ -316,6 +316,15 @@ def cmd_pulse(args):
             f'WHERE m.project_id = ? AND {vis} '
             'ORDER BY datetime(m.updated_at) DESC, m.id ASC LIMIT 1', params
         ).fetchone()
+        recent = conn.execute(
+            'SELECT a.action, a.memory_id, a.created_at, m.lifecycle, m.type, v.content '
+            'FROM audit_event a '
+            'JOIN memory m ON m.id = a.memory_id '
+            'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
+            'WHERE a.project_id = ? AND a.memory_id IS NOT NULL '
+            "  AND (m.scope = 'project' OR m.owner_agent_id = ?) "
+            'ORDER BY a.id DESC LIMIT 5', params
+        ).fetchall()
         decisions = conn.execute(
             "SELECT COUNT(*) FROM decision WHERE project_id = ? "
             "AND (scope = 'project' OR owner_agent_id = ?)", params
@@ -336,6 +345,12 @@ def cmd_pulse(args):
         'pending_reviews': journal.get('semantic_review_pending', 0),
         'last_write': (None if last is None else
                        {'id': last[0], 'at': last[1], 'preview': preview}),
+        'recent_writes': [
+            {'action': r[0], 'memory_id': r[1], 'at': r[2],
+             'lifecycle': r[3], 'type': r[4],
+             'preview': ' '.join(str(r[5] or '').split())[:80]}
+            for r in recent
+        ],
     }
     if args.json:
         _out(data)
@@ -351,6 +366,11 @@ def cmd_pulse(args):
         print(f'last write: {last[0]}  {last[1]}  {preview}')
     else:
         print('last write: none')
+    if recent:
+        print('recent writes:')
+        for r in recent:
+            preview = ' '.join(str(r[5] or '').split())[:70]
+            print(f'  {r[0]:<12} {r[1]}  {r[2]}  {r[3]}/{r[4]}  {preview}')
 
 
 def cmd_promote(args):

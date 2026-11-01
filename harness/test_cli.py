@@ -857,6 +857,8 @@ class CliListShowTests(unittest.TestCase):
         self.assertIn('memories: 1', text)
         self.assertIn('decisions: 0', text)
         self.assertIn(self.mem_id, text)
+        self.assertIn('recent writes:', text)
+        self.assertIn('create', text)
 
     def test_pulse_json_is_machine_readable(self):
         text = self._run(
@@ -865,6 +867,9 @@ class CliListShowTests(unittest.TestCase):
         data = json.loads(text)
         self.assertEqual(data['memories']['total'], 1)
         self.assertEqual(data['last_write']['id'], self.mem_id)
+        self.assertGreaterEqual(len(data['recent_writes']), 1)
+        self.assertEqual(data['recent_writes'][0]['memory_id'], self.mem_id)
+        self.assertEqual(data['recent_writes'][0]['action'], 'create')
 
     def test_show_missing_memory_is_clean_error(self):
         with self.assertRaises(SystemExit) as ctx:

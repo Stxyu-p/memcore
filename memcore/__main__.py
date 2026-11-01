@@ -43,6 +43,8 @@ from .cli_decision import (
 from .cli_memory import (
     cmd_remember,
     cmd_search,
+    cmd_list,
+    cmd_show,
     cmd_promote,
     cmd_supersede,
     cmd_deactivate,
@@ -187,6 +189,32 @@ def main(argv=None):
     p.add_argument('--changed-since', default=None, dest='changed_since',
                    help='optional ISO-8601 timestamp to return only memories updated since then')
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser('list', help='browse memories (read-only, filterable)', parents=[common])
+    p.add_argument('--project', required=True,
+                   help='project id/UUID or unique name/slug')
+    p.add_argument('--agent', required=True)
+    p.add_argument('--scope', default=None, choices=['project', 'private'])
+    p.add_argument('--lifecycle', default=None,
+                   choices=['candidate', 'accepted', 'conflict', 'superseded',
+                            'rejected', 'disabled'])
+    p.add_argument('--type', default=None,
+                   help='memory type (fact, decision, preference, note, observation, ...)')
+    p.add_argument('--verification', default=None,
+                   choices=['unverified', 'source_backed', 'runtime_verified',
+                            'user_authoritative'])
+    p.add_argument('--freshness', default=None,
+                   choices=['current', 'aging', 'stale'])
+    p.add_argument('--limit', type=int, default=20)
+    p.add_argument('--offset', type=int, default=0)
+    p.add_argument('--json', action='store_true', dest='json')
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser('show', help='inspect one memory in full', parents=[common])
+    p.add_argument('memory_id')
+    p.add_argument('--agent', required=True)
+    p.add_argument('--json', action='store_true', dest='json')
+    p.set_defaults(func=cmd_show)
 
     p = sub.add_parser('promote', help='private -> project scope', parents=[common])
     p.add_argument('memory_id')

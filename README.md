@@ -196,6 +196,12 @@ memcore doctor
 # Inspect memory counts, tombstones, and journal event stats
 memcore stats
 
+# Browse what is actually stored (filter by scope/lifecycle/type, paginate)
+memcore list --project default --agent hermes --lifecycle accepted --limit 20
+
+# Inspect one memory in full: labels, provenance, versions, tombstones, links
+memcore show mem-abc123 --agent hermes
+
 # Perform governed bitemporal compaction on aging memories
 memcore compact --project default --days 30
 ```

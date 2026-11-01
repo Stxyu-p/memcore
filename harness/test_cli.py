@@ -775,5 +775,88 @@ class CliHostileArgTests(unittest.TestCase):
         self.assertNotIn('Traceback', msg)
 
 
+class CliListShowTests(unittest.TestCase):
+    """Browse/inspect commands: list filters + show inspector."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='memcore_cli_ls_')
+        self.db = os.path.join(self.tmp.name, 'memory.db')
+        conn = store.open_store(self.db)
+        conn.execute("INSERT INTO project (id, name) VALUES ('proj-ls', 'ls')")
+        conn.execute(
+            "INSERT INTO agent (id, name, profile_key) VALUES ('agent-ls', 'ls', 'ls')"
+        )
+        conn.execute(
+            "INSERT INTO project_membership (project_id, agent_id, role) "
+            "VALUES ('proj-ls', 'agent-ls', 'owner')"
+        )
+        conn.commit()
+        self.mem_id, _ = core.create_memory(
+            conn, 'proj-ls', 'agent-ls', 'The service listens on port 9443',
+            scope='project', memory_type='fact', lifecycle='accepted',
+        )
+        conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(['--db', self.db] + argv)
+        return out.getvalue()
+
+    def test_list_shows_memory_and_labels(self):
+        text = self._run(['list', '--project', 'ls', '--agent', 'ls'])
+        self.assertIn(self.mem_id, text)
+        self.assertIn('project/accepted', text)
+        self.assertIn('port 9443', text)
+
+    def test_list_filters_by_type(self):
+        text = self._run(
+            ['list', '--project', 'ls', '--agent', 'ls', '--type', 'note']
+        )
+        self.assertIn('(no memories)', text)
+
+    def test_list_json_is_machine_readable(self):
+        text = self._run(
+            ['list', '--project', 'ls', '--agent', 'ls', '--json']
+        )
+        data = json.loads(text)
+        self.assertEqual(data[0]['id'], self.mem_id)
+        self.assertEqual(data[0]['lifecycle'], 'accepted')
+        self.assertFalse(data[0]['tombstoned'])
+
+    def test_list_hides_other_agents_private_memories(self):
+        conn = store.open_store(self.db)
+        conn.execute(
+            "INSERT INTO agent (id, name, profile_key) VALUES ('agent-other', 'other', 'other')"
+        )
+        conn.execute(
+            "INSERT INTO project_membership (project_id, agent_id, role) "
+            "VALUES ('proj-ls', 'agent-other', 'member')"
+        )
+        conn.commit()
+        core.create_memory(
+            conn, 'proj-ls', 'agent-other', 'other agent secret',
+            scope='private', memory_type='observation', lifecycle='accepted',
+        )
+        conn.close()
+        text = self._run(['list', '--project', 'ls', '--agent', 'ls'])
+        self.assertNotIn('other agent secret', text)
+
+    def test_show_reports_labels_provenance_and_versions(self):
+        text = self._run(['show', self.mem_id, '--agent', 'ls'])
+        self.assertIn('labels: project | accepted', text)
+        self.assertIn('versions (1):', text)
+        self.assertIn('port 9443', text)
+        self.assertIn('tombstones: none active', text)
+
+    def test_show_missing_memory_is_clean_error(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(['show', 'mem-nope', '--agent', 'ls'])
+        self.assertIn('not found', str(ctx.exception))
+
+
 if __name__ == '__main__':
     unittest.main()

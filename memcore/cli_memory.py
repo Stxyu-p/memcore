@@ -78,6 +78,212 @@ def cmd_search(args):
 
 
 
+def cmd_list(args):
+    """Browse memories this agent may read (read-only, filterable, paginated)."""
+    conn = _open_readonly(args)
+    try:
+        project_id = _project_or_exit(conn, args.project)
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        where = ["m.project_id = ?", "(m.scope = 'project' OR m.owner_agent_id = ?)"]
+        params = [project_id, agent_id]
+        if args.scope:
+            where.append('m.scope = ?')
+            params.append(args.scope)
+        if args.lifecycle:
+            where.append('m.lifecycle = ?')
+            params.append(args.lifecycle)
+        else:
+            where.append("m.lifecycle NOT IN ('superseded','rejected','disabled')")
+        if args.type:
+            where.append('m.type = ?')
+            params.append(args.type)
+        if args.verification:
+            where.append('m.verification = ?')
+            params.append(args.verification)
+        if args.freshness:
+            where.append('m.freshness = ?')
+            params.append(args.freshness)
+        sql = (
+            'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, '
+            '       m.type, m.pinned, m.critical, COALESCE(m.recall_count,0), '
+            '       m.updated_at, '
+            '       EXISTS(SELECT 1 FROM tombstone t WHERE '
+            '              t.claim_fingerprint=m.claim_fingerprint '
+            '              AND t.overridden_by IS NULL) AS tomb, '
+            '       v.content '
+            'FROM memory m '
+            'JOIN memory_version v ON v.id=m.current_version_id AND v.memory_id=m.id '
+            'WHERE ' + ' AND '.join(where) + ' '
+            'ORDER BY m.updated_at DESC, m.id ASC LIMIT ? OFFSET ?'
+        )
+        rows = conn.execute(sql, params + [args.limit, args.offset]).fetchall()
+    finally:
+        conn.close()
+    if args.json:
+        _out([
+            {'id': r[0], 'scope': r[1], 'lifecycle': r[2],
+             'verification': r[3], 'freshness': r[4], 'type': r[5],
+             'pinned': bool(r[6]), 'critical': bool(r[7]),
+             'recall_count': r[8], 'updated_at': r[9],
+             'tombstoned': bool(r[10]), 'content': r[11]}
+            for r in rows
+        ])
+        return
+    if not rows:
+        print('(no memories)')
+        return
+    for r in rows:
+        flags = ' TOMBSTONED' if r[10] else ''
+        print(f'[{r[0]}] {r[1]}/{r[2]}/{r[3]}/{r[4]} {r[5]} rc={r[8]}{flags}')
+        preview = ' '.join(str(r[11] or '').split())
+        if len(preview) > 160:
+            preview = preview[:160] + '...'
+        print(f'    {preview}')
+
+
+def cmd_show(args):
+    """Full inspector for one memory: labels, provenance, versions, tombstone, links."""
+    conn = _open_readonly(args)
+    try:
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        m = conn.execute(
+            'SELECT id, project_id, scope, owner_agent_id, type, lifecycle, '
+            '       verification, freshness, current_version_id, pinned, critical, '
+            '       created_at, updated_at, claim_fingerprint, '
+            '       COALESCE(recall_count,0), last_recalled '
+            'FROM memory WHERE id = ?', (args.memory_id,)
+        ).fetchone()
+        if m is None:
+            sys.exit(f'error: memory {args.memory_id} not found')
+        project_id = m[1]
+        if core._membership_role(conn, project_id, agent_id) is None:
+            sys.exit("error: agent is not a member of this memory's project")
+        if m[2] == 'private' and m[3] != agent_id:
+            sys.exit('error: private memory is owned by another agent')
+        v = conn.execute(
+            'SELECT id, content, reason, created_by_agent_id, created_at, '
+            '       validated_at, valid_from, valid_until, supersedes_version_id, '
+            '       source_hash, source_commit, source_file, when_to_use '
+            'FROM memory_version WHERE id = ?', (m[8],)
+        ).fetchone()
+        versions = conn.execute(
+            'SELECT id, valid_from, valid_until, supersedes_version_id, '
+            '       created_by_agent_id, LENGTH(content) '
+            'FROM memory_version WHERE memory_id = ? '
+            'ORDER BY datetime(valid_from) ASC, id ASC', (args.memory_id,)
+        ).fetchall()
+        tombstones = conn.execute(
+            'SELECT id, scope, reason, created_at FROM tombstone '
+            'WHERE claim_fingerprint = ? AND overridden_by IS NULL '
+            'ORDER BY created_at DESC', (m[13],)
+        ).fetchall()
+        triples = conn.execute(
+            'SELECT subject, predicate, object FROM memory_triple '
+            'WHERE memory_id = ? AND version_id = ? ORDER BY id',
+            (args.memory_id, m[8])
+        ).fetchall()
+        links = conn.execute(
+            'SELECT dl.decision_id, d.title, d.status, d.lifecycle, dl.relation '
+            'FROM decision_link dl JOIN decision d ON d.id = dl.decision_id '
+            "WHERE dl.target_type = 'memory' AND dl.target_id = ? "
+            'ORDER BY dl.decision_id', (args.memory_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    if args.json:
+        _out({
+            'memory': {
+                'id': m[0], 'project_id': m[1], 'scope': m[2],
+                'owner_agent_id': m[3], 'type': m[4], 'lifecycle': m[5],
+                'verification': m[6], 'freshness': m[7],
+                'current_version_id': m[8], 'pinned': bool(m[9]),
+                'critical': bool(m[10]), 'created_at': m[11],
+                'updated_at': m[12], 'claim_fingerprint': m[13],
+                'recall_count': m[14], 'last_recalled': m[15],
+            },
+            'version': (None if v is None else {
+                'id': v[0], 'content': v[1], 'reason': v[2],
+                'created_by_agent_id': v[3], 'created_at': v[4],
+                'validated_at': v[5], 'valid_from': v[6],
+                'valid_until': v[7], 'supersedes_version_id': v[8],
+                'source_hash': v[9], 'source_commit': v[10],
+                'source_file': v[11], 'when_to_use': v[12],
+            }),
+            'versions': [
+                {'id': r[0], 'valid_from': r[1], 'valid_until': r[2],
+                 'supersedes_version_id': r[3], 'created_by_agent_id': r[4],
+                 'content_chars': r[5]}
+                for r in versions
+            ],
+            'tombstones': [
+                {'id': r[0], 'scope': r[1], 'reason': r[2], 'created_at': r[3]}
+                for r in tombstones
+            ],
+            'triples': [
+                {'subject': r[0], 'predicate': r[1], 'object': r[2]}
+                for r in triples
+            ],
+            'decisions': [
+                {'id': r[0], 'title': r[1], 'status': r[2],
+                 'lifecycle': r[3], 'relation': r[4]}
+                for r in links
+            ],
+        })
+        return
+    print(f'memory: {m[0]}')
+    print(f'project: {m[1]}')
+    print(f'labels: {m[2]} | {m[5]} | {m[6]} | {m[7]}')
+    print(f'type: {m[4]}  owner: {m[3]}  '
+          f'pinned={bool(m[9])} critical={bool(m[10])}')
+    print(f'created: {m[11]}  updated: {m[12]}')
+    print(f'recall_count: {m[14]}  last_recalled: {m[15] or "never"}')
+    print(f'claim_fingerprint: {m[13]}')
+    print()
+    print('content:')
+    print(v[1] if v is not None else '(missing current version)')
+    if v is not None:
+        print()
+        print('provenance:')
+        print(f'  version: {v[0]}  by: {v[3]}  at: {v[4]}')
+        print(f'  valid: {v[6]} .. {v[7] or "now"}')
+        print(f'  reason: {v[2] or "-"}')
+        print(f'  source_file: {v[11] or "-"}')
+        print(f'  source_commit: {v[10] or "-"}')
+        print(f'  source_hash: {v[9] or "-"}')
+        print(f'  when_to_use: {v[12] or "-"}')
+    print()
+    print(f'versions ({len(versions)}):')
+    for ver in versions:
+        marker = ' <- current' if ver[0] == m[8] else ''
+        print(f'  {ver[0]}  {ver[1]} .. {ver[2] or "now"}  '
+              f'by {ver[4]}  {ver[5]} chars{marker}')
+    print()
+    if tombstones:
+        print('tombstones (active):')
+        for t in tombstones:
+            print(f'  {t[0]}  scope={t[1]}  at={t[3]}  reason={t[2]}')
+    else:
+        print('tombstones: none active')
+    print()
+    if triples:
+        print('triples:')
+        for t in triples:
+            print(f'  {t[0]} --{t[1]}--> {t[2]}')
+    else:
+        print('triples: none')
+    print()
+    if links:
+        print('linked decisions:')
+        for l in links:
+            print(f'  {l[0]}  [{l[2]}/{l[3]}] {l[1]}  ({l[4]})')
+    else:
+        print('linked decisions: none')
+
+
 def cmd_promote(args):
     conn = _open(args)
     try:

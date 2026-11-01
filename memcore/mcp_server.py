@@ -3,7 +3,7 @@
 
 Speaks newline-delimited JSON-RPC 2.0 on stdin/stdout. Tools:
   memory_remember       — store a governed fact, decision, preference, or note (with optional source file provenance)
-  memory_search         — hybrid FTS5 BM25 + dense vector RRF recall with Salience L1 preview or full content
+  memory_search         — FTS5 BM25 lexical recall with Salience L1 preview or full content
   memory_promote        — promote a private memory to shared project scope
   memory_supersede      — bitemporally update an existing memory while keeping immutable version history
   memory_reject         — reject and tombstone a memory claim
@@ -38,7 +38,7 @@ except ImportError:
 SERVER_INFO = {"name": "memcore", "version": "2.2.0"}
 FALLBACK_PROTOCOL = "2024-11-05"
 SERVER_INSTRUCTIONS = (
-    "MemCore — Governed Bitemporal Memory Engine (SQLite WAL + FTS5 BM25 + Vector RRF).\n\n"
+    "MemCore — Governed Bitemporal Memory Engine (SQLite WAL + FTS5 BM25).\n\n"
     "## Mandatory Agent Habit (When to Use MemCore)\n"
     "1. **Recall Before Guessing (`memory_search`):** At the start of a task or before making architectural changes, "
     "call `memory_search` with project/domain keywords to recall verified project facts, decisions, and user preferences.\n"
@@ -120,7 +120,7 @@ TOOLS = [
     {
         "name": "memory_search",
         "description": (
-            "Search MemCore governed memory using hybrid FTS5 BM25 + semantic vector RRF recall. "
+            "Search MemCore governed memory using FTS5 BM25 lexical recall. "
             "Supports progressive disclosure (include_content=false or max_tokens), strict verification mode, and bitemporal queries (as_of, changed_since)."
         ),
         "inputSchema": {
@@ -355,8 +355,7 @@ def _client(args: dict[str, Any]) -> MemCore:
     db_path = str(args.get("db_path") or os.environ.get("MEMCORE_DB_PATH") or DEFAULT_DB)
     project = str(args.get("project") or DEFAULT_PROJECT).strip() or DEFAULT_PROJECT
     agent = str(args.get("agent") or DEFAULT_AGENT).strip() or DEFAULT_AGENT
-    provider = os.environ.get("MEMCORE_EMBEDDING_PROVIDER", "none")
-    return MemCore(db_path=db_path, project=project, agent=agent, provider=provider)
+    return MemCore(db_path=db_path, project=project, agent=agent)
 
 
 def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:

@@ -17,6 +17,7 @@ import unicodedata
 from .schema_defs import _BITEMPORAL_VALID_UNTIL
 from .schema_defs import _CURRENT_VERSION_OWNERSHIP
 from .schema_defs import _DECISION_LAYER
+from .schema_defs import _DROP_EMBEDDING
 from .schema_defs import _FTS_TRIGGERS
 from .schema_defs import _IDEMPOTENCY
 from .schema_defs import _INGEST_JOURNAL
@@ -70,12 +71,6 @@ from .store_seals import (
     verify_all_seals,
 )
 
-from .store_vectors import (
-    pack_vector,
-    unpack_vector,
-    store_embedding,
-    get_embedding,
-)
 
 
 
@@ -147,23 +142,6 @@ def _register_math_functions(conn: sqlite3.Connection) -> None:
 
 
 
-def _register_vector_functions(conn: sqlite3.Connection) -> None:
-    """Load sqlite-vec extension if available, enabling in-process SIMD vector distance operations."""
-    try:
-        import sqlite_vec
-        conn.enable_load_extension(True)
-        try:
-            sqlite_vec.load(conn)
-        finally:
-            try:
-                conn.enable_load_extension(False)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-
-
 def _resolve_schema_path() -> pathlib.Path:
     # 1. Inside package (installed wheel / site-packages)
     pkg_schema = pathlib.Path(__file__).resolve().parent / 'schema' / 'schema.sql'
@@ -222,6 +200,7 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0019_memory_triples', _MEMORY_TRIPLES),
     ('0020_binary_vector', _BINARY_VECTOR_COLUMN),
     ('0021_decision_layer', _DECISION_LAYER),
+    ('0022_drop_embedding', _DROP_EMBEDDING),
 ]
 
 
@@ -363,7 +342,6 @@ def open_store(db_path: str, check_same_thread: bool = True) -> sqlite3.Connecti
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('PRAGMA synchronous = NORMAL')
         _register_math_functions(conn)
-        _register_vector_functions(conn)
         try:
             apply_migrations(conn)
         except sqlite3.OperationalError as e:
@@ -412,7 +390,6 @@ def _open_existing_connection(db_path: str, *, readonly: bool,
         else:
             conn.execute('PRAGMA synchronous = NORMAL')
         _register_math_functions(conn)
-        _register_vector_functions(conn)
         # Validate that the file is indeed a readable sqlite database
         conn.execute('PRAGMA schema_version')
         return conn

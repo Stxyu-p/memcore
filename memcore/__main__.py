@@ -108,7 +108,6 @@ from .cli_ops import (
     _print_doctor_health,
     _print_doctor_report,
     _doctor_unhealthy,
-    cmd_embed,
 )
 
 
@@ -513,16 +512,6 @@ def main(argv=None):
     p.add_argument('--as-of', required=True, dest='as_of',
                    help="ISO timestamp, e.g. '2026-09-01T00:00:00Z'")
     p.set_defaults(func=cmd_history)
-
-    p = sub.add_parser('embed', help='backfill or refresh vector embeddings', parents=[common])
-    p.add_argument('--limit', type=int, default=100, help='max memories to embed (default 100)')
-    p.add_argument('--all', dest='all_memories', action='store_true', help='embed all memories without limit')
-    p.add_argument('--provider', choices=['local', 'openai', 'openrouter', 'ollama', 'fastembed', 'none'], default=None, help='embedding provider preset')
-    p.add_argument('--model', default=None, help='embedding model name')
-    p.add_argument('--endpoint', default=None, help='embedding endpoint URL')
-    p.add_argument('--api-key', default=None, help='API key for embedding provider')
-    p.add_argument('--dry-run', action='store_true', help='preview without storing vectors')
-    p.set_defaults(func=cmd_embed)
 
     p = sub.add_parser('doctor', help='integrity + drift checks', parents=[common])
     p.add_argument('--skip-binding-check', action='store_true',

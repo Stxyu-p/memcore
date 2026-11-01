@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browse/inspect queries now live in one core implementation (`core.list_memories`, `core.get_memory_detail`) shared by CLI, plugin, and MCP instead of three copies.
 - Migration-version tests assert the current migration dynamically instead of hardcoding an index.
 
+### Removed
+- **Semantic embedding stack:** local ONNX/fastembed/model2vec providers, HTTP embedding providers, `memory_embedding` storage (migration `0022_drop_embedding`), the vector recall lane/RRF fusion, `memcore embed`, and the `sqlite-vec`/`local-embed` extras. Recall is now deterministic lexical FTS5 with no model, no network, and no fallback.
+
 ### Fixed
 - `export-project`/`import-project` resolve project and agent identities consistently and round-trip decisions.
 - Doctor reports decision FTS sync and unguarded rejected decisions.

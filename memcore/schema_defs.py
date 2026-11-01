@@ -348,6 +348,12 @@ ALTER TABLE memory_embedding ADD COLUMN binary_vector BLOB;
 """
 
 
+_DROP_EMBEDDING = """
+-- 0022: remove semantic embedding storage; recall is lexical-only by design.
+DROP TABLE IF EXISTS memory_embedding;
+"""
+
+
 
 _DECISION_LAYER = """
 

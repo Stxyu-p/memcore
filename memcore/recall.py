@@ -1,12 +1,11 @@
 """
 MemCore — recall & search engine.
 
-Hybrid FTS5 BM25 + dense vector RRF search, Salience L1 previews,
-freshness/decay ranking, and scope-enforced reads.
+FTS5 BM25 lexical search, Salience L1 previews, freshness/decay ranking,
+and scope-enforced reads.
 """
 from __future__ import annotations
 
-import os
 import sqlite3
 
 from . import store
@@ -28,13 +27,10 @@ from .recall_decay import (
 from .recall_lanes import (
     DISTINCT_OVERFETCH,
     _decay_ablated,
-    _fetch_query_vector,
-    _fuse_rrf_candidates,
     _recall_tombstone_guard,
     _run_fts_lane,
     _run_substring_lane,
     _run_summary_lane,
-    _run_vector_lane,
     _search_detail_filter,
 )
 
@@ -73,14 +69,9 @@ from .recall_decay import (
 from .recall_lanes import (
     _recall_tombstone_guard,
     _run_substring_lane,
-    cosine_similarity,
-    _vector_search_lane,
     _search_detail_filter,
     _run_fts_lane,
-    _fuse_rrf_candidates,
     _decay_ablated,
-    _fetch_query_vector,
-    _run_vector_lane,
     _run_summary_lane,
     DISTINCT_OVERFETCH,
 )
@@ -489,13 +480,12 @@ def _search_historical(conn, project_id, agent_id, user_query, raw_query,
 
 
 def search(conn, project_id, agent_id, query, limit=20,
-           scope_detail=None, query_vec=None, *,
+           scope_detail=None, *,
            mode: str = 'standard', as_of: str | None = None,
            changed_since: str | None = None):
-    """FTS5 + Vector hybrid search over memory content, scope-enforced in SQL.
+    """FTS5 lexical search over memory content, scope-enforced in SQL.
 
-    Deterministic rank: FTS bm25 + Vector cosine similarity via Reciprocal
-    Rank Fusion (RRF, k=60) + pinned + lifecycle/verification/freshness
+    Deterministic rank: FTS bm25 + pinned + lifecycle/verification/freshness
     + continuous retention (salience * exp(-lambda*age) + reinforcement),
     then updated_at/id tie-breaks. MEMCORE_ABLATE_DECAY=1 neutralizes
     exactly the retention term (legacy CASE+bm25 ordering).
@@ -553,13 +543,6 @@ def search(conn, project_id, agent_id, query, limit=20,
 
     substr_terms = _extract_non_ascii_substr_terms(user_query)
 
-    # Lane 3.3: Local vector search lane (semantic similarity)
-    if query_vec is None and os.environ.get('MEMCORE_DISABLE_VECTOR') != '1':
-        query_vec = _fetch_query_vector(user_query)
-    vec_rows = _run_vector_lane(
-        conn, project_id, agent_id, query_vec, limit,
-        detail_filter, detail_params)
-
     match_expr = _fts_query(raw_query)
     fts_rows = []
     if match_expr:
@@ -589,7 +572,7 @@ def search(conn, project_id, agent_id, query, limit=20,
             conn, project_id, agent_id, substr_terms, detail_filter,
             detail_params, retention_tail, retention_params, now_iso, limit)
 
-    if not vec_rows and not fts_rows and not exact_rows:
+    if not fts_rows and not exact_rows:
         return []
     # Query-side analysis for the demotion pass: computed once here, so the
     # incompatibility check never re-tokenizes the query per row (C2).
@@ -599,17 +582,10 @@ def search(conn, project_id, agent_id, query, limit=20,
     query_numbers = _qd.numbers(user_query)
 
     fetch_cap = limit * 2 if (mode_norm == 'strict' or changed_since is not None) else limit
-    if not vec_rows:
-        results = _merge_exact_fallback(
-            fts_rows, exact_rows, fetch_cap, user_query,
-            query_tok=query_tok, query_numbers=query_numbers,
-            query_tokens=query_tokens)
-    else:
-        fused = _fuse_rrf_candidates(fts_rows, vec_rows)
-        results = _merge_exact_fallback(
-            fused, exact_rows, fetch_cap, user_query,
-            query_tok=query_tok, query_numbers=query_numbers,
-            query_tokens=query_tokens)
+    results = _merge_exact_fallback(
+        fts_rows, exact_rows, fetch_cap, user_query,
+        query_tok=query_tok, query_numbers=query_numbers,
+        query_tokens=query_tokens)
 
     if results:
         stale_ids = _source_file_is_stale_readonly(conn, [r[0] for r in results])
@@ -666,7 +642,7 @@ def finalize_recall(conn, rows):
 
 
 def recall(conn, project_id, agent_id, query, limit=20,
-           scope_detail=None, query_vec=None, get_head=None, repo_root=None,
+           scope_detail=None, get_head=None, repo_root=None,
            *, mode: str = 'standard', as_of: str | None = None,
            changed_since: str | None = None):
     """The unified, deep memory recall lifecycle.
@@ -679,7 +655,7 @@ def recall(conn, project_id, agent_id, query, limit=20,
     """
     rows = search(
         conn, project_id, agent_id, query, limit=limit,
-        scope_detail=scope_detail, query_vec=query_vec,
+        scope_detail=scope_detail,
         mode=mode, as_of=as_of, changed_since=changed_since
     )
     finalized = finalize_recall(conn, rows)

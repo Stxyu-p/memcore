@@ -39,7 +39,7 @@ def _selected_queue_decisions(decisions):
 
 
 def auto_curate_pending(conn, project_id, agent_id, *, limit=25, retention_days=7):
-    """Local, zero-debt deterministic and vector auto-curator for ingest events.
+    """Local, zero-debt deterministic auto-curator for ingest events.
 
     Drains stalled review queues in <10ms:
     1. Re-evaluates pending events with classify_user_text.

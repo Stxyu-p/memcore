@@ -1,16 +1,14 @@
-"""Stabilization hardening regression tests (H1-H9 + C1/C3).
+"""Stabilization hardening regression tests (H2-H9 + C1/C3).
 
 Every test isolates itself in a TemporaryDirectory store that is never the
-live ~/.memcore/memory.db. Network is never touched: embedding calls are
-mocked, and setup-only writes run with get_embedding patched to None.
+live ~/.memcore/memory.db. Network is never touched.
 
 Covered:
-- H1  out-of-lock embedding (create/supersede/batch lanes)
-- H2  contradiction pair guards, CLI clean errors, cmd_embed filters
+- H2  contradiction pair guards, CLI clean errors
 - H3  read-only survival on lazy fingerprint repair
 - H4  bounded per-connection schema cache + migration invalidation
 - H6/R1 append_event scrub-before-hash identity
-- H7  thread-safe circuit breaker + fastembed cache
+- H7  thread safety
 - H8  atomic export/restore writes with tmp cleanup
 - C1  dry-run/apply parity (decay + journal sweep), both API and CLI
 - C3  demotion promotes a compatible hit from the overfetch window
@@ -31,7 +29,6 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from memcore import core  # noqa: E402
-from memcore import embedding  # noqa: E402
 from memcore import export as export_mod  # noqa: E402
 from memcore import ingest, store  # noqa: E402
 from memcore import __main__ as cli  # noqa: E402
@@ -64,156 +61,7 @@ class _StoreCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def _create_quiet(self, content, **kwargs):
-        with mock.patch('memcore.embedding.get_embedding', return_value=None):
-            return core.create_memory(self.conn, 'p', 'a', content, **kwargs)
-
-
-# ── H1: out-of-lock embedding ────────────────────────────────────────────────
-
-class TestH1OutOfLockEmbedding(_StoreCase):
-
-    def _slow_embed_side_effect(self):
-        started = threading.Event()
-        release = threading.Event()
-
-        def slow(content, **kwargs):
-            started.set()
-            if not release.wait(timeout=5):
-                raise RuntimeError('test embed release timeout')
-            return [0.25, 0.5, 0.75]
-
-        return started, release, slow
-
-    def _assert_other_writer_not_blocked(self, db_path):
-        """BEGIN IMMEDIATE + UPDATE must succeed while the embed mock is held."""
-        other = sqlite3.connect(db_path, timeout=5)
-        try:
-            other.execute('PRAGMA busy_timeout = 300')
-            other.execute('BEGIN IMMEDIATE')
-            other.execute("UPDATE project SET name = name WHERE id = 'p'")
-            other.execute('COMMIT')
-        finally:
-            other.close()
-
-    def test_write_lock_not_held_during_slow_embedding_io(self):
-        started, release, slow = self._slow_embed_side_effect()
-        result = {}
-
-        def writer():
-            conn2 = store.open_store(self.db)
-            try:
-                result['ids'] = core.create_memory(
-                    conn2, 'p', 'a', 'create lane with slow embedding')
-            except Exception as exc:  # pragma: no cover - failure path
-                result['error'] = exc
-            finally:
-                conn2.close()
-
-        with mock.patch('memcore.embedding.get_embedding', side_effect=slow):
-            thread = threading.Thread(target=writer, daemon=True)
-            thread.start()
-            try:
-                self.assertTrue(
-                    started.wait(timeout=5), 'embedding fetch never started')
-                # While the embedding call is still in flight the write lock
-                # must be free: another writer takes it immediately.
-                self._assert_other_writer_not_blocked(self.db)
-            finally:
-                release.set()
-                thread.join(timeout=10)
-        self.assertNotIn('error', result, result.get('error'))
-        mem_id, _ver_id = result['ids']
-        row = self.conn.execute(
-            'SELECT COUNT(*) FROM memory WHERE id=?', (mem_id,)).fetchone()
-        self.assertEqual(row[0], 1)
-
-    def test_write_lock_not_held_during_slow_embedding_io_supersede(self):
-        mem_id, _ = self._create_quiet('supersede lane initial claim')
-        started, release, slow = self._slow_embed_side_effect()
-        result = {}
-
-        def writer():
-            conn2 = store.open_store(self.db)
-            try:
-                result['ver'] = core.supersede(
-                    conn2, mem_id, 'a', 'supersede lane replacement claim')
-            except Exception as exc:  # pragma: no cover - failure path
-                result['error'] = exc
-            finally:
-                conn2.close()
-
-        with mock.patch('memcore.embedding.get_embedding', side_effect=slow):
-            thread = threading.Thread(target=writer, daemon=True)
-            thread.start()
-            try:
-                self.assertTrue(started.wait(timeout=5))
-                self._assert_other_writer_not_blocked(self.db)
-            finally:
-                release.set()
-                thread.join(timeout=10)
-        self.assertNotIn('error', result, result.get('error'))
-        self.assertTrue(str(result['ver']).startswith('ver-'))
-
-    def test_create_memory_manage_false_skips_embedding_http(self):
-        calls = []
-
-        def fake(content, **kwargs):
-            calls.append(content)
-            return [0.1, 0.2]
-
-        self.conn.execute('BEGIN IMMEDIATE')
-        try:
-            with mock.patch('memcore.embedding.get_embedding', side_effect=fake):
-                mem_id, ver_id = core.create_memory(
-                    self.conn, 'p', 'a', 'batched claim without embedding',
-                    _manage_transaction=False)
-                self.assertEqual(calls, [])
-            self.conn.execute('COMMIT')
-        except Exception:
-            self.conn.execute('ROLLBACK')
-            raise
-        row = self.conn.execute(
-            'SELECT COUNT(*) FROM memory_embedding WHERE memory_id=?',
-            (mem_id,)).fetchone()
-        self.assertEqual(row[0], 0)
-        self.assertTrue(ver_id.startswith('ver-'))
-
-    def test_import_memories_never_fires_embedding_http(self):
-        calls = []
-
-        def fake(content, **kwargs):
-            calls.append(content)
-            return [0.5]
-
-        items = [{'summary': f'import hardening claim {i}'} for i in range(5)]
-        with mock.patch('memcore.embedding.get_embedding', side_effect=fake):
-            result = core.import_memories(self.conn, items, 'p', 'a')
-        self.assertEqual(calls, [])
-        self.assertEqual(result['added'], 5)
-
-    def test_create_memory_still_stores_embedding_when_available(self):
-        with mock.patch(
-                'memcore.embedding.get_embedding', return_value=[0.5, 0.25]):
-            mem_id, ver_id = core.create_memory(
-                self.conn, 'p', 'a', 'embedded claim content')
-        row = self.conn.execute(
-            'SELECT vector, model, dim FROM memory_embedding WHERE version_id=?',
-            (ver_id,)).fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(store.unpack_vector(row[0]), [0.5, 0.25])
-        self.assertEqual(row[2], 2)
-
-    def test_supersede_stores_precomputed_embedding(self):
-        mem_id, _ = self._create_quiet('supersede embed original claim')
-        with mock.patch(
-                'memcore.embedding.get_embedding', return_value=[0.75, 0.5]):
-            new_ver = core.supersede(
-                self.conn, mem_id, 'a', 'supersede embed replacement claim')
-        row = self.conn.execute(
-            'SELECT vector FROM memory_embedding WHERE version_id=?',
-            (new_ver,)).fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(store.unpack_vector(row[0]), [0.75, 0.5])
+        return core.create_memory(self.conn, 'p', 'a', content, **kwargs)
 
 
 # ── H2: contradiction guards + CLI clean errors ─────────────────────────────
@@ -237,8 +85,7 @@ class TestH2ContradictionGuards(unittest.TestCase):
         self.tmp.cleanup()
 
     def _create(self, content, project='p'):
-        with mock.patch('memcore.embedding.get_embedding', return_value=None):
-            return core.create_memory(self.conn, project, 'a', content)[0]
+        return core.create_memory(self.conn, project, 'a', content)[0]
 
     def test_mark_contradiction_rejects_cross_project_and_self_pair(self):
         a = self._create('contradiction guard claim alpha')
@@ -286,10 +133,9 @@ class TestH2ContradictionGuards(unittest.TestCase):
 class TestH3ReadOnlySurvival(_StoreCase):
 
     def test_readonly_connection_survives_null_fingerprint_repair_paths(self):
-        with mock.patch('memcore.embedding.get_embedding', return_value=None):
-            mem_id, _ = core.create_memory(
-                self.conn, 'p', 'a', 'legacy null fingerprint claim',
-                scope='private')
+        mem_id, _ = core.create_memory(
+            self.conn, 'p', 'a', 'legacy null fingerprint claim',
+            scope='private')
         self.conn.execute(
             'UPDATE memory SET claim_fingerprint=NULL WHERE id=?', (mem_id,))
         self.conn.commit()
@@ -365,44 +211,6 @@ class TestH4SchemaCache(unittest.TestCase):
 
 # ── H2b: cmd_embed filter ───────────────────────────────────────────────────
 
-class TestH2EmbedFilters(_StoreCase):
-
-    def test_cmd_embed_skips_rejected_disabled_and_superseded_memories(self):
-        ids = {}
-        with mock.patch('memcore.embedding.get_embedding', return_value=None):
-            ids['cand'], _ = core.create_memory(
-                self.conn, 'p', 'a', 'embed filter candidate claim')
-            ids['acc'], _ = core.create_memory(
-                self.conn, 'p', 'a', 'embed filter accepted claim',
-                lifecycle='accepted')
-            ids['conf'], _ = core.create_memory(
-                self.conn, 'p', 'a', 'embed filter conflict claim')
-            ids['rej'], _ = core.create_memory(
-                self.conn, 'p', 'a', 'embed filter rejected claim')
-            ids['dis'], _ = core.create_memory(
-                self.conn, 'p', 'a', 'embed filter disabled claim')
-            ids['sup'], _ = core.create_memory(
-                self.conn, 'p', 'a', 'embed filter superseded claim')
-        core.reject(self.conn, ids['rej'], 'a', reason='not wanted')
-        core.deactivate(self.conn, ids['dis'], 'a', reason='turned off')
-        self.conn.execute(
-            "UPDATE memory SET lifecycle='conflict' WHERE id=?", (ids['conf'],))
-        self.conn.execute(
-            "UPDATE memory SET lifecycle='superseded' WHERE id=?", (ids['sup'],))
-        self.conn.commit()
-
-        vec = [0.1, 0.2, 0.3]
-        with mock.patch(
-                'memcore.embedding.get_embeddings_batch',
-                return_value=[vec, vec, vec]):
-            out = io.StringIO()
-            with mock.patch('sys.stdout', out):
-                cli.main(['--db', self.db, 'embed'])
-        self.assertIn('Embedded 3 memories', out.getvalue())
-        embedded = {r[0] for r in self.conn.execute(
-            'SELECT DISTINCT memory_id FROM memory_embedding')}
-        self.assertEqual(
-            embedded, {ids['cand'], ids['acc'], ids['conf']})
 
 
 # ── C1: dry-run / apply parity ──────────────────────────────────────────────
@@ -549,73 +357,6 @@ class TestC1DryRunParity(_StoreCase):
 
 # ── H7: thread safety ───────────────────────────────────────────────────────
 
-class TestH7ThreadSafety(unittest.TestCase):
-
-    def tearDown(self):
-        embedding.reset_circuit_breaker()
-        try:
-            embedding._fastembed_cache.clear()
-        except Exception:
-            pass
-
-    def test_embedding_circuit_breaker_thread_safety(self):
-        embedding.reset_circuit_breaker()
-        errors = []
-
-        def hammer():
-            try:
-                for _ in range(500):
-                    embedding._record_failure()
-                    embedding.is_circuit_open()
-            except Exception as exc:  # pragma: no cover - failure path
-                errors.append(exc)
-
-        threads = [threading.Thread(target=hammer) for _ in range(8)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=15)
-        self.assertEqual(errors, [])
-        # With the lock, increments are exact: no lost updates.
-        self.assertEqual(embedding._consecutive_failures, 8 * 500)
-        self.assertTrue(embedding.is_circuit_open())
-        embedding.reset_circuit_breaker()
-        self.assertEqual(embedding._consecutive_failures, 0)
-        self.assertFalse(embedding.is_circuit_open())
-
-    def test_fastembed_cache_single_instantiation_under_threads(self):
-        created = []
-
-        class FakeEmbedder:
-            def __init__(self, model_name=None):
-                created.append(model_name)
-                time.sleep(0.05)  # simulate the costly ONNX model load
-
-            def embed(self, texts):
-                return [[0.1, 0.2] for _ in texts]
-
-        fake_module = types.ModuleType('fastembed')
-        fake_module.TextEmbedding = FakeEmbedder
-        embedding._fastembed_cache.clear()
-        results = []
-        errors = []
-
-        def worker():
-            try:
-                results.append(
-                    embedding._get_fastembed_batch(['x'], model='m-test'))
-            except Exception as exc:  # pragma: no cover - failure path
-                errors.append(exc)
-
-        with mock.patch.dict(sys.modules, {'fastembed': fake_module}):
-            threads = [threading.Thread(target=worker) for _ in range(8)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=15)
-        self.assertEqual(errors, [])
-        self.assertEqual(len(created), 1, created)
-        self.assertEqual(len(results), 8)
 
 
 # ── H8: atomic writes ───────────────────────────────────────────────────────

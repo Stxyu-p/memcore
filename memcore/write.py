@@ -35,13 +35,11 @@ from .write_support import (
     TombstoneBlocked,
     _audit,
     _coerce_now,
-    _fetch_embedding_safe,
     _new_id,
     _now,
     _private_tombstone_scope,
     _sha256_file,
     _source_metadata,
-    _store_embedding_safe,
     _table_cols,
     fingerprint,
     scrub_secrets,
@@ -111,8 +109,6 @@ from .write_support import (
     _private_tombstone_scope,
     _membership_role,
     SCOPE_DETAIL_PREFIXES,
-    _fetch_embedding_safe,
-    _store_embedding_safe,
     _TABLE_COLS_CACHE_MAX,
     _CONN_TABLE_COLS,
     _clear_table_cols_cache,
@@ -229,18 +225,6 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
     claim_fp = prepared['claim_fp']
     clean_when = prepared['when_to_use']
 
-    # H1: embedding fetch is network/model I/O and runs OUTSIDE the write
-    # lock. Batched callers (manage=False) already hold a transaction and
-    # skip embedding rather than firing HTTP inside it.
-    embed_vec = None
-    if _manage_transaction:
-        try:
-            if store._table_exists(conn, 'memory_embedding'):
-                embed_text = f'{clean_when}\n{content}' if clean_when else content
-                embed_vec = _fetch_embedding_safe(embed_text)
-        except Exception:
-            embed_vec = None
-
     conflict_hits = []
     with store.write_tx(conn, manage=_manage_transaction):
         # Membership is the first project-boundary gate. Do not reveal
@@ -277,7 +261,6 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             prepared['source_hash'], prepared['source_commit'],
             prepared['source_file'], when_to_use=clean_when
         )
-        _store_embedding_safe(conn, mem_id, ver_id, embed_vec)
         if triples:
             store_triples(conn, mem_id, ver_id, triples)
         _audit(conn, 'create', agent_id, mem_id, project_id,
@@ -384,14 +367,6 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
         source_file, source_commit, source_hash,
         content=new_content, auto_source_file=auto_source_file
     )
-    # H1: fetch the replacement's embedding before taking the write lock.
-    embed_vec = None
-    try:
-        if store._table_exists(conn, 'memory_embedding'):
-            embed_text = f'{clean_when}\n{new_content}' if clean_when else new_content
-            embed_vec = _fetch_embedding_safe(embed_text)
-    except Exception:
-        embed_vec = None
     with store.write_tx(conn):
         project_id, scope, owner, lifecycle, role = _require_memory_write_access(
             conn, memory_id, agent_id
@@ -426,7 +401,6 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
         new_ver, now = _close_and_insert_version(
             conn, memory_id, agent_id, new_content, reason, old_ver, new_fp,
             source_hash, source_commit, source_file, when_to_use=effective_when)
-        _store_embedding_safe(conn, memory_id, new_ver, embed_vec)
         if triples:
             store_triples(conn, memory_id, new_ver, triples)
 

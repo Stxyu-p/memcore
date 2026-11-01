@@ -11,10 +11,9 @@ Capture broadly. Recall narrowly. Never trust raw conversational history.
 [![PyPI](https://img.shields.io/pypi/v/memcore-omnix?style=flat-square&color=blue)](https://pypi.org/project/memcore-omnix/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue?style=flat-square)](https://www.python.org/)
 [![Storage](https://img.shields.io/badge/storage-SQLite_WAL_+_FTS5-07405E?style=flat-square)](#why-memcore)
-[![Latency](https://img.shields.io/badge/latency-%3C_3ms_hybrid_recall-10b981?style=flat-square)](#sub-millisecond-hybrid-rrf-recall)
+[![Latency](https://img.shields.io/badge/latency-%3C_3ms_lexical_recall-10b981?style=flat-square)](#why-memcore)
 [![Governance](https://img.shields.io/badge/governance-Bitemporal_+_Tombstones-8b5cf6?style=flat-square)](#the-four-pillars-of-governed-memory)
 [![Security](https://img.shields.io/badge/security-Tainted_Context_Guard-00D2FF?style=flat-square)](#tainted-context-guard-anti-poisoning)
-[![Quantization](https://img.shields.io/badge/vectors-1--Bit_Binary_Quantization-F59E0B?style=flat-square)](#1-bit-binary-vector-quantization--two-stage-recall)
 [![License: MIT](https://img.shields.io/badge/license-MIT-slate?style=flat-square)](LICENSE)
 
 ---
@@ -41,7 +40,7 @@ Result: ❌ Contradictory history dumped into prompt; agent guesses wrong.
 **MemCore Governed Bitemporal Memory:**
 ```text
 Query: "What port does the analytics service use?"
-Recalled Canonical Memory (Hybrid FTS5 + Binary Vector RRF):
+Recalled Canonical Memory (FTS5 BM25):
 1. [scope=project | lifecycle=accepted | verification=source_backed | freshness=current]
    "Analytics service migrated to port 9440 with mTLS (settings.py)"
 Result: ✅ Exactly ONE current truth recalled. Port 8123 was superseded; port 9000 tombstoned.
@@ -56,8 +55,6 @@ Result: ✅ Exactly ONE current truth recalled. Port 8123 was superseded; port 9
 | **Architecture** | **Local-First SQLite WAL** | Cloud SaaS API | Server / Daemon | Cloud API | Cloud / PostgreSQL |
 | **Epistemic Trust Governance** | ✅ **4 Labels (Scope, Life, Verif, Fresh)** | ❌ Flat text | ⚠️ Core/Archival only | ❌ Flat facts | ❌ Flat facts |
 | **Bitemporal Superseding** | ✅ **Cascade Invalidation** | ❌ Destructive overwrite | ⚠️ Message append | ❌ Overwrite | ❌ Overwrite |
-| **Vector RAM Footprint** | ✅ **1-Bit Quantization (48 bytes)** | ❌ Float32 (1,536 B) | ❌ Float32 (1,536 B) | ❌ Cloud DB | ❌ Float32 (1,536 B) |
-| **Hamming Search Speed** | **5.1 µs per comparison** | 20–80 ms (Cloud HTTP) | 5–15 ms | 50–150 ms | 15–50 ms (Postgres) |
 | **Tainted Context Guard** | ✅ **Blocks Web & Terminal Injections** | ❌ Unprotected | ❌ Unprotected | ❌ Unprotected | ❌ Unprotected |
 | **Cryptographic Tombstones** | ✅ **Hard Veto on Disproven Facts** | ❌ None | ❌ None | ❌ None | ❌ None |
 | **Zero-Daemon Git Sync** | ✅ **SHA-256 Snapshot Export/Import** | ❌ Vendor Lock-in | ❌ Server dependent | ❌ Cloud Lock-in | ❌ Cloud Lock-in |
@@ -94,11 +91,8 @@ Every canonical memory in MemCore is tagged with four rigorous cryptographic gov
 
 ## ⚡ Core Engineering Capabilities
 
-### 1. 1-Bit Binary Vector Quantization & Two-Stage Recall
-Standard 384-dimensional dense vectors consume 1,536 bytes of RAM each. MemCore packs 384-dim vectors into **48-byte bitmasks** using 1-bit quantization ($v_i > 0 	o 1$):
-- **32.0x Smaller RAM Footprint:** 96.9% reduction in vector storage.
-- **Microsecond Hamming Pruning:** Compares 10,000 vectors in **51.46 ms (5.1 µs per comparison)** directly in CPU L1 cache.
-- **Two-Stage Precision:** Stage 1 filters candidate IDs via Hamming distance bit-popcounts; Stage 2 re-ranks the top slice using exact cosine similarity.
+### 1. Deterministic Lexical Recall (FTS5 BM25 + Thai Bigrams + Bilingual Aliases)
+Recall is pure SQLite FTS5 BM25 with no model dependency and no network calls. Glued Thai/CJK words are bridged with character bigrams and an exact substring lane, and a small Thai↔English alias map catches cross-language queries (`laptop` → `thinkpad`, `แบต` → `battery`). Deterministic, offline, and fast enough to run on every turn.
 
 ### 2. Tainted Context Guard (Anti-Poisoning Rail)
 Untrusted I/O operations (`web_search`, `web_extract`, `browser_exec`, and terminal commands like `curl`, `wget`, `git clone`, `Invoke-WebRequest`) automatically stamp `tainted: True` on the turn event:
@@ -182,7 +176,7 @@ plugins:
 
 ### Hermes Agent Exposed Tools
 - **`memory_remember(content, type)`**: Records durable project-scope facts, decisions, and constraints.
-- **`memory_search(query, include_content=true)`**: Executes hybrid FTS5 BM25 + dense vector RRF recall over canonical memory.
+- **`memory_search(query, include_content=true)`**: Executes FTS5 BM25 lexical recall (Thai bigrams + bilingual aliases) over canonical memory.
 - **`memory_list(lifecycle, type, limit, offset)`**: Browses stored memories without a query; returns labels and previews.
 - **`memory_show(memory_id)`**: Inspects one memory in full: labels, provenance, version chain, tombstones, triples, linked decisions.
 - **`memory_feedback(memory_id, outcome)`**: Marks used memories as `accepted`, `rejected`, or `stale`.
@@ -220,7 +214,7 @@ memcore compact --project default --days 30
 | Pillar | Hub | Role |
 | :--- | :--- | :--- |
 | **[trimtok](https://github.com/Stxyu-p/trimtok)** | `~/.trimtok` | **Context Shield:** Cuts terminal, traceback, web, and JSON bloat by 38–48% with instant `#c1` CCR recovery. |
-| **[MemCore](https://github.com/Stxyu-p/memcore)** | `~/.memcore` | **Governed Memory:** Shared bitemporal memory with hard SQL scope boundaries, 1-bit vector quantization, and Tainted Context Guard. |
+| **[MemCore](https://github.com/Stxyu-p/memcore)** | `~/.memcore` | **Governed Memory:** Shared bitemporal memory with hard SQL scope boundaries, deterministic lexical recall, and Tainted Context Guard. |
 | **[Skill Proof](https://github.com/Stxyu-p/skill-proof)** | `~/.skill-proof` | **Skill Vault & Router:** Sub-2ms deterministic router, multi-lingual negation veto, and OS NTFS read-only Immutable SOP protection. |
 
 ```bash

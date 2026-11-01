@@ -8,7 +8,6 @@ import sys
 import time
 
 from . import core
-from . import embedding
 from . import export as export_mod
 from . import ingest
 from . import store
@@ -637,67 +636,3 @@ def _remove_stale_sidecars(db_path):
 
 
 
-def cmd_embed(args):
-    conn = _open(args)
-    provider = getattr(args, 'provider', None)
-    model = getattr(args, 'model', None)
-    endpoint = getattr(args, 'endpoint', None)
-    api_key = getattr(args, 'api_key', None)
-    limit = None if getattr(args, 'all_memories', False) else getattr(args, 'limit', 100)
-    dry_run = getattr(args, 'dry_run', False)
-
-    target_endpoint, target_model, _ = embedding.resolve_config(
-        provider=provider, endpoint=endpoint, model=model, api_key=api_key
-    )
-    if not target_endpoint:
-        print('Embedding is disabled or no valid endpoint configured.')
-        conn.close()
-        return
-
-    query = (
-        'SELECT m.id, v.id, v.content '
-        'FROM memory m '
-        'JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id '
-        'LEFT JOIN memory_embedding e ON e.version_id = v.id AND e.memory_id = m.id '
-        "WHERE e.vector IS NULL AND m.lifecycle IN ('candidate', 'accepted', 'conflict') "
-        'ORDER BY m.created_at DESC'
-    )
-    params = ()
-    if limit is not None:
-        query += ' LIMIT ?'
-        params += (limit,)
-
-    rows = conn.execute(query, params).fetchall()
-    if dry_run:
-        p_label = provider or 'default'
-        print(f'Dry run: {len(rows)} memories need embedding (provider: {p_label}, model: {target_model})')
-        conn.close()
-        return
-
-    if not rows:
-        print('All memories are already embedded.')
-        conn.close()
-        return
-
-    chunk_size = 20
-    total_embedded = 0
-    for i in range(0, len(rows), chunk_size):
-        chunk = rows[i:i + chunk_size]
-        texts = [r[2] for r in chunk]
-        vectors = embedding.get_embeddings_batch(
-            texts,
-            endpoint=endpoint,
-            model=model,
-            api_key=api_key,
-            provider=provider,
-        )
-        if not vectors or len(vectors) != len(chunk):
-            print(f'Failed to fetch embeddings from {target_endpoint}')
-            break
-        for (mid, vid, _), vec in zip(chunk, vectors):
-            store.store_embedding(conn, mid, vid, target_model, vec)
-            total_embedded += 1
-        conn.commit()
-
-    print(f'Embedded {total_embedded} memories (model: {target_model})')
-    conn.close()

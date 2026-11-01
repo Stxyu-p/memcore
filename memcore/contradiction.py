@@ -4,10 +4,8 @@ Detects stored claims that disagree: same subject, incompatible polarity.
 Proposes conflicts; never auto-resolves. The engine surfaces candidates,
 a human or governed tool decides via supersede/reject.
 
-Deliberately lexical (substring + polarity word lists incl. Thai), not
-embedding-based: the recall baseline showed paraphrase=0.50, so a vector
-layer would add a dependency without solving the underlying problem first.
-No PyThaiNLP unless the owner approves a dep (decision 2026-10-03).
+Deliberately lexical (substring + polarity word lists incl. Thai), with no
+model dependency. No PyThaiNLP unless the owner approves a dep (decision 2026-10-03).
 """
 import re
 import unicodedata

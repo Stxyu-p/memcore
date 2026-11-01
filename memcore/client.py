@@ -6,7 +6,7 @@ from __future__ import annotations
 import pathlib
 from typing import Any
 
-from . import core, embedding, store
+from . import core, store
 
 DEFAULT_DB = str(pathlib.Path.home() / ".memcore" / "memory.db")
 
@@ -26,19 +26,11 @@ class MemCore:
         db_path: str | None = None,
         project: str = "default",
         agent: str = "default",
-        provider: str | None = None,
-        endpoint: str | None = None,
-        model: str | None = None,
-        api_key: str | None = None,
         auto_provision: bool = True,
     ):
         self.db_path = db_path or DEFAULT_DB
         self.project = project if isinstance(project, str) and project.strip() else "default"
         self.agent = agent if isinstance(agent, str) and agent.strip() else "default"
-        self.provider = provider
-        self.endpoint = endpoint
-        self.model = model
-        self.api_key = api_key
         self.conn = store.open_store(self.db_path)
         if auto_provision:
             # Resolve existing project or insert
@@ -118,7 +110,6 @@ class MemCore:
         self,
         query: str = "",
         limit: int = 5,
-        query_vec: list[float] | None = None,
         include_content: bool = True,
         preview_chars: int = 180,
         mode: str = "standard",
@@ -126,24 +117,14 @@ class MemCore:
         changed_since: str | None = None,
         max_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Hybrid search memories with governance checks, temporal/strict modes, and RRF ranking."""
+        """Lexical search with governance checks and temporal/strict modes."""
         self._check_open()
-        if query_vec is None and query and str(query).strip():
-            query_vec = embedding.get_embedding(
-                query,
-                endpoint=self.endpoint,
-                model=self.model,
-                api_key=self.api_key,
-                provider=self.provider,
-                timeout=0.15,
-            )
         rows = core.recall(
             self.conn,
             self.project,
             self.agent,
             query,
             limit=limit,
-            query_vec=query_vec,
             mode=mode,
             as_of=as_of,
             changed_since=changed_since,

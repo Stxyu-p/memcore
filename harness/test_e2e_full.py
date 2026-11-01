@@ -26,7 +26,6 @@ from memcore.write import create_memory, supersede, reject_value, list_tombstone
 from memcore.recall import search, recall, query_triples
 from memcore.compaction import compact_project_memories
 from memcore.export_project import export_project_snapshot, import_project_snapshot
-from memcore.store_vectors import pack_binary_vector, hamming_distance
 
 
 def run_e2e():
@@ -83,23 +82,8 @@ def run_e2e():
         print(f"  -> query_triples(analytics_backend): returned {len(triples_found)} active triples.")
         assert len(triples_found) == 2, f"Expected 2 triples, found {len(triples_found)}"
 
-        # 3. 1-Bit Binary Vector Quantization Verification
-        print("\n[Phase 3] Verifying 1-Bit Binary Vector Quantization...")
-        raw_float_vector = [1.0 if (i % 2 == 0) else -1.0 for i in range(384)]
-        bin_vector = pack_binary_vector(raw_float_vector)
-        print(f"  -> Packed 384-dimensional float32 vector into {len(bin_vector)} bytes (target: 48 bytes).")
-        assert len(bin_vector) == 48, f"Expected 48 bytes, got {len(bin_vector)}"
-        self_dist = hamming_distance(bin_vector, bin_vector)
-        assert self_dist == 0, f"Expected self Hamming distance 0, got {self_dist}"
-
-        inverted_float = [-v for v in raw_float_vector]
-        bin_inverted = pack_binary_vector(inverted_float)
-        inv_dist = hamming_distance(bin_vector, bin_inverted)
-        print(f"  -> Self Hamming distance = {self_dist}, Inverted Hamming distance = {inv_dist}/384 bits.")
-        assert inv_dist == 384, f"Expected 384 bit difference, got {inv_dist}"
-
-        # 4. Multilingual Hybrid Recall
-        print("\n[Phase 4] Testing Multilingual Hybrid Recall (English & Thai)...")
+        # 3. Multilingual Lexical Recall
+        print("\n[Phase 3] Testing Multilingual Lexical Recall (English & Thai)...")
         en_hits = recall(conn, project_id="proj-prod", agent_id="mika", query="analytics port 9440", limit=5)
         print(f"  -> Recall English ('analytics port 9440'): found {len(en_hits)} candidates.")
         assert any(h[0] == m1_id for h in en_hits), "m1 not found in English recall"

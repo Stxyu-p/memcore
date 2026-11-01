@@ -8,7 +8,6 @@ import unicodedata
 import uuid
 
 from . import ablation as _ablation
-from . import embedding
 from . import store
 from datetime import datetime
 from datetime import timezone
@@ -317,40 +316,6 @@ def _membership_role(conn, project_id, agent_id):
 #: for filtering; it never widens read access (project -> members, anything
 #: else -> owner only, unchanged).
 SCOPE_DETAIL_PREFIXES = ('skill:', 'episode:', 'session:')
-
-
-
-def _fetch_embedding_safe(content: str):
-    """Best-effort embedding fetch for use OUTSIDE write transactions (H1).
-
-    Network/model I/O must never run while a BEGIN IMMEDIATE write lock is
-    held: with five agents on one store it blocks every writer and can blow
-    the busy_timeout. Callers precompute the vector here and persist it
-    inside the transaction with ``_store_embedding_safe`` (pure SQL).
-    """
-    try:
-        vec = embedding.get_embedding(content, timeout=2.5)
-        return vec if vec else None
-    except Exception:
-        return None
-
-
-
-def _store_embedding_safe(conn, memory_id: str, version_id: str, vec) -> None:
-    """Persist a precomputed embedding with SQL only (safe inside a write tx).
-
-    Batched callers that already hold a transaction (``_manage_transaction=
-    False``) pass ``vec=None`` and skip embedding instead of firing per-row
-    HTTP inside the lock; ``memcore embed`` backfills those rows later.
-    """
-    if not vec:
-        return
-    if store._table_exists(conn, 'memory_embedding'):
-        try:
-            store.store_embedding(conn, memory_id, version_id,
-                                  embedding.DEFAULT_MODEL, vec)
-        except Exception:
-            pass
 
 
 

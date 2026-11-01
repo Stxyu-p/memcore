@@ -287,21 +287,26 @@ def cmd_export_project(args):
     """Export canonical project memories and tombstones to .memcore.jsonl."""
     from .export_project import export_project_snapshot
     conn = _open(args)
-    project_id = args.project
+    project_id = _project_or_exit(conn, args.project)
+    if project_id is None:
+        sys.exit('error: project not found')
     out_path = getattr(args, 'out', None) or '.memcore.jsonl'
     res = export_project_snapshot(conn, project_id=project_id, out_path=out_path)
-    print(f"Exported {res['memory_count']} canonical memories and {res['tombstone_count']} tombstones to '{res['out_path']}' (seal: {res['seal_sha256'][:12]}...)")
+    print(f"Exported {res['memory_count']} canonical memories, {res.get('decision_count',0)} decisions and {res['tombstone_count']} tombstones to '{res['out_path']}' (seal: {res['seal_sha256'][:12]}...)")
 
 
 def cmd_import_project(args):
     """Import project memories and tombstones from .memcore.jsonl snapshot."""
     from .export_project import import_project_snapshot
     conn = _open(args)
-    project_id = args.project
+    project_id = _project_or_exit(conn, args.project)
+    if project_id is None:
+        sys.exit('error: project not found')
     agent_id = getattr(args, 'agent', None) or 'curator'
+    agent_id = _agent_identity_or_exit(conn, agent_id)[0]
     in_path = getattr(args, 'in_file', None) or getattr(args, 'in', None) or '.memcore.jsonl'
     res = import_project_snapshot(conn, project_id=project_id, agent_id=agent_id, in_path=in_path)
-    print(f"Imported {res['imported_memories']} memories, {res['imported_tombstones']} tombstones (skipped {res['skipped_existing']} existing) from '{in_path}'")
+    print(f"Imported {res['imported_memories']} memories, {res.get('imported_decisions',0)} decisions, {res['imported_tombstones']} tombstones (skipped {res['skipped_existing']} existing) from '{in_path}'")
 
 
 

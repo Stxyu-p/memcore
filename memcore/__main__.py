@@ -33,6 +33,13 @@ from .cli_support import (
     _agent_identity_or_exit,
 )
 
+from .cli_decision import (
+    cmd_decision_create,
+    cmd_decision_list,
+    cmd_decision_show,
+    cmd_decision_supersede,
+)
+
 from .cli_memory import (
     cmd_remember,
     cmd_search,
@@ -251,6 +258,41 @@ def main(argv=None):
     p.add_argument('--apply', action='store_true',
                    help='perform the sweep (dry-run otherwise)')
     p.set_defaults(func=cmd_gc)
+
+    p = sub.add_parser('decision', help='governed decision records (why/how we decided)', parents=[common])
+    dsub = p.add_subparsers(dest='subcommand', required=True)
+    dc = dsub.add_parser('create', parents=[common])
+    dc.add_argument('--project', required=True)
+    dc.add_argument('--agent', required=True)
+    dc.add_argument('--title', required=True)
+    dc.add_argument('--rationale', required=True)
+    dc.add_argument('--scope', default='project', choices=['project', 'private'])
+    dc.add_argument('--context', default=None)
+    dc.add_argument('--options', default=None, help='JSON array of options considered')
+    dc.add_argument('--chosen', default=None)
+    dc.add_argument('--consequences', default=None)
+    dc.add_argument('--status', default='proposed', choices=['proposed', 'accepted', 'rejected', 'superseded', 'deprecated'])
+    dc.add_argument('--lifecycle', default='candidate', choices=['candidate', 'accepted', 'conflict', 'superseded', 'rejected', 'disabled'])
+    dc.set_defaults(func=cmd_decision_create)
+    dl = dsub.add_parser('list', parents=[common])
+    dl.add_argument('--project', required=True)
+    dl.add_argument('--agent', required=True)
+    dl.add_argument('--query', default=None)
+    dl.add_argument('--status', default=None)
+    dl.add_argument('--lifecycle', default=None)
+    dl.add_argument('--limit', type=int, default=20)
+    dl.set_defaults(func=cmd_decision_list)
+    ds = dsub.add_parser('show', parents=[common])
+    ds.add_argument('decision_id')
+    ds.add_argument('--agent', required=True)
+    ds.set_defaults(func=cmd_decision_show)
+    dsp = dsub.add_parser('supersede', parents=[common])
+    dsp.add_argument('old_id')
+    dsp.add_argument('--agent', required=True)
+    dsp.add_argument('--title', required=True)
+    dsp.add_argument('--rationale', required=True)
+    dsp.add_argument('--reason', default=None)
+    dsp.set_defaults(func=cmd_decision_supersede)
 
     sub.add_parser('stats', help='operational statistics', parents=[common]).set_defaults(func=cmd_stats)
 

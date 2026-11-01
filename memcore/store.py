@@ -16,6 +16,7 @@ import unicodedata
 
 from .schema_defs import _BITEMPORAL_VALID_UNTIL
 from .schema_defs import _CURRENT_VERSION_OWNERSHIP
+from .schema_defs import _DECISION_LAYER
 from .schema_defs import _FTS_TRIGGERS
 from .schema_defs import _IDEMPOTENCY
 from .schema_defs import _INGEST_JOURNAL
@@ -220,6 +221,7 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0018_memory_embedding', _MEMORY_EMBEDDING),
     ('0019_memory_triples', _MEMORY_TRIPLES),
     ('0020_binary_vector', _BINARY_VECTOR_COLUMN),
+    ('0021_decision_layer', _DECISION_LAYER),
 ]
 
 
@@ -987,6 +989,16 @@ def check_migration_lock(conn):
 
 
 
+def _decision_fts_sync_report(conn) -> dict:
+    """FTS rowid count vs decision count; in_sync is the health contract."""
+    if not _table_exists(conn, 'decision'):
+        return {'fts_rows': 0, 'decision_rows': 0, 'in_sync': True}
+    fts_rows = conn.execute('SELECT COUNT(*) FROM decision_fts').fetchone()[0]
+    dec_rows = conn.execute('SELECT COUNT(*) FROM decision').fetchone()[0]
+    return {'fts_rows': fts_rows, 'decision_rows': dec_rows,
+            'in_sync': fts_rows == dec_rows}
+
+
 def _fts_sync_report(conn) -> dict:
     """FTS rowid count vs version count; in_sync is the health contract."""
     fts_rows = conn.execute(
@@ -1058,6 +1070,7 @@ def inspect_storage_health(conn, db_path) -> dict:
         'current_version_ownership_violations':
             _current_version_ownership_violations(conn),
         'fts_index': _fts_sync_report(conn),
+        'decision_fts_index': _decision_fts_sync_report(conn),
         'migration_locks': check_migration_lock(conn) or 'none',
         'backups': verify_backups(str(db_path)),
         'provenance': verify_all_seals(conn),

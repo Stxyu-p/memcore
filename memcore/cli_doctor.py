@@ -208,6 +208,7 @@ def _print_doctor_bindings(report, skip_binding):
 def _print_doctor_health(report):
     """FTS / corroboration / provenance / backup / journal / deploy sections."""
     print(f"fts index: in_sync={report['fts_index']['in_sync']}")
+    print(f"decision fts index: in_sync={report['decision_fts_index']['in_sync']}")
     corrob = report['corroboration']
     print(
         f"corroboration: {corrob['fingerprints']} fingerprint(s) "
@@ -297,11 +298,13 @@ def _doctor_unhealthy(report, skip_binding=False) -> bool:
         bool(report['current_version_ownership_violations']),
         bool(report['memory_fingerprint_violations']),
         bool(report['unguarded_rejected_memories']),
+        bool(report.get('unguarded_rejected_decisions')),
         bool(report['tombstone_violations']),
         bool(report['agent_name_collisions']),
         bool(report['project_name_collisions']),
         not report['store_parent_writable'],
         not report['fts_index']['in_sync'],
+        not report['decision_fts_index']['in_sync'],
         not report['backups']['recovery_ready'],
         report['provenance']['invalid'] > 0,
         report['migration_locks'] != 'none',

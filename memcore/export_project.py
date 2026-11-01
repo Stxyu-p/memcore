@@ -15,6 +15,7 @@ import uuid
 from typing import Any
 
 from . import store
+from . import decision
 from .write import create_memory, fingerprint, MemCoreError
 
 SNAPSHOT_VERSION = 1
@@ -69,6 +70,43 @@ def export_project_snapshot(
             "triples": triples,
         })
 
+    # 1b. Fetch accepted decisions
+    decision_count = 0
+    if store._table_exists(conn, "decision"):
+        d_cur = conn.execute(
+            """
+            SELECT title, context, options, chosen, rationale, consequences, status,
+                   lifecycle, verification, freshness, pinned, critical
+            FROM decision
+            WHERE project_id = ? AND scope = 'project' AND lifecycle = 'accepted'
+            ORDER BY title ASC
+            """,
+            (project_id,),
+        )
+        for dr in d_cur.fetchall():
+            title, context, options, chosen, rationale, consequences, status, \
+                lifecycle, verification, freshness, pinned, critical = dr
+            try:
+                opts = json.loads(options) if options else None
+            except (json.JSONDecodeError, TypeError):
+                opts = None
+            records.append({
+                "type": "decision",
+                "title": title,
+                "context": context,
+                "options": opts,
+                "chosen": chosen,
+                "rationale": rationale,
+                "consequences": consequences,
+                "status": status,
+                "lifecycle": lifecycle,
+                "verification": verification,
+                "freshness": freshness,
+                "pinned": pinned,
+                "critical": critical,
+            })
+            decision_count += 1
+
     # 2. Fetch active tombstones
     t_cur = conn.execute(
         """
@@ -90,7 +128,7 @@ def export_project_snapshot(
         })
 
     # Sort records deterministically by fingerprint
-    records.sort(key=lambda x: (x["type"], x["fingerprint"]))
+    records.sort(key=lambda x: (x.get("type", ""), x.get("fingerprint", "") or x.get("title", "")))
 
     # Prepare lines and calculate content hash
     lines = [json.dumps(rec, ensure_ascii=False, sort_keys=True) for rec in records]
@@ -103,6 +141,7 @@ def export_project_snapshot(
         "project_id": project_id,
         "seal_sha256": seal_hash,
         "memory_count": len(mem_rows),
+        "decision_count": decision_count,
         "tombstone_count": tombstone_count,
     }
 
@@ -114,6 +153,7 @@ def export_project_snapshot(
     return {
         "project_id": project_id,
         "memory_count": len(mem_rows),
+        "decision_count": decision_count,
         "tombstone_count": tombstone_count,
         "out_path": str(out_p),
         "seal_sha256": seal_hash,
@@ -150,6 +190,7 @@ def import_project_snapshot(
         raise MemCoreError(f"Snapshot seal mismatch: expected {expected_seal}, got {actual_seal}")
 
     imported_memories = 0
+    imported_decisions = 0
     imported_tombstones = 0
     skipped_existing = 0
 
@@ -204,9 +245,43 @@ def import_project_snapshot(
                 )
                 imported_tombstones += 1
 
+            elif itype == "decision":
+                title = item.get("title")
+                rationale = item.get("rationale")
+                if not title or not rationale:
+                    continue
+                cur = conn.execute(
+                    "SELECT 1 FROM decision WHERE project_id = ? AND title = ? AND rationale = ?",
+                    (project_id, title, rationale),
+                )
+                if cur.fetchone():
+                    skipped_existing += 1
+                    continue
+                decision.create_decision(
+                    conn,
+                    project_id=project_id,
+                    agent_id=agent_id,
+                    title=title,
+                    rationale=rationale,
+                    scope="project",
+                    context=item.get("context"),
+                    options=item.get("options"),
+                    chosen=item.get("chosen"),
+                    consequences=item.get("consequences"),
+                    status=item.get("status", "proposed"),
+                    lifecycle=item.get("lifecycle", "accepted"),
+                    verification=item.get("verification", "unverified"),
+                    freshness=item.get("freshness", "current"),
+                    pinned=item.get("pinned", 0),
+                    critical=item.get("critical", 0),
+                    _manage_transaction=False,
+                )
+                imported_decisions += 1
+
     return {
         "project_id": project_id,
         "imported_memories": imported_memories,
+        "imported_decisions": imported_decisions,
         "imported_tombstones": imported_tombstones,
         "skipped_existing": skipped_existing,
     }

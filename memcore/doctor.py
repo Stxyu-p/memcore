@@ -213,6 +213,27 @@ def inspect_governance_health(conn) -> dict:
             is None
         ):
             report["unguarded_rejected_memories"].append(memory_id)
+    # Decision-layer parity: rejected decisions must also be tombstone-guarded.
+    report["unguarded_rejected_decisions"] = []
+    if store._table_exists(conn, "decision"):
+        from . import decision as _decision_mod
+        rejected_d_rows = conn.execute(
+            "SELECT d.id, d.project_id, d.scope, d.owner_agent_id, d.title, d.rationale "
+            "FROM decision d WHERE d.lifecycle='rejected' ORDER BY d.id"
+        ).fetchall()
+        for did, project_id, scope, owner_agent_id, title, rationale in rejected_d_rows:
+            fp = _decision_mod._fingerprint_decision(title, rationale)
+            if (
+                _tombstone_active(
+                    conn, fp, project_id, scope=scope, agent_id=owner_agent_id
+                )
+                is None
+            ):
+                report["unguarded_rejected_decisions"].append(did)
+    report["decision_count"] = (
+        conn.execute("SELECT COUNT(*) FROM decision").fetchone()[0]
+        if store._table_exists(conn, "decision") else 0
+    )
     report["tombstone_violations"] = _tombstone_scope_violations(conn)
     report["memberships"] = conn.execute(
         "SELECT p.name, a.name, pm.role FROM project_membership pm "
@@ -357,6 +378,8 @@ def stats(conn):
     grad_cands = skill_graduation_candidates(conn, include_content=False)
     return {
         "memories_total": one("SELECT COUNT(*) FROM memory"),
+        "decisions_total": (one("SELECT COUNT(*) FROM decision")
+                           if store._table_exists(conn, "decision") else 0),
         "by_lifecycle": by_lifecycle,
         "by_scope": by_scope,
         "top_agents": [{"agent": n, "memories": c} for n, c in top_agents],

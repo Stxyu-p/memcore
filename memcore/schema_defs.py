@@ -347,3 +347,137 @@ _BINARY_VECTOR_COLUMN = """
 ALTER TABLE memory_embedding ADD COLUMN binary_vector BLOB;
 """
 
+
+
+_DECISION_LAYER = """
+
+-- 0021: governed reasoning/decision records (Tier-1 "higher" layer).
+
+-- A decision captures why/how we decided, distinct from facts (memory).
+
+-- Reuses memcore governance labels (lifecycle/verification/freshness/pinned/critical).
+
+CREATE TABLE IF NOT EXISTS decision (
+
+    id                  TEXT PRIMARY KEY,
+
+    project_id          TEXT NOT NULL REFERENCES project(id),
+
+    scope               TEXT NOT NULL CHECK (scope IN ('project', 'private')),
+
+    owner_agent_id      TEXT NOT NULL REFERENCES agent(id),
+
+    title               TEXT NOT NULL,
+
+    context             TEXT,
+
+    options             TEXT,
+
+    chosen              TEXT,
+
+    rationale           TEXT NOT NULL,
+
+    consequences        TEXT,
+
+    status              TEXT NOT NULL DEFAULT 'proposed'
+
+                            CHECK (status IN ('proposed', 'accepted', 'rejected', 'superseded', 'deprecated')),
+
+    lifecycle           TEXT NOT NULL DEFAULT 'candidate'
+
+                            CHECK (lifecycle IN ('candidate', 'accepted', 'conflict', 'superseded', 'rejected', 'disabled')),
+
+    verification        TEXT NOT NULL DEFAULT 'unverified'
+
+                            CHECK (verification IN ('unverified', 'source_backed', 'runtime_verified', 'user_authoritative')),
+
+    freshness           TEXT NOT NULL DEFAULT 'current'
+
+                            CHECK (freshness IN ('current', 'aging', 'stale')),
+
+    pinned              INTEGER NOT NULL DEFAULT 0,
+
+    critical            INTEGER NOT NULL DEFAULT 0,
+
+    supersedes_id       TEXT REFERENCES decision(id),
+
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_project ON decision(project_id);
+
+CREATE INDEX IF NOT EXISTS idx_decision_scope ON decision(project_id, scope);
+
+CREATE INDEX IF NOT EXISTS idx_decision_lifecycle ON decision(lifecycle);
+
+CREATE INDEX IF NOT EXISTS idx_decision_status ON decision(status);
+
+CREATE INDEX IF NOT EXISTS idx_decision_supersedes ON decision(supersedes_id);
+
+
+
+CREATE VIRTUAL TABLE IF NOT EXISTS decision_fts USING fts5(
+
+    title, context, rationale, consequences,
+
+    content='decision', content_rowid='rowid'
+
+);
+
+
+
+CREATE TRIGGER IF NOT EXISTS decision_ai AFTER INSERT ON decision BEGIN
+
+  INSERT INTO decision_fts(rowid, title, context, rationale, consequences)
+
+  VALUES (new.rowid, new.title, new.context, new.rationale, new.consequences);
+
+END;
+
+CREATE TRIGGER IF NOT EXISTS decision_ad AFTER DELETE ON decision BEGIN
+
+  INSERT INTO decision_fts(decision_fts, rowid, title, context, rationale, consequences)
+
+  VALUES ('delete', old.rowid, old.title, old.context, old.rationale, old.consequences);
+
+END;
+
+CREATE TRIGGER IF NOT EXISTS decision_au AFTER UPDATE ON decision BEGIN
+
+  INSERT INTO decision_fts(decision_fts, rowid, title, context, rationale, consequences)
+
+  VALUES ('delete', old.rowid, old.title, old.context, old.rationale, old.consequences);
+
+  INSERT INTO decision_fts(rowid, title, context, rationale, consequences)
+
+  VALUES (new.rowid, new.title, new.context, new.rationale, new.consequences);
+
+END;
+
+
+
+CREATE TABLE IF NOT EXISTS decision_link (
+
+    decision_id  TEXT NOT NULL REFERENCES decision(id) ON DELETE CASCADE,
+
+    target_type  TEXT NOT NULL CHECK (target_type IN ('memory', 'evidence')),
+
+    target_id    TEXT NOT NULL,
+
+    relation     TEXT NOT NULL CHECK (relation IN ('context_for', 'supports', 'contradicts', 'supersedes')),
+
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+
+    PRIMARY KEY (decision_id, target_type, target_id)
+
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_link_decision ON decision_link(decision_id);
+
+CREATE INDEX IF NOT EXISTS idx_decision_link_target ON decision_link(target_type, target_id);
+
+"""
+

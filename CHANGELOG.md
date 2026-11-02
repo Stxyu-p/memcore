@@ -6,22 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-11-02
+
 ### Added
-- **Governed Decision Layer (`decision`):** structured records for why/how a choice was made — title, context, options, chosen, rationale, consequences, status, supersede chain, FTS, and memory/evidence links.
-- **Memory inspection CLI:** `memcore list` (filter by scope/lifecycle/type/verification/freshness, paginate, JSON) and `memcore show <id>` (labels, provenance, version chain, tombstones, triples, linked decisions).
-- **Operational snapshot:** `memcore pulse` reports counts, 24h writes/recalls, pending reviews, and a recent write activity feed.
-- **Agent-facing read tools:** `memory_list` and `memory_show` in the Hermes plugin; `memory_list` in the MCP server.
+- **Governed Decision Layer (`decision`):** Structured records for why and how architectural choices were made — title, context, options, chosen path, rationale, consequences, status, supersede chain, FTS, and memory/evidence links.
+- **Observability Suite (`list`, `show`, `pulse`):** Comprehensive memory inspection tools. `memcore list` browses memories with 5-axis filtering and pagination; `memcore show <id>` inspects labels, full provenance, version history, active tombstones, and linked decisions; `memcore pulse` gives a one-screen operational snapshot with 24h metrics and a 5-event write feed.
+- **Agent-Facing Inspection Tools:** Native `memory_list` and `memory_show` tools in Hermes Agent; `memory_list` in the stdio MCP server.
+- **Bilingual Alias Bridges:** Deterministic Thai↔English token mappings with whole-word regex matching for cross-language lexical recall without translation latency.
 
 ### Changed
-- Browse/inspect queries now live in one core implementation (`core.list_memories`, `core.get_memory_detail`) shared by CLI, plugin, and MCP instead of three copies.
-- Migration-version tests assert the current migration dynamically instead of hardcoding an index.
-
-### Removed
-- **Semantic embedding stack:** local ONNX/fastembed/model2vec providers, HTTP embedding providers, `memory_embedding` storage (migration `0022_drop_embedding`), the vector recall lane/RRF fusion, `memcore embed`, and the `sqlite-vec`/`local-embed` extras. Recall is now deterministic lexical FTS5 with no model, no network, and no fallback.
+- **100% Offline Lexical Recall:** Fully detached unvalidated vector embedding stack (local ONNX, fastembed, model2vec, HTTP embedding lanes) in favor of pure, deterministic SQLite FTS5 BM25 with character bigrams and substring lanes.
+- **Database Simplification (Migration `0022_drop_embedding`):** Dropped `memory_embedding` table, eliminating vector memory storage overhead and native C/ONNX dependencies.
+- **Unified Query Implementation:** Replaced duplicated SQL across CLI, Hermes plugin, and MCP server with shared `core.list_memories` and `core.get_memory_detail`.
 
 ### Fixed
-- `export-project`/`import-project` resolve project and agent identities consistently and round-trip decisions.
-- Doctor reports decision FTS sync and unguarded rejected decisions.
+- **Snapshot Synchronization:** Corrected `export-project` and `import-project` to resolve project/agent identities consistently and round-trip decision records.
+- **Hermes Runtime Compatibility:** `memcore doctor` now supports both `PyYAML` and `ruamel-yaml`.
 
 ## [2.5.0] - 2026-10-29
 

@@ -209,13 +209,23 @@ def _binding_from_settings(profile, cfg_path, settings):
 
 
 
-def _discover_hermes_memcore_bindings():
-    """Best-effort read of enabled MemCore bindings from Hermes YAML."""
+def _safe_load_yaml(text: str) -> dict:
+    """Parse YAML using PyYAML if present, falling back to ruamel.yaml."""
     try:
         import yaml
+        return yaml.safe_load(text) or {}
+    except ImportError:
+        pass
+    try:
+        from ruamel.yaml import YAML
+        y = YAML(typ='safe')
+        return y.load(text) or {}
     except Exception as exc:
-        return {'available': False, 'error': f'PyYAML unavailable: {exc}', 'bindings': []}
+        raise ImportError(f'YAML parser unavailable (install pyyaml or ruamel-yaml): {exc}')
 
+
+def _discover_hermes_memcore_bindings():
+    """Best-effort read of enabled MemCore bindings from Hermes YAML."""
     root = _hermes_root_with_config()
     if root is None:
         return {'available': False, 'error': 'Hermes config.yaml not found', 'bindings': []}
@@ -224,11 +234,13 @@ def _discover_hermes_memcore_bindings():
     errors = []
     for profile, cfg_path in _hermes_profile_config_files(root):
         try:
-            data = yaml.safe_load(cfg_path.read_text(encoding='utf-8')) or {}
+            data = _safe_load_yaml(cfg_path.read_text(encoding='utf-8'))
             settings = _enabled_memcore_settings(data)
             if settings is None:
                 continue
             bindings.append(_binding_from_settings(profile, cfg_path, settings))
+        except ImportError as exc:
+            return {'available': False, 'error': str(exc), 'bindings': []}
         except Exception as exc:
             errors.append(f'{cfg_path}: {type(exc).__name__}: {exc}')
     return {'available': True, 'root': str(root), 'bindings': bindings, 'errors': errors}

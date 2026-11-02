@@ -12,10 +12,11 @@ import unittest
 from memcore import __main__ as cli
 from memcore import core, store
 
-try:  # PyYAML is a declared dependency; skip binding tests on minimal envs.
-    import yaml  # noqa: F401
+try:  # Uses PyYAML or ruamel.yaml; skip binding tests only if no parser is available.
+    from memcore.cli_support import _safe_load_yaml
+    _safe_load_yaml("a: 1")
     _HAS_YAML = True
-except ImportError:
+except Exception:
     _HAS_YAML = False
 
 

@@ -17,6 +17,7 @@ from .cli_support import _open
 from .cli_support import _open_readonly
 from .cli_support import _out
 from .cli_support import _project_or_exit
+from .cli_support import _safe_load_yaml
 
 from .cli_doctor import (
     _plugin_deployment_report,
@@ -251,8 +252,7 @@ def _default_export_binding():
         if not path.is_file():
             continue
         try:
-            import yaml  # optional; falls back to the explicit flags
-            cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            cfg = _safe_load_yaml(path.read_text(encoding="utf-8"))
         except Exception:
             continue
         settings = (((cfg.get("plugins") or {}).get("entries") or {})

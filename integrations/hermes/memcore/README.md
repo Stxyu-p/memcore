@@ -1,10 +1,12 @@
+<h1 align="center">🧠 MemCore</h1>
+
 <p align="center">
-  <img src="assets/logo.png" width="160" alt="MemCore Logo" />
+  <strong>Governed, Bitemporal, Local-First Memory Engine for Autonomous AI Agent Fleets</strong>
 </p>
 
-# MemCore
-
-**Governed, Bitemporal, Local-First Memory Engine for Autonomous AI Agent Fleets**
+<p align="center">
+  <img src="assets/before-after.svg" width="100%" alt="MemCore - Governed Bitemporal Memory" />
+</p>
 
 Capture broadly. Recall narrowly. Never trust raw conversational history.
 

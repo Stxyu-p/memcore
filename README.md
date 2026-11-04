@@ -1,21 +1,23 @@
+<h1 align="center">🧠 MemCore</h1>
+
 <p align="center">
-  <img src="assets/logo.png" width="160" alt="MemCore Logo" />
+  <strong>Governed, Bitemporal, Local-First Memory &amp; Decision Engine for Autonomous AI Agent Fleets</strong>
 </p>
 
-# MemCore
+<p align="center">
+  <a href="https://pypi.org/project/memcore-omnix/"><img src="https://img.shields.io/pypi/v/memcore-omnix?style=flat-square&color=blue" alt="PyPI" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square" alt="Python" /></a>
+  <a href="#why-memcore"><img src="https://img.shields.io/badge/storage-SQLite_WAL_+_FTS5-07405E?style=flat-square" alt="Storage" /></a>
+  <a href="#core-capabilities"><img src="https://img.shields.io/badge/latency-%3C_4ms_lexical_recall-10b981?style=flat-square" alt="Latency" /></a>
+  <a href="#the-four-pillars-of-epistemic-trust"><img src="https://img.shields.io/badge/governance-Bitemporal_+_Tombstones-8b5cf6?style=flat-square" alt="Governance" /></a>
+  <a href="#tainted-context-guard-anti-poisoning"><img src="https://img.shields.io/badge/security-Tainted_Context_Guard-00D2FF?style=flat-square" alt="Security" /></a>
+  <a href="#deterministic-lexical-recall"><img src="https://img.shields.io/badge/mode-100%25_Offline_Local--First-22c55e?style=flat-square" alt="Mode" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-slate?style=flat-square" alt="License" /></a>
+</p>
 
-**Governed, Bitemporal, Local-First Memory & Decision Engine for Autonomous AI Agent Fleets**
-
-Capture broadly. Recall narrowly. Never trust raw conversational history.
-
-[![PyPI](https://img.shields.io/pypi/v/memcore-omnix?style=flat-square&color=blue)](https://pypi.org/project/memcore-omnix/)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue?style=flat-square)](https://www.python.org/)
-[![Storage](https://img.shields.io/badge/storage-SQLite_WAL_+_FTS5-07405E?style=flat-square)](#why-memcore)
-[![Latency](https://img.shields.io/badge/latency-%3C_4ms_lexical_recall-10b981?style=flat-square)](#core-capabilities)
-[![Governance](https://img.shields.io/badge/governance-Bitemporal_+_Tombstones-8b5cf6?style=flat-square)](#the-four-pillars-of-epistemic-trust)
-[![Security](https://img.shields.io/badge/security-Tainted_Context_Guard-00D2FF?style=flat-square)](#tainted-context-guard-anti-poisoning)
-[![Mode](https://img.shields.io/badge/mode-100%25_Offline_Local--First-22c55e?style=flat-square)](#deterministic-lexical-recall)
-[![License: MIT](https://img.shields.io/badge/license-MIT-slate?style=flat-square)](LICENSE)
+<p align="center">
+  <img src="assets/before-after.svg" width="100%" alt="MemCore - Ungoverned Vector Search vs MemCore Bitemporal Governance" />
+</p>
 
 ---
 

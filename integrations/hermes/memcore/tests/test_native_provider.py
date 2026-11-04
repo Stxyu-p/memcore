@@ -141,6 +141,20 @@ class NativeProviderTest(unittest.TestCase):
             else:
                 os.environ['HERMES_HOME'] = old_home
 
+    def test_event_metadata_carries_trinity_trace_id(self):
+        import os
+        old = os.environ.get('TRINITY_TRACE_ID')
+        os.environ['TRINITY_TRACE_ID'] = 'trinity-memcore-trace-456'
+        try:
+            p = self.provider()
+            meta = p._event_metadata()
+            self.assertEqual(meta.get('trace_id'), 'trinity-memcore-trace-456')
+        finally:
+            if old is None:
+                os.environ.pop('TRINITY_TRACE_ID', None)
+            else:
+                os.environ['TRINITY_TRACE_ID'] = old
+
     def test_provider_contract_and_tools(self):
         p = self.provider()
         self.assertEqual(p.name, 'memcore')
@@ -149,7 +163,8 @@ class NativeProviderTest(unittest.TestCase):
         self.assertEqual(names, {
             'memory_remember', 'memory_search', 'memory_promote',
             'memory_supersede', 'memory_reject', 'memory_feedback',
-            'memory_review_queue', 'memory_review_decide'
+            'memory_review_queue', 'memory_review_decide',
+            'memory_show', 'memory_list'
         })
         self.assertIn('journal', p.system_prompt_block().lower())
         self.assertIn('untrusted historical data', p.system_prompt_block().lower())

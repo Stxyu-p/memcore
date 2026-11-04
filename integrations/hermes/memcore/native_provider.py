@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import os
 import pathlib
 import re
 import time
@@ -366,6 +367,9 @@ class MemCoreMemoryProvider(MemoryProvider):
             data['trimtok'] = _usage_summary().splitlines()[0]
         except Exception:
             pass
+        tid = os.environ.get('TRINITY_TRACE_ID')
+        if tid:
+            data['trace_id'] = str(tid)[:64]
         data.update({k: v for k, v in extra.items() if v is not None})
         return data
 

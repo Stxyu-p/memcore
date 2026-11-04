@@ -318,6 +318,7 @@ plugins:
 - **`memory_supersede(memory_id, new_content, reason)`**: Updates a memory with a new version, preserving full bitemporal history.
 - **`memory_reject(memory_id, reason)`**: Tombstones a disproven claim, creating a cryptographic refusal barrier.
 - **`memory_promote(memory_id)`**: Promotes private scratchpad knowledge to project scope.
+- **Distributed Trace Correlation (`TRINITY_TRACE_ID`)**: Captures `TRINITY_TRACE_ID` from the environment and attaches `trace_id` to each turn event metadata and ingest journal entry, tying memory recalls directly to task execution.
 
 ---
 
@@ -327,9 +328,9 @@ plugins:
 
 | Pillar | Hub | Role |
 | :--- | :--- | :--- |
-| **[trimtok](https://github.com/Stxyu-p/trimtok)** | `~/.trimtok` | **Context Shield:** Cuts terminal, traceback, web, and JSON bloat in-process with instant `#c1` CCR recovery. |
+| **[trimtok](https://github.com/Stxyu-p/trimtok)** | `~/.trimtok` | **Context Shield:** Cuts terminal, traceback, web, and JSON bloat in-process with instant `#c1` CCR recovery and active chunk pinning. |
 | **[MemCore](https://github.com/Stxyu-p/memcore)** | `~/.memcore` | **Governed Memory:** Shared bitemporal memory with hard SQL scope boundaries, deterministic lexical recall, and Tainted Context Guard. |
-| **[Skill Proof](https://github.com/Stxyu-p/skill-proof)** | `~/.skill-proof` | **Skill Vault & Router:** Sub-2ms deterministic router, multi-lingual negation veto, and OS NTFS read-only Immutable SOP protection. |
+| **[Skill Proof](https://github.com/Stxyu-p/skill-proof)** | `~/.agents/skills` | **Skill Vault & Router:** Single canonical vault via NTFS Directory Junctions, sub-2ms deterministic router, cross-host capability gating, and JIT prompt token shield. |
 
 ```bash
 # Install and link all three pillars in one pass

@@ -208,9 +208,9 @@ memcore compact --project default --days 30
 
 | Pillar | Hub | Role |
 | :--- | :--- | :--- |
-| **[trimtok](https://github.com/Stxyu-p/trimtok)** | `~/.trimtok` | **Context Shield:** Cuts terminal, traceback, web, and JSON bloat by 38–48% with instant `#c1` CCR recovery. |
-| **[MemCore](https://github.com/Stxyu-p/memcore)** | `~/.memcore` | **Governed Memory:** Shared bitemporal memory with hard SQL scope boundaries, 1-bit vector quantization, and Tainted Context Guard. |
-| **[Skill Proof](https://github.com/Stxyu-p/skill-proof)** | `~/.skill-proof` | **Skill Vault & Router:** Sub-2ms deterministic router, multi-lingual negation veto, and OS NTFS read-only Immutable SOP protection. |
+| **[trimtok](https://github.com/Stxyu-p/trimtok)** | `~/.trimtok` | **Context Shield:** Cuts terminal, traceback, web, and JSON bloat with instant `#c1` CCR recovery, active chunk pinning, and zero-broker trace correlation. |
+| **[MemCore](https://github.com/Stxyu-p/memcore)** | `~/.memcore` | **Governed Memory:** Shared bitemporal memory with hard SQL scope boundaries, deterministic lexical recall, and Tainted Context Guard. |
+| **[Skill Proof](https://github.com/Stxyu-p/skill-proof)** | `~/.agents/skills` | **Skill Vault & Router:** Single canonical vault via NTFS Directory Junctions, sub-2ms deterministic router, cross-host capability gating, and JIT prompt token shield. |
 
 ```bash
 # Install and link all three pillars in one pass

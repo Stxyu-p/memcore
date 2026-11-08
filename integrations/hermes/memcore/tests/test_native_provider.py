@@ -209,6 +209,21 @@ class NativeProviderTest(unittest.TestCase):
                       p.system_prompt_block())
         self.assertEqual(p.recall_status().count, 2)
 
+    def test_prefetch_with_compact_index_config(self):
+        conn = store.open_store(self.db)
+        accepted, _ = core.create_memory(
+            conn, 'proj-demo', 'agent-alice', 'nebula compact marker', scope='project'
+        )
+        conn.execute("UPDATE memory SET lifecycle='accepted' WHERE id=?", (accepted,))
+        conn.close()
+        p = self.provider()
+        p._compact_index = True
+        out = p.prefetch('nebula compact marker')
+        self.assertIn('#mem-', out)
+        self.assertIn('[project|accepted]', out)
+        self.assertIn('nebula compact marker', out)
+        self.assertIn('(Details: call memory_show(id) or memory_search(query))', out)
+
     def test_prefetch_finalizes_pinned_and_matching_rows(self):
         conn = store.open_store(self.db)
         pinned, _ = core.create_memory(

@@ -375,6 +375,95 @@ def build_recall_block(pinned_rows, search_rows, budget_chars=1200, max_items=8,
     return header + '\n' + '\n'.join(lines)
 
 
+def build_compact_index_block(
+    pinned_rows, search_rows, budget_chars=900, max_items=15,
+    pinned_max_share=PINNED_MAX_SHARE
+):
+    """Progressive L0 index block for prompt injection (Claude-Mem style).
+
+    Emits concise memory index tags with memory_id (#m<id>), compact scope/lifecycle
+    badges, and 1-line headlines (capped at ~80 chars).
+    Appends an on-demand retrieval instruction footer so the agent can inspect full
+    records via memory_show(id) when needed.
+    """
+    seen_ids = set()
+    seen_fps = set()
+    pinned_set = []
+    hit_set = []
+    for tier_rows, tier in ((pinned_rows, pinned_set), (search_rows, hit_set)):
+        if not isinstance(tier_rows, (list, tuple)):
+            continue
+        for r in tier_rows:
+            if not isinstance(r, (list, tuple)) or len(r) < 6:
+                continue
+            if r[0] in seen_ids:
+                continue
+            seen_ids.add(r[0])
+            fp = r[8] if len(r) > 8 and r[8] else None
+            if fp is None:
+                try:
+                    from memcore import core as _core
+                    _fn = getattr(_core, 'fingerprint', None)
+                    fp = _fn(' '.join(str(r[5] if len(r) > 5 else r).split())) if callable(_fn) else None
+                except Exception:
+                    fp = None
+            if fp is not None:
+                if fp in seen_fps:
+                    continue
+                seen_fps.add(fp)
+            tier.append(r)
+
+    if not pinned_set and not hit_set:
+        return ''
+
+    header = 'Shared project memory (memcore):'
+    footer = '\n(Details: call memory_show(id) or memory_search(query))'
+    prefix_len = len(header) + 1 + len(footer)
+    if budget_chars <= prefix_len:
+        return ''
+
+    lines = []
+    used = prefix_len
+    MAX_SUMMARY_CHARS = 80
+
+    def _fit_compact(r):
+        mem_id = str(r[0])
+        tag = f'#{mem_id}' if not mem_id.startswith('#') else mem_id
+        scope = r[1] if len(r) > 1 else 'project'
+        lifecycle = r[2] if len(r) > 2 else 'accepted'
+        badge = f'[{scope}|{lifecycle}]'
+        content = ' '.join(str(r[5] if len(r) > 5 else r).split())
+        summary = _truncate_row_content(content, MAX_SUMMARY_CHARS)
+        return f'- {tag} {badge} {summary}'
+
+    for r in pinned_set:
+        if len(lines) >= max_items:
+            break
+        line = _fit_compact(r)
+        if used + len(line) + 1 <= budget_chars:
+            lines.append(line)
+            used += len(line) + 1
+
+    for r in hit_set:
+        if len(lines) >= max_items:
+            break
+        line = _fit_compact(r)
+        if used + len(line) + 1 <= budget_chars:
+            lines.append(line)
+            used += len(line) + 1
+
+    if not lines and (pinned_set or hit_set):
+        r = (pinned_set or hit_set)[0]
+        line = _fit_compact(r)
+        available = budget_chars - prefix_len
+        if available >= 30:
+            lines.append(line[:available].rstrip() + '…')
+
+    if not lines:
+        return ''
+    return header + '\n' + '\n'.join(lines) + footer
+
+
 def _is_trivial_query(query):
     """True when a query carries no durable intent (greeting/ack).
 

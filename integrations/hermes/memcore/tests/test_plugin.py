@@ -182,6 +182,31 @@ class TestRegistrationBridge(unittest.TestCase):
             sys.modules.pop(spec.name, None)
 
 
+class TestCompactIndexBlock(unittest.TestCase):
+    @staticmethod
+    def row(i, content, scope='project', lifecycle='accepted', verification='source_backed', freshness='current'):
+        return (f'mem-{i}', scope, lifecycle, verification, freshness, content)
+
+    def test_compact_index_empty(self):
+        self.assertEqual(plugin.build_compact_index_block([], []), '')
+
+    def test_compact_index_includes_id_and_badge(self):
+        rows = [self.row(1, 'Fact one', scope='project'), self.row(2, 'Fact two', scope='private')]
+        block = plugin.build_compact_index_block([], rows)
+        self.assertIn('- #mem-1 [project|accepted] Fact one', block)
+        self.assertIn('- #mem-2 [private|accepted] Fact two', block)
+        self.assertIn('(Details: call memory_show(id) or memory_search(query))', block)
+
+    def test_compact_index_truncates_long_content(self):
+        rows = [self.row(1, 'x' * 200)]
+        block = plugin.build_compact_index_block([], rows)
+        self.assertIn('- #mem-1 [project|accepted]', block)
+        self.assertIn('…', block)
+        # Content part should be bounded (~80 chars)
+        line = [l for l in block.splitlines() if l.startswith('- #mem-1')][0]
+        self.assertLessEqual(len(line), 120)
+
+
 class TestRecallBlock(unittest.TestCase):
 
     def test_oversized_fact_is_skipped_without_losing_short_following_fact(self):

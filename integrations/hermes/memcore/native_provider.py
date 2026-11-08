@@ -227,6 +227,7 @@ class MemCoreMemoryProvider(MemoryProvider):
         inject_cfg = cfg.get('inject') or {}
         self._budget = max(0, int(inject_cfg.get('budget_chars', 1200)))
         self._max_items = max(0, int(inject_cfg.get('max_items', 8)))
+        self._compact_index = bool(inject_cfg.get('compact_index', False))
         auto_curate_val = cfg.get('auto_curate')
         if auto_curate_val is not None:
             self._auto_curate_enabled = bool(auto_curate_val)
@@ -303,12 +304,15 @@ class MemCoreMemoryProvider(MemoryProvider):
         # so a fresh handle per turn dominated the recall path.
         conn = agent_plugin._get_conn(self._store_path)
         pinned, hits = self._recall_rows(conn, query)
-        block = agent_plugin.build_recall_block(
-            pinned, hits, self._budget, self._max_items
-        )
-        # Content is whitespace-collapsed by the builder, one complete row
-        # per line. Count rendered facts, not search hits dropped by budget.
-        self._last_recall_count = sum(line.startswith('- [') for line in block.splitlines())
+        if getattr(self, '_compact_index', False):
+            builder = getattr(agent_plugin, 'build_compact_index_block', agent_plugin.build_recall_block)
+            block = builder(pinned, hits, self._budget, self._max_items)
+            self._last_recall_count = sum(line.startswith('- ') for line in block.splitlines())
+        else:
+            block = agent_plugin.build_recall_block(
+                pinned, hits, self._budget, self._max_items
+            )
+            self._last_recall_count = sum(line.startswith('- [') for line in block.splitlines())
         return block
 
     def recall_status(self):

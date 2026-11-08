@@ -170,3 +170,110 @@ def export_vault(
         stats["files_written"] += 1
 
     return stats
+
+
+def _parse_multi_frontmatter(content: str) -> list[tuple[dict[str, str], str]]:
+    content = content.lstrip("\ufeff").strip()
+    if not content:
+        return []
+    blocks = re.split(r"(?:^|\n)---\s*\n", content)
+    entries: list[tuple[dict[str, str], str]] = []
+    i = 1 if content.startswith("---") else 0
+    while i < len(blocks):
+        fm_text = blocks[i].strip()
+        if i + 1 < len(blocks):
+            body = blocks[i + 1].strip()
+            meta: dict[str, str] = {}
+            for line in fm_text.splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    meta[k.strip()] = v.strip().strip('"\'')
+            entries.append((meta, body))
+            i += 2
+        else:
+            break
+    if not entries and content:
+        meta = {}
+        body = content
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                for line in parts[1].strip().splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meta[k.strip()] = v.strip().strip('"\'')
+                body = parts[2].strip()
+        if body:
+            entries.append((meta, body))
+    return entries
+
+
+def import_vault(
+    conn: sqlite3.Connection,
+    vault_dir: str | pathlib.Path,
+    agent_id: str,
+    project_id: str,
+) -> dict[str, int]:
+    v_path = pathlib.Path(vault_dir).expanduser().resolve()
+    if not v_path.exists():
+        return {"memories_superseded": 0, "memories_created": 0, "unchanged": 0}
+
+    stats = {
+        "memories_superseded": 0,
+        "memories_created": 0,
+        "unchanged": 0,
+    }
+
+    from memcore import write as _write
+
+    md_files = []
+    if (v_path / "profile.md").is_file():
+        md_files.append(v_path / "profile.md")
+    if (v_path / "wiki").is_dir():
+        md_files.extend(list((v_path / "wiki").glob("*.md")))
+
+    for f in md_files:
+        try:
+            content = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        entries = _parse_multi_frontmatter(content)
+        for meta, body in entries:
+            body = body.strip()
+            if not body:
+                continue
+            mem_id = meta.get("id")
+            if mem_id:
+                row = conn.execute(
+                    "SELECT v.content, m.lifecycle FROM memory m JOIN memory_version v ON m.current_version_id = v.id WHERE m.id = ?",
+                    (mem_id,)
+                ).fetchone()
+                if row is not None:
+                    curr_content, curr_life = row[0].strip(), row[1]
+                    if curr_content != body:
+                        _write.supersede(conn, mem_id, agent_id, body, reason="Markdown vault sync")
+                        desired_life = meta.get("lifecycle", curr_life)
+                        if desired_life == "accepted":
+                            conn.execute("UPDATE memory SET lifecycle='accepted' WHERE id=?", (mem_id,))
+                            conn.commit()
+                        stats["memories_superseded"] += 1
+                    else:
+                        stats["unchanged"] += 1
+                else:
+                    _write.create_memory(
+                        conn, project_id, agent_id, body,
+                        scope=meta.get("scope", "project"),
+                        memory_type=meta.get("type", "fact"),
+                        lifecycle=meta.get("lifecycle", "accepted")
+                    )
+                    stats["memories_created"] += 1
+            else:
+                _write.create_memory(
+                    conn, project_id, agent_id, body,
+                    scope=meta.get("scope", "project"),
+                    memory_type=meta.get("type", "fact"),
+                    lifecycle=meta.get("lifecycle", "accepted")
+                )
+                stats["memories_created"] += 1
+
+    return stats

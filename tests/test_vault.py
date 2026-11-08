@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from memcore import core, store
-from memcore.vault import export_vault
+from memcore.vault import export_vault, import_vault
 
 
 class TestVaultExport(unittest.TestCase):
@@ -80,6 +80,45 @@ class TestVaultExport(unittest.TestCase):
         self.assertIn("---", wiki_txt)
         self.assertIn("scope: project", wiki_txt)
         self.assertIn("PostgreSQL runs on port 5433 with SSL.", wiki_txt)
+
+    def test_import_vault_updates_modified_memory_and_creates_new(self):
+        # 1. Initial memory
+        m_id, v_id = core.create_memory(
+            self.conn, self.pid, self.aid, "Initial config fact A.",
+            scope="project", memory_type="fact", lifecycle="accepted"
+        )
+        export_vault(self.conn, self.vault_path, project_id=self.pid)
+
+        # 2. Modify exported wiki file
+        wiki_files = list((self.vault_path / "wiki").glob("*.md"))
+        self.assertEqual(len(wiki_files), 1)
+        target_file = wiki_files[0]
+        content = target_file.read_text(encoding="utf-8")
+        modified_content = content.replace("Initial config fact A.", "Updated config fact A with SSL.")
+        target_file.write_text(modified_content, encoding="utf-8")
+
+        # 3. Add brand new markdown file without id
+        new_file = self.vault_path / "wiki" / "new-topic.md"
+        new_file.write_text("---\ntype: fact\nscope: project\n---\nBrand new system invariant fact.\n", encoding="utf-8")
+
+        # 4. Import vault
+        stats = import_vault(self.conn, self.vault_path, agent_id=self.aid, project_id=self.pid)
+        self.assertEqual(stats["memories_superseded"], 1)
+        self.assertEqual(stats["memories_created"], 1)
+
+        # Verify SQLite state
+        updated_row = self.conn.execute(
+            "SELECT v.content, v.supersedes_version_id FROM memory m JOIN memory_version v ON m.current_version_id = v.id WHERE m.id = ?",
+            (m_id,)
+        ).fetchone()
+        self.assertEqual(updated_row[0], "Updated config fact A with SSL.")
+        self.assertEqual(updated_row[1], v_id)
+
+        # Verify new memory in SQLite
+        new_row = self.conn.execute(
+            "SELECT v.content FROM memory m JOIN memory_version v ON m.current_version_id = v.id WHERE v.content LIKE '%Brand new system invariant%'"
+        ).fetchone()
+        self.assertIsNotNone(new_row)
 
 
 if __name__ == "__main__":

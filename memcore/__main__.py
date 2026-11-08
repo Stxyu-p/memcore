@@ -101,6 +101,8 @@ from .cli_ops import (
     _assert_store_not_in_use,
     _remove_stale_sidecars,
     cmd_doctor,
+    cmd_vault_export,
+    cmd_vault_sync,
     _check_profile_binding_drift,
     _binding_drift_reasons,
     _print_doctor_integrity,
@@ -512,6 +514,18 @@ def main(argv=None):
     p.add_argument('--as-of', required=True, dest='as_of',
                    help="ISO timestamp, e.g. '2026-09-01T00:00:00Z'")
     p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser('vault', help='markdown vault management', parents=[common])
+    vsub = p.add_subparsers(dest='vault_cmd', required=True)
+    ve = vsub.add_parser('export', help='export SQLite memories to Markdown vault', parents=[common])
+    ve.add_argument('--path', default='~/.memcore/vault', help='target vault directory')
+    ve.add_argument('--project', help='project id filter')
+    ve.set_defaults(func=cmd_vault_export)
+    vs = vsub.add_parser('sync', help='sync Markdown vault edits back to SQLite', parents=[common])
+    vs.add_argument('--path', default='~/.memcore/vault', help='vault directory')
+    vs.add_argument('--project', help='project id')
+    vs.add_argument('--agent', help='agent id')
+    vs.set_defaults(func=cmd_vault_sync)
 
     p = sub.add_parser('doctor', help='integrity + drift checks', parents=[common])
     p.add_argument('--skip-binding-check', action='store_true',

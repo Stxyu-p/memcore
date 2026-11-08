@@ -13,6 +13,14 @@ def _slugify(text: str) -> str:
     return slug or "item"
 
 
+def _normalize_vault_path(raw_path: str | pathlib.Path) -> pathlib.Path:
+    s = str(raw_path or "").strip()
+    if re.match(r"^/[a-zA-Z]/", s):
+        drive = s[1].upper()
+        s = f"{drive}:{s[2:]}"
+    return pathlib.Path(s).expanduser().resolve()
+
+
 def _render_frontmatter(metadata: dict[str, Any], body: str) -> str:
     lines = ["---"]
     for k, v in metadata.items():
@@ -36,7 +44,7 @@ def export_vault(
     vault_dir: str | pathlib.Path,
     project_id: str | None = None,
 ) -> dict[str, int]:
-    v_path = pathlib.Path(vault_dir).expanduser().resolve()
+    v_path = _normalize_vault_path(vault_dir)
     v_path.mkdir(parents=True, exist_ok=True)
     wiki_path = v_path / "wiki"
     decisions_path = v_path / "decisions"
@@ -214,7 +222,7 @@ def import_vault(
     agent_id: str,
     project_id: str,
 ) -> dict[str, int]:
-    v_path = pathlib.Path(vault_dir).expanduser().resolve()
+    v_path = _normalize_vault_path(vault_dir)
     if not v_path.exists():
         return {"memories_superseded": 0, "memories_created": 0, "unchanged": 0}
 

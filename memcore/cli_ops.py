@@ -634,5 +634,25 @@ def _remove_stale_sidecars(db_path):
             )
 
 
+def cmd_vault_export(args):
+    conn = _open(args)
+    project_id = getattr(args, 'project', None)
+    vault_path = getattr(args, 'path', '~/.memcore/vault')
+    from .vault import export_vault
+    stats = export_vault(conn, vault_path, project_id=project_id)
+    _out(f"Exported to {vault_path}: {stats['files_written']} files ({stats['wiki_memories']} wiki, {stats['profile_memories']} profile, {stats['decisions']} decisions, {stats['tombstones']} tombstones)")
+
+
+def cmd_vault_sync(args):
+    conn = _open(args)
+    project_id = _project_or_exit(conn, getattr(args, 'project', None))
+    agent_id, _ = _agent_identity_or_exit(conn, getattr(args, 'agent', None))
+    vault_path = getattr(args, 'path', '~/.memcore/vault')
+    from .vault import import_vault
+    stats = import_vault(conn, vault_path, agent_id=str(agent_id), project_id=str(project_id))
+    _out(f"Synced from {vault_path}: {stats['memories_superseded']} superseded, {stats['memories_created']} created, {stats['unchanged']} unchanged")
+
+
+
 
 

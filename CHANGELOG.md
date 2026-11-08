@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-11-08
+
+### Added
+- **Compact L0 Progressive Index (`build_compact_index_block`, `native_provider.py`):**
+  Prompt-injected memory context supports an ultra-compact index format with memory IDs (`#m...`), scope/lifecycle badges, and bounded headlines (~80 chars) with on-demand retrieval footer (`memory_show(id)`), cutting active prompt tokens by 60-80%.
+- **Markdown Vault Mirror (`memcore.vault`, `memcore vault export/sync`):**
+  Bidirectional synchronization between SQLite WAL canonical storage and a human-readable Markdown directory tree (`profile.md`, `wiki/*.md`, `decisions/*.md`, `tombstones.md`) with YAML frontmatter.
+
 ## [2.6.0] - 2026-11-02
 
 ### Added

@@ -1,6 +1,6 @@
 import unittest
 
-from memcore.crystallize import SkillProof, crystallize_skill
+from memcore.crystallize import SkillProof, crystallize_skill, save_crystallized_skill
 
 
 class TestCrystallizeSkill(unittest.TestCase):
@@ -57,6 +57,35 @@ class TestCrystallizeSkill(unittest.TestCase):
             exit_code=1,
         )
         self.assertEqual(proof.status, "unverified")
+
+    def test_save_crystallized_skill_dual_sync(self):
+        import pathlib
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix="tt-skill-test-")
+        v_dir = pathlib.Path(tmp) / "vault"
+        h_dir = pathlib.Path(tmp) / "hermes_skills"
+
+        skill_md, _ = crystallize_skill(
+            name="test-workflow",
+            description="Testing dual storage sync.",
+            steps=["Step 1"],
+            verification_cmd="echo 1",
+            category="testing",
+        )
+
+        res = save_crystallized_skill(
+            skill_md=skill_md,
+            name="test-workflow",
+            category="testing",
+            vault_dir=v_dir,
+            hermes_skills_dir=h_dir,
+        )
+
+        self.assertTrue(pathlib.Path(res["vault_file"]).is_file())
+        self.assertTrue(pathlib.Path(res["hermes_file"]).is_file())
+        self.assertEqual(pathlib.Path(res["vault_file"]).name, "SKILL.md")
+        self.assertEqual(pathlib.Path(res["hermes_file"]).name, "SKILL.md")
 
 
 if __name__ == "__main__":

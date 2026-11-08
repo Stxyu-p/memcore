@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import hashlib
+import pathlib
 import re
 
 
@@ -133,3 +134,34 @@ def crystallize_skill(
 
     skill_md = "\n".join(body_lines)
     return skill_md, proof
+
+
+def save_crystallized_skill(
+    skill_md: str,
+    name: str,
+    category: str = "devops",
+    vault_dir: str | pathlib.Path | None = None,
+    hermes_skills_dir: str | pathlib.Path | None = None,
+) -> dict[str, str]:
+    import pathlib
+
+    slug = _slugify_skill_name(name)
+    results: dict[str, str] = {}
+
+    v_base = pathlib.Path(vault_dir if vault_dir is not None else "~/.memcore/vault").expanduser().resolve()
+    v_skill_dir = v_base / "skills" / category / slug
+    v_skill_dir.mkdir(parents=True, exist_ok=True)
+    v_file = v_skill_dir / "SKILL.md"
+    v_file.write_text(skill_md, encoding="utf-8")
+    results["vault_file"] = str(v_file)
+
+    if hermes_skills_dir is not None:
+        h_base = pathlib.Path(hermes_skills_dir).expanduser().resolve()
+        h_skill_dir = h_base / category / slug
+        h_skill_dir.mkdir(parents=True, exist_ok=True)
+        h_file = h_skill_dir / "SKILL.md"
+        h_file.write_text(skill_md, encoding="utf-8")
+        results["hermes_file"] = str(h_file)
+
+    return results
+

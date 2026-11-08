@@ -695,6 +695,27 @@ def cmd_skill_list(args):
         _out(f"- {cat}/{name} ({s})")
 
 
+def cmd_sleep(args):
+    conn = _open(args)
+    project_id = _project_or_exit(conn, getattr(args, 'project', None))
+    agent_id, _ = _agent_identity_or_exit(conn, getattr(args, 'agent', None))
+    vault_path = getattr(args, 'vault', '~/.memcore/vault')
+    from .sleep import consolidate_memories
+    stats = consolidate_memories(conn, agent_id=str(agent_id), project_id=str(project_id), vault_dir=vault_path)
+    _out(f"Sleep metabolism complete: {stats['clusters_consolidated']} clusters consolidated, {stats['memories_superseded']} memories superseded, {stats['master_records_created']} master records created.")
+
+
+def cmd_rebuild(args):
+    db_path = getattr(args, 'db', None) or DEFAULT_DB
+    vault_path = getattr(args, 'path', '~/.memcore/vault')
+    project_id = getattr(args, 'project', None) or 'proj-default'
+    agent_id = getattr(args, 'agent', None) or 'agent-default'
+    from .vault import rebuild_vault_to_db
+    stats = rebuild_vault_to_db(db_path=db_path, vault_dir=vault_path, agent_id=agent_id, project_id=project_id)
+    _out(f"Rebuilt database at {stats['db_path']} from {stats['vault_dir']}: {stats['memories_rebuilt']} memories restored, {stats['tombstones_rebuilt']} tombstones restored.")
+
+
+
 
 
 

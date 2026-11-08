@@ -35,7 +35,7 @@ except ImportError:
     from memcore import core, ingest, store  # type: ignore
     from memcore.client import DEFAULT_DB, MemCore  # type: ignore
 
-SERVER_INFO = {"name": "memcore", "version": "2.9.0"}
+SERVER_INFO = {"name": "memcore", "version": "2.10.0"}
 FALLBACK_PROTOCOL = "2024-11-05"
 SERVER_INSTRUCTIONS = (
     "MemCore — Governed Bitemporal Memory Engine (SQLite WAL + FTS5 BM25).\n\n"

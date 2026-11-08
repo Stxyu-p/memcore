@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-11-08
+
+### Added
+- **Sleep Knowledge Metabolism (`memcore.sleep`, `memcore sleep`):**
+  Offline consolidation process that clusters related canonical memories by topic/content similarity, synthesizes them into master records, and marks ancestor memories as superseded bitemporally.
+- **Daily Dream Reports (`vault/dream-reports/YYYY-MM-DD-sleep.md`):**
+  Emits human-readable Markdown reports summarizing consolidated memory clusters, active tombstones, and vault health.
+- **Disposable Cache Rebuilder (`rebuild_vault_to_db`, `memcore rebuild`):**
+  Completely reconstitutes empty SQLite databases and FTS5 search indexes from the Markdown Vault with zero knowledge loss.
+
 ## [2.9.0] - 2026-11-08
 
 ### Added

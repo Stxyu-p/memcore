@@ -105,6 +105,8 @@ from .cli_ops import (
     cmd_vault_sync,
     cmd_crystallize,
     cmd_skill_list,
+    cmd_sleep,
+    cmd_rebuild,
     _check_profile_binding_drift,
     _binding_drift_reasons,
     _print_doctor_integrity,
@@ -542,6 +544,18 @@ def main(argv=None):
     p = sub.add_parser('skill-list', help='list crystallized skills in vault', parents=[common])
     p.add_argument('--vault', default='~/.memcore/vault', help='vault directory')
     p.set_defaults(func=cmd_skill_list)
+
+    p = sub.add_parser('sleep', help='run offline knowledge metabolism & generate Dream Report', parents=[common])
+    p.add_argument('--vault', default='~/.memcore/vault', help='vault directory')
+    p.add_argument('--project', help='project id')
+    p.add_argument('--agent', help='agent id')
+    p.set_defaults(func=cmd_sleep)
+
+    p = sub.add_parser('rebuild', help='rebuild SQLite database from Markdown vault', parents=[common])
+    p.add_argument('--path', default='~/.memcore/vault', help='vault directory')
+    p.add_argument('--project', help='project id')
+    p.add_argument('--agent', help='agent id')
+    p.set_defaults(func=cmd_rebuild)
 
     p = sub.add_parser('doctor', help='integrity + drift checks', parents=[common])
     p.add_argument('--skip-binding-check', action='store_true',

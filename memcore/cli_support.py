@@ -59,8 +59,9 @@ def _sync_memcore_global_skill() -> None:
         "tools are exposed natively under the same names (`memory_remember` … `memory_review_decide`), with no "
         "`memory_get` and no `memory_status`.\n"
     )
+    vault_root = pathlib.Path.home() / ".skill-proof" / "skills"
     for root in (
-        pathlib.Path.home() / ".skill-proof" / "skills",
+        vault_root,
         pathlib.Path.home() / ".agents" / "skills",
         pathlib.Path.home() / ".gemini" / "config" / "skills",
     ):
@@ -69,7 +70,10 @@ def _sync_memcore_global_skill() -> None:
                 d = root / "memcore"
                 d.mkdir(parents=True, exist_ok=True)
                 target = d / "SKILL.md"
-                if not target.exists():
+                # The Skill Vault is the canonical copy that Skill Proof indexes and
+                # routes, so it is always refreshed. Client skill directories are
+                # user-editable and keep their existing write-once behavior.
+                if root == vault_root or not target.exists():
                     target.write_text(skill_md, encoding="utf-8")
         except Exception:
             pass

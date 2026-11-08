@@ -1,14 +1,14 @@
 <h1 align="center">🧠 MemCore</h1>
 
 <p align="center">
-  <strong>Governed, Bitemporal, Local-First Memory &amp; Decision Engine for Autonomous AI Agent Fleets</strong>
+  <strong>Governed, Bitemporal, Local-First Memory &amp; Skill Crystallization Engine for Autonomous AI Agent Fleets</strong>
 </p>
 
 <p align="center">
   <a href="https://pypi.org/project/memcore-omnix/"><img src="https://img.shields.io/pypi/v/memcore-omnix?style=flat-square&color=blue" alt="PyPI" /></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square" alt="Python" /></a>
-  <a href="#why-memcore"><img src="https://img.shields.io/badge/storage-SQLite_WAL_+_FTS5-07405E?style=flat-square" alt="Storage" /></a>
-  <a href="#core-capabilities"><img src="https://img.shields.io/badge/latency-%3C_4ms_lexical_recall-10b981?style=flat-square" alt="Latency" /></a>
+  <a href="#how-it-works"><img src="https://img.shields.io/badge/latency-%3C_4ms_in--process-10b981?style=flat-square" alt="Latency" /></a>
+  <a href="#pillar-3-markdown-vault-as-single-source-of-truth"><img src="https://img.shields.io/badge/storage-Markdown_Vault_+_SQLite_WAL-07405E?style=flat-square" alt="Storage" /></a>
   <a href="#the-four-pillars-of-epistemic-trust"><img src="https://img.shields.io/badge/governance-Bitemporal_+_Tombstones-8b5cf6?style=flat-square" alt="Governance" /></a>
   <a href="#tainted-context-guard-anti-poisoning"><img src="https://img.shields.io/badge/security-Tainted_Context_Guard-00D2FF?style=flat-square" alt="Security" /></a>
   <a href="#deterministic-lexical-recall"><img src="https://img.shields.io/badge/mode-100%25_Offline_Local--First-22c55e?style=flat-square" alt="Mode" /></a>
@@ -21,135 +21,190 @@
 
 ---
 
-## 🚀 Overview
+<a id="at-a-glance"></a>
+## ⚡ At a Glance: Before vs After
 
-Most AI agent memory frameworks dump raw conversational logs directly into uncurated vector databases. Over multi-session projects, this inevitably creates four compounding failures:
+Autonomous agent memory frameworks typically dump raw conversational text into uncurated vector stores. Over multi-session projects, this inevitably triggers state poisoning, stale code hallucinations, and prompt bloat. **MemCore** replaces raw recall with epistemically governed, bitemporal memory, Markdown vault persistence, and trace-to-skill crystallization:
 
-1. **State Poisoning & Compounding Errors:** When an agent makes an incorrect guess once, that wrong guess is permanently stored and recalled as "truth" in subsequent sessions.
-2. **Stale Code Drift:** Facts about an architecture stay frozen in memory long after underlying files have been refactored or deleted.
-3. **Indirect Prompt Injection:** A webpage, documentation page, or terminal output containing untrusted instructions gets auto-absorbed into permanent agent memory.
-4. **Decision Amnesia:** Agents recall *what* code exists, but forget *why* architectural choices and trade-offs were made, repeatedly suggesting previously rejected ideas.
+| Dimension / Challenge | Ungoverned Vector Memory | MemCore v2.10.0 Architecture | Operational Impact |
+| :--- | :--- | :--- | :--- |
+| **Contradictory Facts** | Dumps conflicting historical guesses into context. | **Bitemporal Superseding (`superseded`)**: exactly one current truth. | Eliminates regression loops & wrong guesses. |
+| **Disproven Assumptions** | Agents re-learn debunked errors across sessions. | **Cryptographic Tombstones (`tombstone`)**: immutable hard veto barrier. | Permanent protection against recurring mistakes. |
+| **Context Window Overhead** | Dumps verbose prose blocks (1,200+ chars) every turn. | **Progressive L0 Index**: `#mID [scope\|status] headline` (~100 tokens). | **-70% to -85% active prompt memory tokens**. |
+| **Data Transparency** | Opaque binary database or remote SaaS black box. | **Markdown Vault Mirror (`vault/`)**: human-readable `.md` files + Git. | 100% diffable, editable in VS Code or Obsidian. |
+| **Database Failure / Loss** | Database corruption means total loss of knowledge. | **Disposable Cache Rebuilder (`memcore rebuild`)**: full DB reconstituted. | Zero knowledge loss; SQLite is a disposable cache. |
+| **Memory Fragmentation** | Hundreds of scattered, repetitive micro-notes. | **Sleep Metabolism (`memcore sleep`)**: synthesized Master Records. | Daily Dream Reports summarize auto-consolidation. |
+| **Procedural Mastery** | Remembers facts, but forgets how to execute fixes. | **Trace-to-Skill Crystallization (`SKILL.md`)**: verified Skill Proofs. | Turns successful terminal fixes into reusable skills. |
+| **Indirect Prompt Injection**| Web pages and logs silently inject permanent memories. | **Tainted Context Guard**: auto-accept veto on untrusted tools. | Strict candidate quarantine for external input. |
 
-MemCore solves this by replacing raw conversational recall with **epistemically governed, bitemporal memory and structured decision records**.
+---
 
-### The Contrast: Ungoverned Vector Memory vs. MemCore
+<a id="how-it-works"></a>
+## 🏗️ How It Works
 
-**Ungoverned Vector Memory:**
+**MemCore** operates 100% locally and in-process using the Python standard library, SQLite WAL, and an external-content FTS5 search index. Zero external daemons, zero background HTTP servers, and zero open network ports.
+
 ```text
-Query: "What port does the analytics service use?"
-Recalled Chunks (Unfiltered Cosine Similarity):
-1. [0.89] "Let's try port 8123..." (Old failed guess)
-2. [0.87] "Runs on port 9000 in settings.py" (Stale config from last week)
-3. [0.85] "Migrated to port 9440 with mTLS" (Actual current truth)
-Result: ❌ Contradictory history dumped into prompt; agent guesses wrong.
-```
-
-**MemCore Governed Bitemporal Memory:**
-```text
-Query: "What port does the analytics service use?"
-Recalled Canonical Memory (FTS5 BM25):
-1. [scope=project | lifecycle=accepted | verification=source_backed | freshness=current]
-   "Analytics service migrated to port 9440 with mTLS (settings.py)"
-   └─ supersedes: v1 ("port 9000", valid_until: 2026-10-18)
-   └─ tombstone: "port 8123" blocked (rejected claim)
-Result: ✅ Exactly ONE current truth recalled. Port 8123 is tombstoned; port 9000 is superseded.
+  ┌────────────────────────────────────────────────────────────┐
+  │ Human & Git Layer: Markdown Vault (Single Source of Truth) │
+  │ ├── profile.md: User preferences & hardware constraints    │
+  │ ├── wiki/*.md: Source-backed project architecture facts    │
+  │ ├── decisions/*.md: Architectural Decision Records (ADR)   │
+  │ ├── skills/*.md: Reusable crystallized agent skills        │
+  │ └── tombstones.md: Cryptographic permanent veto barrier    │
+  └──────────────────────────┬─────────────────────────────────┘
+                             │  Bidirectional Sync / Rebuild
+                             ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │ Engine Layer: In-Process SQLite WAL + FTS5 BM25 (<4ms)     │
+  │ ├── Bitemporal Version Chains (valid_from / valid_until)   │
+  │ ├── Tainted Context Guard (untrusted tool quarantine)      │
+  │ ├── Bilingual Tokenizer & Thai Bigram Alias Bridges        │
+  │ └── Sleep Metabolism Engine (offline topic clustering)     │
+  └──────────────────────────┬─────────────────────────────────┘
+                             │
+            ┌────────────────┴────────────────┐
+            ▼                                 ▼
+   Active Agent Turn                 Progressive Retrieval
+   L0 Compact Index                  L1 Salience Outline
+   (`- #m23 [project|accepted] ...`) L2 Full Provenance (`memory_show`)
 ```
 
 ---
 
+<a id="table-of-contents"></a>
+## 📑 Table of Contents
+
+| 🏛️ Architecture & Governance | ⚡ Core Engineering Pillars | 🛠️ Setup & Operations |
+| :--- | :--- | :--- |
+| • [⚡ At a Glance: Before vs After](#at-a-glance)<br>• [🏗️ How It Works](#how-it-works)<br>• [🥊 Market Comparison Matrix](#market-comparison)<br>• [🏛️ Four Pillars of Epistemic Trust](#the-four-pillars-of-epistemic-trust) | • **[Pillar 1: Epistemic Governance](#pillar-1-epistemic-governance)**<br>&nbsp;&nbsp;▫ [Bitemporal Superseding](#bitemporal-superseding)<br>&nbsp;&nbsp;▫ [Cryptographic Tombstones](#cryptographic-tombstones)<br>&nbsp;&nbsp;▫ [Tainted Context Guard](#tainted-context-guard)<br>• **[Pillar 2: Progressive Layered Context](#pillar-2-progressive-layered-context)**<br>&nbsp;&nbsp;▫ [Compact L0 Index Injection](#compact-l0-index)<br>&nbsp;&nbsp;▫ [On-Demand Detail Escalation](#detail-escalation)<br>• **[Pillar 3: Markdown Vault as Single Truth](#pillar-3-markdown-vault-as-single-source-of-truth)**<br>&nbsp;&nbsp;▫ [Vault Directory Structure](#vault-structure)<br>&nbsp;&nbsp;▫ [Disposable Cache Rebuilding](#disposable-cache-rebuilding)<br>• **[Pillar 4: Sleep Metabolism & Crystallization](#pillar-4-sleep-metabolism-and-skill-crystallization)**<br>&nbsp;&nbsp;▫ [Sleep Consolidation & Dream Reports](#sleep-consolidation)<br>&nbsp;&nbsp;▫ [Trace-to-Skill & Skill Proofs](#trace-to-skill) | • **[First-Time Setup (5 Mins)](#quickstart-5-minutes)**<br>&nbsp;&nbsp;▫ [Step 1: Installation](#step-1-install-memcore)<br>&nbsp;&nbsp;▫ [Step 2: Self-Healing Doctor](#step-2-initialize-database--run-self-healing-doctor)<br>&nbsp;&nbsp;▫ [Step 3: Vault Synchronization](#step-3-markdown-vault-synchronization)<br>• **[Universal Agent Support](#universal-agent-client-support-mcp--hermes)**<br>&nbsp;&nbsp;▫ [Hermes Native Provider](#native-hermes-agent-integration)<br>&nbsp;&nbsp;▫ [Stdio MCP Server](#universal-agent-client-support-mcp--hermes)<br>• **[CLI Command Reference](#cli-command-reference)**<br>&nbsp;&nbsp;▫ [Memory Operations](#memory-operations)<br>&nbsp;&nbsp;▫ [Vault & Rebuild Commands](#markdown-vault-mirror--rebuilder)<br>&nbsp;&nbsp;▫ [Sleep & Dream Reports](#sleep-metabolism--dream-reports)<br>&nbsp;&nbsp;▫ [Skill Crystallization](#skill-crystallization-cli) |
+
+---
+
+<a id="market-comparison"></a>
 ## 🥊 Market Comparison: MemCore vs Industry Alternatives
 
-| Feature / Metric | **MemCore v2.10.0** 🌟 | Mem0 | Letta (MemGPT) | Zep | LangMem |
+| Feature / Metric | **MemCore v2.10.0** 🌟 | Mem0 | Letta (MemGPT) | EverOS | Claude-Mem |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Architecture** | **Local-First SQLite WAL** | Cloud SaaS API | Server / Daemon | Cloud API | Cloud / PostgreSQL |
-| **Epistemic Trust Governance** | ✅ **4 Labels (Scope, Life, Verif, Fresh)** | ❌ Flat text | ⚠️ Core/Archival only | ❌ Flat facts | ❌ Flat facts |
-| **Bitemporal Superseding** | ✅ **Immutable Version History** | ❌ Destructive overwrite | ⚠️ Message append | ❌ Overwrite | ❌ Overwrite |
-| **Structured Decision Records** | ✅ **Tier-1 Decisions ("Why We Chose")** | ❌ None | ❌ None | ❌ None | ❌ None |
-| **Observability Suite** | ✅ **Pulse Snapshot, List & Inspector** | ⚠️ Cloud UI only | ⚠️ Server ADE only | ❌ None | ⚠️ LangSmith |
-| **Offline Operation (Zero Model)** | ✅ **100% Offline (Pure Lexical FTS5)** | ❌ Cloud / Heavy Embedding | ❌ Requires Server LLM | ❌ Cloud API | ❌ Cloud / Vector DB |
-| **Recall Latency** | **< 4 ms (In-process SQLite)** | 20–80 ms (Cloud HTTP) | 5–15 ms | 50–150 ms | 15–50 ms (Postgres) |
-| **Tainted Context Guard** | ✅ **Blocks Web & Terminal Injections** | ❌ Unprotected | ❌ Unprotected | ❌ Unprotected | ❌ Unprotected |
-| **Cryptographic Tombstones** | ✅ **Hard Veto on Disproven Facts** | ❌ None | ❌ None | ❌ None | ❌ None |
-| **Zero-Daemon Git Sync** | ✅ **SHA-256 Snapshot Export/Import** | ❌ Vendor Lock-in | ❌ Server dependent | ❌ Cloud Lock-in | ❌ Cloud Lock-in |
+| **Architecture** | **Local-First SQLite WAL** | Cloud SaaS API | Server Daemon | SQLite + LanceDB | Node.js Worker Daemon |
+| **Source of Truth** | **Markdown Vault + SQLite Cache** | Cloud Database | Postgres / Server | Markdown Files | SQLite / JSON files |
+| **Epistemic Trust Governance** | ✅ **4 Labels (Scope, Life, Verif, Fresh)** | ❌ Flat text | ⚠️ Core/Archival | ❌ Unchecked | ❌ Unchecked |
+| **Bitemporal History** | ✅ **Immutable Version Chains** | ❌ Overwrite | ⚠️ Append-only log | ❌ Overwrite | ❌ Overwrite |
+| **Cryptographic Tombstones** | ✅ **Hard Veto on Disproven Claims** | ❌ None | ❌ None | ❌ None | ❌ None |
+| **Context Overhead** | ✅ **L0 Compact Index (-80% tokens)** | ❌ Full chunk dump | ❌ Full chunk dump | ⚠️ Markdown section | ✅ Progressive search |
+| **Offline Operation (Zero Model)** | ✅ **100% Offline (Pure FTS5 BM25)** | ❌ Heavy Embedding | ❌ Requires Server LLM | ❌ Requires Vector DB | ❌ Requires Model Worker |
+| **Recall Latency** | **< 4 ms (In-process SQLite)** | 20–80 ms (Cloud HTTP) | 5–15 ms | 15–35 ms | 20–50 ms |
+| **Knowledge Metabolism** | ✅ **`memcore sleep` + Dream Reports** | ❌ None | ❌ None | ⚠️ LLM reflection | ❌ None |
+| **Trace-to-Skill Crystallization** | ✅ **Verified `SKILL.md` + Skill Proof** | ❌ None | ❌ None | ⚠️ Unverified cases | ❌ None |
+| **Network Footprint** | ✅ **0 ports (100% in-process)** | ❌ Cloud API | ❌ Opens HTTP port | ✅ 0 ports | ❌ Opens HTTP daemon |
 
 ---
 
-## 🏛️ The Four Pillars of Epistemic Trust
+<a id="the-four-pillars-of-epistemic-trust"></a>
+## 🏛️ Pillar 1: Epistemic Governance & Trust Model
 
-Every canonical memory in MemCore is tagged with four cryptographic governance dimensions:
+Every canonical memory in MemCore is stamped with four orthogonal governance dimensions:
 
 ```text
 [scope | lifecycle | verification | freshness]
 ```
 
 1. **Hard Scope Isolation (`scope`):**
-   - `private`: Strictly scoped to the owner agent and session.
+   - `private`: Strictly isolated to the owning agent and session.
    - `project`: Fleet-wide shared context accessible by all team agents.
 2. **Deterministic Lifecycle (`lifecycle`):**
-   - `candidate`: Tentative observation under review; quarantined from automatic injection.
+   - `candidate`: Quarantined observation under review; excluded from active recall.
    - `accepted`: Verified, authoritative operational truth.
    - `conflict`: Flagged by contradiction detector; paused from active recall.
-   - `rejected` / `tombstone`: Cryptographically disproven assertion. Acts as a **hard veto barrier** preventing any agent from remembering it again.
+   - `rejected` / `tombstone`: Cryptographically disproven assertion acting as an immutable veto barrier.
    - `superseded`: Historical version preserved for bitemporal point-in-time auditing.
-   - `disabled`: Temporarily deactivated by operator.
+   - `disabled`: Deactivated by operator.
 3. **Provable Verification (`verification`):**
    - `user_authoritative`: Explicitly declared by the human user.
-   - `source_backed`: Anchored to an absolute file path and SHA-256 commit hash.
+   - `source_backed`: Anchored to an absolute file path and Git commit SHA-256 hash.
    - `runtime_verified`: Proven by unit tests or empirical command outputs.
    - `unverified`: Agent-inferred observation.
 4. **Bitemporal Freshness (`freshness`):**
-   - Computes continuous temporal decay: `salience * exp(-lambda * age) + reinforcement`.
-   - Distinguishes between `current`, `aging`, and `stale`. When underlying source files are edited, dependent memories automatically flag as `stale`.
+   - Computes continuous decay: `salience * exp(-lambda * age) + reinforcement`.
+   - Distinguishes between `current`, `aging`, and `stale`. When underlying source files change on disk, dependent memories automatically transition to `stale`.
+
+### Tainted Context Guard (Anti-Poisoning Rail)
+Untrusted I/O operations (`web_search`, `web_extract`, `browser_exec`, and shell fetches like `curl`, `wget`, `git clone`) automatically stamp `tainted: True` on the turn event:
+- **Auto-Accept Veto:** Disqualifies all automatic promotion rules.
+- **Quarantine:** Memories are forced into `candidate` lifecycle until verified by human instruction.
 
 ---
 
-## ⚡ Core Engineering Capabilities
+<a id="pillar-2-progressive-layered-context"></a>
+## ⚡ Pillar 2: Progressive Layered Context
 
-### 1. Deterministic Lexical Recall & Bilingual Bridges
-Recall is pure SQLite FTS5 BM25 with zero external model dependencies and zero network calls:
-- **Sub-4ms In-Process Retrieval:** Runs directly inside Python against SQLite WAL.
-- **Thai & CJK Bigram Tokenization:** Automatically bridges unsegmented script tokens with character bigrams and an exact substring fallback lane.
-- **Bilingual Alias Bridges:** Cross-language query mappings (`laptop` ↔ `thinkpad`, `battery` ↔ `แบต`, `processor` ↔ `โปรเซสเซอร์`) with whole-word regex boundaries prevent false positives (`ram` never triggers inside `program`).
+MemCore eliminates prompt bloat through a 3-tier retrieval ladder:
 
-### 2. Governed Decision Layer (Tier 1)
-Captures architectural rationale and decision history so agents stop re-proposing rejected approaches:
-- **Structured Schema:** Stores `title`, `context`, `options` (JSON), `chosen` path, `rationale`, and `consequences`.
-- **Supersede Chains:** Replaces prior decisions while preserving historical context and reasons for change.
-- **Decision Links (`decision_link`):** Connects decisions bidirectionally to affected memories and source evidence (`context_for`, `supports`, `contradicts`, `supersedes`).
+### 1. Compact L0 Index Injection (~100 tokens)
+Instead of dumping full paragraphs every turn, MemCore injects a compact index header:
 
-### 3. Complete Observability Suite (`pulse`, `list`, `show`)
-Eliminates the "silent memory" black box without needing an external web server:
-- **`memcore pulse`**: One-screen operational status showing memory counts, freshness breakdown, 24-hour write/recall telemetry, and a live 5-event audit feed.
-- **`memcore list`**: Browse memories with 5-axis filtering (`--lifecycle`, `--type`, `--verification`, `--freshness`, `--scope`), pagination, and JSON output.
-- **`memcore show <id>`**: Full record inspector revealing content, provenance (author, timestamp, source hash), version tree, active tombstones, knowledge triples, and linked decisions.
-
-### 4. Tainted Context Guard (Anti-Poisoning Rail)
-Untrusted I/O operations (`web_search`, `web_extract`, `browser_exec`, and terminal commands like `curl`, `wget`, `git clone`, `Invoke-WebRequest`) automatically stamp `tainted: True` on the turn event:
-- **Auto-Accept Veto:** Tainted context immediately disqualifies all auto-accept lanes, even for high-confidence statements.
-- **Quarantine as Candidate:** Injected memories are forced into `candidate` lifecycle and excluded from active recall until explicitly approved by the human operator.
-
-### 5. Governed Knowledge Triples (`subject-predicate-object`)
-Entity-relation knowledge triples are bound directly to canonical memory versions:
-```python
-create_memory(
-    conn, "proj", "agent", "Analytics backend moved to port 9443",
-    triples=[("analytics_service", "listen_port", "9443")]
-)
+```text
+Shared project memory (memcore):
+- #mem-74bf [private|accepted] User prefers dark mode and fast terminals.
+- #mem-271f [private|accepted] 9router proxy configured at localhost:20128.
+- #mem-e53b [project|accepted] ThinkPad L570: i5-7200U, 8GB RAM, SanDisk 128GB SSD.
+- #dec-014a [project|accepted] Architecture Decision: Single-pass regex prefilter.
+(Details: call memory_show(id) or memory_search(query))
 ```
-When superseding a memory version, old triples are retired and replaced atomically.
 
-### 6. Zero-Daemon Git-Backed Snapshots
-Synchronize fleet memory across distributed teams without background daemons or open network ports:
+### 2. On-Demand Detail Escalation (L1 / L2)
+- **L1 Salience Outline:** `memory_search(query)` returns concise, relevance-ranked previews.
+- **L2 Full Provenance:** `memory_show(id)` reveals the complete record: exact wording, author, commit hash, version chain, linked decisions, and active tombstones.
+
+---
+
+<a id="pillar-3-markdown-vault-as-single-source-of-truth"></a>
+## 📁 Pillar 3: Markdown Vault as Single Source of Truth
+
+MemCore bridges human readability with machine speed. The Markdown Vault (`~/.memcore/vault/`) is the single source of truth, while SQLite WAL acts as a fast, disposable index.
+
+```text
+~/.memcore/vault/
+├── profile.md                  # User & Agent profile / core persona
+├── wiki/                       # Source-backed project facts and architectural invariants
+│   ├── hardware-thinkpad.md
+│   └── trimtok-engine.md
+├── decisions/                  # Architecture Decision Records (ADR)
+│   └── 2026-11-08-l0-index.md
+├── skills/                     # Crystallized reusable agent skills
+│   └── hardware/thinkpad-battery-check/SKILL.md
+├── dream-reports/              # Daily sleep-time consolidation audits
+│   └── 2026-11-08-sleep.md
+└── tombstones.md               # Cryptographic permanent veto barrier ledger
+```
+
+### Disposable Cache Rebuilding (`memcore rebuild`)
+If the SQLite database is lost, corrupted, or deleted:
 ```bash
-# Export canonical memories, decisions, and tombstones with SHA-256 seal
-memcore export-project --project default --out .memcore.jsonl
-
-# Idempotently import snapshots across teammate machines via Git
-memcore import-project --project default --agent hermes --in .memcore.jsonl
+memcore rebuild --path ~/.memcore/vault
 ```
+`memcore rebuild` reconstructs all tables, relations, bitemporal chains, and FTS5 search indexes from the Markdown files in under 150ms.
 
 ---
 
+<a id="pillar-4-sleep-metabolism-and-skill-crystallization"></a>
+## 🌙 Pillar 4: Sleep Metabolism & Trace-to-Skill Crystallization
+
+### 1. Sleep Knowledge Metabolism (`memcore sleep`)
+Memory shouldn't just accumulate—it must metabolize. During offline sleep cycles, MemCore:
+- Clusters fragmented memories sharing common topics or files.
+- Synthesizes them into **Master Records**, marking ancestors as `superseded`.
+- Emits a daily **Dream Report** (`vault/dream-reports/YYYY-MM-DD-sleep.md`) detailing merged clusters and vault health.
+
+### 2. Trace-to-Skill Crystallization (`memcore crystallize`)
+Turns hard-won debugging and DevOps recoveries into reusable capability:
+- Converts successful command and edit traces into fully compliant Hermes `SKILL.md` files.
+- Generates a cryptographic **Skill Proof** verifying that the verification command passed with exit code 0.
+- Synchronizes skills into both the Markdown Vault and the active Hermes Agent skills directory (`~/.hermes/skills/`).
+
+---
+
+<a id="quickstart-5-minutes"></a>
 ## 🛠️ Quickstart (5 Minutes)
 
 ### Step 1: Install MemCore
@@ -166,37 +221,18 @@ memcore doctor
 memcore pulse --project default --agent hermes
 ```
 
----
+### Step 3: Markdown Vault Synchronization
+```bash
+# Export existing SQLite memories to human-readable Markdown vault
+memcore vault export --path ~/.memcore/vault
 
-## 🐍 Python SDK
-
-```python
-from memcore.client import MemCore
-
-# Initialize client with project and agent scope
-with MemCore(project="platform", agent="hermes") as mc:
-    # 1. Store a governed fact with source file provenance
-    mem_id = mc.remember(
-        "Analytics service migrated to port 9440 with mTLS",
-        memory_type="fact",
-        source_file="src/settings.py",
-    )
-
-    # 2. Perform deterministic lexical recall
-    hits = mc.search("analytics port")
-    for hit in hits:
-        print(f"[{hit['scope']} | {hit['lifecycle']} | {hit['freshness']}] {hit['content']}")
-
-    # 3. Update memory with bitemporal history preservation
-    mc.supersede(
-        mem_id,
-        "Analytics service port updated to 9443",
-        reason="Port conflict resolution with telemetry daemon",
-    )
+# Sync manual edits made in Markdown files back into SQLite
+memcore vault sync --path ~/.memcore/vault
 ```
 
 ---
 
+<a id="cli-command-reference"></a>
 ## 💻 CLI Command Reference
 
 ### Observability & Inspection
@@ -204,7 +240,7 @@ with MemCore(project="platform", agent="hermes") as mc:
 # System pulse: memory counts, 24h writes/recalls, recent write feed
 memcore pulse --project default --agent hermes
 
-# Browse memories with filtering and pagination
+# Browse memories with 5-axis filtering and pagination
 memcore list --project default --agent hermes --lifecycle accepted --limit 20
 memcore list --project default --agent hermes --type fact --json
 
@@ -213,9 +249,6 @@ memcore show mem-abc123 --agent hermes
 
 # Check database health, foreign keys, and schema invariants
 memcore doctor
-
-# Operational statistics (content-free telemetry)
-memcore stats
 ```
 
 ### Memory Operations
@@ -231,70 +264,55 @@ memcore supersede <memory-id> "Python 3.11+ required" --agent hermes --reason "D
 
 # Reject a disproven claim and install a permanent tombstone veto
 memcore reject <memory-id> "Disproven in production load test" --agent hermes
-
-# Point-in-time historical read
-memcore history <memory-id> --as-of 2026-10-01T00:00:00Z --agent hermes
 ```
 
-### Governed Decision Layer
+### Markdown Vault Mirror & Rebuilder
 ```bash
-# Create an architectural decision record
-memcore decision create --project default --agent hermes \
-  --title "Adopt SQLite WAL for Memory Storage" \
-  --context "Multi-agent concurrent read/write throughput" \
-  --options '["PostgreSQL daemon", "SQLite WAL", "JSON files"]' \
-  --chosen "SQLite WAL" \
-  --rationale "Zero-daemon local deployment with sub-millisecond reader concurrency" \
-  --consequences "Zero ops overhead; single-machine file locking" \
-  --status accepted
+# Export SQLite memories to Markdown vault
+memcore vault export --path ~/.memcore/vault
 
-# List decisions
-memcore decision list --project default --agent hermes
+# Sync Markdown vault edits back into SQLite
+memcore vault sync --path ~/.memcore/vault
 
-# Inspect a decision record
-memcore decision show dec-123456 --agent hermes
-
-# Supersede a decision when architecture evolves
-memcore decision supersede dec-123456 --agent hermes \
-  --title "Adopt SQLite WAL with Sharded Read Replicas" \
-  --rationale "Fleet scale surpassed single-writer threshold"
+# Zero-loss rebuild of entire SQLite database from Markdown vault
+memcore rebuild --path ~/.memcore/vault
 ```
 
-### Fleet Synchronization & Backups
+### Sleep Metabolism & Dream Reports
 ```bash
-# Export sealed project snapshot for Git synchronization
-memcore export-project --project default --out .memcore.jsonl
+# Run offline knowledge consolidation and generate Dream Report
+memcore sleep --vault ~/.memcore/vault --project default --agent hermes
+```
 
-# Idempotently import snapshot from teammate repository
-memcore import-project --project default --agent hermes --in .memcore.jsonl
+### Skill Crystallization CLI
+```bash
+# Crystallize an execution trace into a verified SKILL.md
+memcore crystallize \
+  --name "thinkpad-battery-check" \
+  --desc "Check ThinkPad battery health and wear level." \
+  --cmd "echo Battery OK" \
+  --step "Query battery status via platform tools." \
+  --step "Verify wear level is within normal threshold." \
+  --category "hardware" \
+  --vault ~/.memcore/vault
 
-# Export governed memory into agent instruction files
-memcore export                     # Writes AGENTS.md
-memcore export --host claude-code  # Writes CLAUDE.md
-memcore export --host gemini-cli   # Writes GEMINI.md
-
-# Create an atomic, verified backup snapshot
-memcore backup
-memcore backup-status
+# List crystallized skills in the vault
+memcore skill-list --vault ~/.memcore/vault
 ```
 
 ---
 
+<a id="universal-agent-client-support-mcp--hermes"></a>
 ## 🔌 Universal Agent Client Support (MCP & Hermes)
 
 ### 1. One-Command Setup Wizard
-Automatically registers MemCore across all detected AI coding environments:
 ```bash
 # Auto-detect and register stdio MCP server in Claude Code, Cursor, Windsurf, OpenCode, etc.
 memcore install
-
-# Inspect client registration status
 memcore clients
 ```
 
 ### 2. Native Hermes Agent Integration
-MemCore serves as the primary governed memory provider for Hermes Agent:
-
 ```yaml
 # ~/.hermes/config.yaml
 memory:
@@ -309,6 +327,10 @@ plugins:
         agent_name: hermes
         auto_join: true
         auto_curate: true
+        inject:
+          budget_chars: 1200
+          max_items: 8
+          compact_index: true
 ```
 
 #### Hermes Agent Exposed Tools
@@ -320,10 +342,10 @@ plugins:
 - **`memory_supersede(memory_id, new_content, reason)`**: Updates a memory with a new version, preserving full bitemporal history.
 - **`memory_reject(memory_id, reason)`**: Tombstones a disproven claim, creating a cryptographic refusal barrier.
 - **`memory_promote(memory_id)`**: Promotes private scratchpad knowledge to project scope.
-- **Distributed Trace Correlation (`TRINITY_TRACE_ID`)**: Captures `TRINITY_TRACE_ID` from the environment and attaches `trace_id` to each turn event metadata and ingest journal entry, tying memory recalls directly to task execution.
 
 ---
 
+<a id="global-agent-trinity"></a>
 ## 🌐 Part of the Global Agent Trinity
 
 **MemCore** forms the **Global Agent Trinity** alongside **trimtok** and **Skill Proof** — unifying context, governed memory, and local skills across all your AI coding agents without daemons or open network ports:

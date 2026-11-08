@@ -285,3 +285,63 @@ def import_vault(
                 stats["memories_created"] += 1
 
     return stats
+
+
+def rebuild_vault_to_db(
+    db_path: str | pathlib.Path,
+    vault_dir: str | pathlib.Path,
+    agent_id: str,
+    project_id: str,
+) -> dict[str, Any]:
+    from memcore import store
+
+    db_target = _normalize_vault_path(db_path)
+    v_path = _normalize_vault_path(vault_dir)
+
+    conn = store.open_store(str(db_target))
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO project (id, name, description) VALUES (?, ?, 'Rebuilt project')",
+            (project_id, project_id)
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO agent (id, name, profile_key) VALUES (?, ?, 'default')",
+            (agent_id, agent_id)
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO project_membership (project_id, agent_id, role) VALUES (?, ?, 'owner')",
+            (project_id, agent_id)
+        )
+        conn.commit()
+
+        stats = import_vault(conn, v_path, agent_id=agent_id, project_id=project_id)
+
+        tomb_file = v_path / "tombstones.md"
+        tomb_count = 0
+        if tomb_file.is_file():
+            t_content = tomb_file.read_text(encoding="utf-8")
+            for m in re.finditer(r"- \*\*#(tomb-[0-9a-f]+)\*\* \[`([^`]+)`\] (.*?) \(fp: ([0-9a-f]+)\.\.\.\)", t_content):
+                tid, scope, reason, fp = m.groups()
+                conn.execute(
+                    "INSERT OR IGNORE INTO tombstone (id, claim_fingerprint, scope, reason) VALUES (?, ?, ?, ?)",
+                    (tid, fp, scope, reason)
+                )
+                tomb_count += 1
+            conn.commit()
+
+        try:
+            conn.execute("INSERT INTO memory_version_fts(memory_version_fts) VALUES('rebuild')")
+            conn.commit()
+        except Exception:
+            pass
+
+        rebuilt_memories = stats["memories_created"] + stats["memories_superseded"] + stats["unchanged"]
+        return {
+            "memories_rebuilt": rebuilt_memories,
+            "tombstones_rebuilt": tomb_count,
+            "vault_dir": str(v_path),
+            "db_path": str(db_target),
+        }
+    finally:
+        conn.close()
+

@@ -103,6 +103,8 @@ from .cli_ops import (
     cmd_doctor,
     cmd_vault_export,
     cmd_vault_sync,
+    cmd_crystallize,
+    cmd_skill_list,
     _check_profile_binding_drift,
     _binding_drift_reasons,
     _print_doctor_integrity,
@@ -526,6 +528,20 @@ def main(argv=None):
     vs.add_argument('--project', help='project id')
     vs.add_argument('--agent', help='agent id')
     vs.set_defaults(func=cmd_vault_sync)
+
+    p = sub.add_parser('crystallize', help='crystallize an execution trace into a verified SKILL.md', parents=[common])
+    p.add_argument('--name', required=True, help='skill slug name')
+    p.add_argument('--desc', required=True, help='short capability description (under 60 chars)')
+    p.add_argument('--cmd', required=True, help='verification command (must pass)')
+    p.add_argument('--step', action='append', help='procedure step (repeatable)')
+    p.add_argument('--category', default='devops', help='skill category (default: devops)')
+    p.add_argument('--vault', default='~/.memcore/vault', help='vault directory')
+    p.add_argument('--hermes', help='Hermes profile skills directory')
+    p.set_defaults(func=cmd_crystallize)
+
+    p = sub.add_parser('skill-list', help='list crystallized skills in vault', parents=[common])
+    p.add_argument('--vault', default='~/.memcore/vault', help='vault directory')
+    p.set_defaults(func=cmd_skill_list)
 
     p = sub.add_parser('doctor', help='integrity + drift checks', parents=[common])
     p.add_argument('--skip-binding-check', action='store_true',

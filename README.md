@@ -59,7 +59,7 @@ Result: ✅ Exactly ONE current truth recalled. Port 8123 is tombstoned; port 90
 
 ## 🥊 Market Comparison: MemCore vs Industry Alternatives
 
-| Feature / Metric | **MemCore v2.8.0** 🌟 | Mem0 | Letta (MemGPT) | Zep | LangMem |
+| Feature / Metric | **MemCore v2.9.0** 🌟 | Mem0 | Letta (MemGPT) | Zep | LangMem |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Architecture** | **Local-First SQLite WAL** | Cloud SaaS API | Server / Daemon | Cloud API | Cloud / PostgreSQL |
 | **Epistemic Trust Governance** | ✅ **4 Labels (Scope, Life, Verif, Fresh)** | ❌ Flat text | ⚠️ Core/Archival only | ❌ Flat facts | ❌ Flat facts |

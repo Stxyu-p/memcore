@@ -653,6 +653,49 @@ def cmd_vault_sync(args):
     _out(f"Synced from {vault_path}: {stats['memories_superseded']} superseded, {stats['memories_created']} created, {stats['unchanged']} unchanged")
 
 
+def cmd_crystallize(args):
+    name = getattr(args, 'name', '')
+    desc = getattr(args, 'desc', '')
+    cmd = getattr(args, 'cmd', '')
+    steps = getattr(args, 'step', None) or ["Execute validated procedure via terminal."]
+    cat = getattr(args, 'category', 'devops')
+    v_path = getattr(args, 'vault', '~/.memcore/vault')
+    h_path = getattr(args, 'hermes', None)
+
+    from .crystallize import crystallize_skill, save_crystallized_skill
+    skill_md, proof = crystallize_skill(
+        name=name, description=desc, steps=steps,
+        verification_cmd=cmd, exit_code=0, category=cat,
+    )
+    res = save_crystallized_skill(
+        skill_md=skill_md, name=name, category=cat,
+        vault_dir=v_path, hermes_skills_dir=h_path,
+    )
+    _out(f"Crystallized skill '{proof.skill_name}' (status: {proof.status}, proof: {proof.proof_hash[:12]}...)")
+    _out(f"  Vault: {res.get('vault_file')}")
+    if res.get('hermes_file'):
+        _out(f"  Hermes: {res.get('hermes_file')}")
+
+
+def cmd_skill_list(args):
+    import pathlib
+    v_path = getattr(args, 'vault', '~/.memcore/vault')
+    base = pathlib.Path(v_path).expanduser().resolve() / "skills"
+    if not base.is_dir():
+        _out("No crystallized skills found.")
+        return
+    skills = list(base.glob("*/*/SKILL.md"))
+    if not skills:
+        _out("No crystallized skills found.")
+        return
+    _out(f"Crystallized Skills ({len(skills)} found):")
+    for s in sorted(skills):
+        cat = s.parent.parent.name
+        name = s.parent.name
+        _out(f"- {cat}/{name} ({s})")
+
+
+
 
 
 

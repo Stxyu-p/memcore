@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-11-08
+
+### Added
+- **Trace-to-Skill Crystallization Engine (`memcore.crystallize`):**
+  Transform verified execution traces into standardized, executable `SKILL.md` workflows conforming 100% to Hermes Agent Skill Authoring Standards.
+- **Cryptographic Skill Proofs (`SkillProof`):**
+  Stamps crystallized skills with empirical execution evidence (SHA-256 fingerprint, verification command, and exit code 0 confirmation).
+- **Dual Vault & Hermes Skills Directory Sync (`save_crystallized_skill`):**
+  Saves crystallized skills into the Git-versioned Markdown Vault (`vault/skills/`) and optionally mirrors directly into Hermes Agent skills directory (`~/.hermes/skills/`).
+- **CLI Subcommands (`memcore crystallize`, `memcore skill-list`):**
+  One-line command execution for trace-to-skill crystallization and skill inspection.
+
 ## [2.8.0] - 2026-11-08
 
 ### Added

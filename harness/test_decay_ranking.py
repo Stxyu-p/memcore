@@ -133,11 +133,13 @@ class TestDecayRanking(DecayRankingBase):
         old_id, _ = self._duplicate_pair(old_days_ago=60)
         aged, _ = core.apply_freshness_decay(
             self.conn, aging_days=30, stale_days=90,
-            now='2026-10-06T00:00:00.000Z')
+            now=core._now())
         self.assertIn(old_id, aged)
+
         # CLI path (now unset) keeps working on the remaining rows.
         self.assertIsInstance(
             core.apply_freshness_decay(self.conn), tuple)
+
 
 
 class TestDecayAblation(DecayRankingBase):

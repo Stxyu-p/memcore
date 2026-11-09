@@ -50,9 +50,10 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
   │ ├── profile.md: User preferences & hardware constraints    │
   │ ├── wiki/*.md: Source-backed project architecture facts    │
   │ ├── decisions/*.md: Architectural Decision Records (ADR)   │
-  │ ├── skills/*.md: Reusable crystallized agent skills        │
+  │ ├── dream-reports/*.md: Daily sleep-time consolidation logs│
   │ └── tombstones.md: Cryptographic permanent veto barrier    │
   └──────────────────────────┬─────────────────────────────────┘
+
                              │  Bidirectional Sync / Rebuild
                              ▼
   ┌────────────────────────────────────────────────────────────┐
@@ -171,12 +172,11 @@ MemCore bridges human readability with machine speed. The Markdown Vault (`~/.me
 │   └── trimtok-engine.md
 ├── decisions/                  # Architecture Decision Records (ADR)
 │   └── 2026-11-08-l0-index.md
-├── skills/                     # Crystallized reusable agent skills
-│   └── hardware/thinkpad-battery-check/SKILL.md
 ├── dream-reports/              # Daily sleep-time consolidation audits
 │   └── 2026-11-08-sleep.md
 └── tombstones.md               # Cryptographic permanent veto barrier ledger
 ```
+
 
 ### Disposable Cache Rebuilding (`memcore rebuild`)
 If the SQLite database is lost, corrupted, or deleted:
@@ -187,8 +187,8 @@ memcore rebuild --path ~/.memcore/vault
 
 ---
 
-<a id="pillar-4-sleep-metabolism-and-skill-crystallization"></a>
-## 🌙 Pillar 4: Sleep Metabolism & Trace-to-Skill Crystallization
+<a id="pillar-4-sleep-metabolism"></a>
+## 🌙 Pillar 4: Sleep Knowledge Metabolism
 
 ### 1. Sleep Knowledge Metabolism (`memcore sleep`)
 Memory shouldn't just accumulate—it must metabolize. During offline sleep cycles, MemCore:
@@ -196,14 +196,8 @@ Memory shouldn't just accumulate—it must metabolize. During offline sleep cycl
 - Synthesizes them into **Master Records**, marking ancestors as `superseded`.
 - Emits a daily **Dream Report** (`vault/dream-reports/YYYY-MM-DD-sleep.md`) detailing merged clusters and vault health.
 
-### 2. Trace-to-Skill Crystallization (`memcore crystallize`)
-Turns hard-won debugging and DevOps recoveries into reusable capability:
-- Converts successful command and edit traces into fully compliant Hermes `SKILL.md` files.
-- Generates a cryptographic **Skill Proof** verifying that the verification command passed with exit code 0.
-- Synchronizes skills into both the Markdown Vault and the active Hermes Agent skills directory (`~/.hermes/skills/`).
-- Mines repeatable workflows directly from **trimtok telemetry** with `--from-traces`: a command that ran N times and always compressed cleanly becomes a candidate skill. Mined skills are stamped `unverified` with a `## Evidence` block (run count, clean count, date window, characters saved) — repetition proves the command is real, it does not prove it succeeded, so one real verification is still required before promotion.
-
 ---
+
 
 <a id="quickstart-5-minutes"></a>
 ## 🛠️ Quickstart (5 Minutes)
@@ -285,27 +279,8 @@ memcore rebuild --path ~/.memcore/vault
 memcore sleep --vault ~/.memcore/vault --project default --agent hermes
 ```
 
-### Skill Crystallization CLI
-```bash
-# Crystallize an execution trace into a verified SKILL.md
-memcore crystallize \
-  --name "thinkpad-battery-check" \
-  --desc "Check ThinkPad battery health and wear level." \
-  --cmd "echo Battery OK" \
-  --step "Query battery status via platform tools." \
-  --step "Verify wear level is within normal threshold." \
-  --category "hardware" \
-  --vault ~/.memcore/vault
-
-# Mine repeatable workflows from trimtok telemetry (read-only input)
-memcore crystallize --from-traces --dry-run
-memcore crystallize --from-traces --min-runs 5 --limit 5   --traces ~/.trimtok/usage.jsonl --hermes ~/.hermes/skills
-
-# List crystallized skills in the vault
-memcore skill-list --vault ~/.memcore/vault
-```
-
 ---
+
 
 <a id="universal-agent-client-support-mcp--hermes"></a>
 ## 🔌 Universal Agent Client Support (MCP & Hermes)

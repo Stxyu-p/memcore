@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-11-09
+
 ### Added
 - **Trace-to-skill mining from trimtok telemetry (`memcore crystallize --from-traces`).**
   Reads `~/.trimtok/usage.jsonl` read-only, normalizes each command into a

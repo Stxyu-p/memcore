@@ -38,3 +38,7 @@ include = ["memcore*"]
 [tool.setuptools.package-data]
 memcore = ["schema/*.sql", "schema.sql"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+

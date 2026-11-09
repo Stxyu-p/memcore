@@ -63,6 +63,8 @@ def _ensure_memcore_importable():
 
 _ensure_memcore_importable()
 from memcore import core, store  # noqa: E402
+from memcore.write_support import ContradictionHold  # noqa: E402
+
 
 
 class ConfigError(Exception):
@@ -693,8 +695,16 @@ def tool_memory_remember(args, ctx=None):
             idempotency_key=f'remember:{pid}:agent-{agent_name}:{fp}')
         core.maybe_auto_corrob(conn, pid, fp, 'agent-' + agent_name)
         conn.commit()
-        return _tool_ok(memory_id=mem_id, version_id=ver_id, scope=scope)
+        receipt = f"🧠 [MemCore: remembered {mem_type} #{mem_id}]"
+        return _tool_ok(memory_id=mem_id, version_id=ver_id, scope=scope, receipt=receipt)
+    except ContradictionHold as ch:
+        conflicts = [list(h) for h in getattr(ch, "hits", [])]
+        return _tool_error(
+            f"ContradictionHold: claim contradicts live memory. Clarify or use memory_supersede to update. Conflicts: {conflicts}"
+        )
     except Exception as e:
+
+
         return _tool_error('%s: %s' % (type(e).__name__, e))
 
 
@@ -1047,8 +1057,9 @@ TOOL_SCHEMAS = [
             'type': 'object',
             'properties': {
                 'content': {'type': 'string'},
-                'type': {'type': 'string', 'enum': ['fact', 'decision', 'preference', 'note']},
+                'type': {'type': 'string', 'enum': ['fact', 'decision', 'preference', 'note', 'lesson']},
                 'source_file': {
+
                     'type': 'string',
                     'description': 'Optional path to a source file; MemCore stores its absolute path and SHA-256.',
                 },

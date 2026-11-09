@@ -31,6 +31,7 @@ _DECAY_MU = 0.04  # reinforcement recency fall-off per day
 _DECAY_HALF_LIFE_DAYS_BY_TYPE = {
     'constraint': 999999999.0,
     'decision': 90.0,
+    'lesson': 180.0,
     'preference': 90.0,
     'fact': 60.0,
     'note': 3.0,
@@ -40,11 +41,13 @@ _DECAY_HALF_LIFE_DAYS_BY_TYPE = {
 _DECAY_SALIENCE_BY_TYPE = {
     'constraint': 1.6,
     'decision': 1.2,
+    'lesson': 1.35,
     'preference': 1.15,
     'fact': 1.0,
     'note': 0.7,
     'observation': 0.8,
 }
+
 
 _DECAY_SALIENCE_BY_VERIFICATION = {
     'user_authoritative': 1.5,

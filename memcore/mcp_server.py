@@ -31,8 +31,12 @@ if _ROOT not in sys.path:
 try:
     from . import core, ingest, store
     from .client import DEFAULT_DB, MemCore
+    from .write_support import ContradictionHold
 except ImportError:
     from memcore import core, ingest, store  # type: ignore
+    from memcore.client import DEFAULT_DB, MemCore  # type: ignore
+    from memcore.write_support import ContradictionHold  # type: ignore
+
     from memcore.client import DEFAULT_DB, MemCore  # type: ignore
 
 SERVER_INFO = {"name": "memcore", "version": "2.11.0"}
@@ -87,14 +91,15 @@ TOOLS = [
                 "content": {"type": "string", "description": "The authoritative claim or fact to store (supports <private>...</private> redaction tags)"},
                 "type": {
                     "type": "string",
-                    "enum": ["fact", "decision", "preference", "note"],
+                    "enum": ["fact", "decision", "preference", "note", "lesson"],
                     "description": "Memory category alias (same as memory_type)",
                 },
                 "memory_type": {
                     "type": "string",
-                    "enum": ["fact", "decision", "preference", "note"],
+                    "enum": ["fact", "decision", "preference", "note", "lesson"],
                     "description": "Memory category (default: fact)",
                 },
+
                 "scope": {
                     "type": "string",
                     "enum": ["project", "private"],
@@ -369,15 +374,31 @@ def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
     when_to_use = args.get("when_to_use")
     auto_source_file = bool(args.get("auto_source_file", True))
     with _client(args) as mc:
-        mid = mc.remember(
-            content.strip(),
-            memory_type=mtype,
-            scope=scope,
-            source_file=source_file,
-            source_commit=source_commit,
-            when_to_use=when_to_use,
-            auto_source_file=auto_source_file,
-        )
+        try:
+            mid = mc.remember(
+                content.strip(),
+                memory_type=mtype,
+                scope=scope,
+                source_file=source_file,
+                source_commit=source_commit,
+                when_to_use=when_to_use,
+                auto_source_file=auto_source_file,
+            )
+        except ContradictionHold as ch:
+
+            conflicts = []
+            for h in getattr(ch, "hits", []):
+                conflicts.append({
+                    "conflicting_memory_id": h[0] if len(h) > 0 else "?",
+                    "existing_content": h[1] if len(h) > 1 else "?",
+                    "reason": h[2] if len(h) > 2 else "contradiction",
+                })
+            return {
+                "success": False,
+                "status": "contradiction_hold",
+                "challenge": "Evidence-Backed Challenge: Claim contradicts active memory. Clarify or use memory_supersede to update.",
+                "conflicts": conflicts,
+            }
         has_wtu = "when_to_use" in core._table_cols(mc.conn, "memory_version")
         wtu_col = "mv.when_to_use" if has_wtu else "NULL"
         row = mc.conn.execute(
@@ -393,12 +414,14 @@ def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
             "agent": mc.agent,
             "scope": scope,
             "memory_type": mtype,
+            "receipt": f"🧠 [MemCore: remembered {mtype} #{mid}]",
         }
         if row and row[0]:
             out["source_file"] = row[0]
         if row and row[1]:
             out["when_to_use"] = row[1]
         return out
+
 
 
 def _tool_search(args: dict[str, Any]) -> dict[str, Any]:

@@ -201,6 +201,7 @@ Turns hard-won debugging and DevOps recoveries into reusable capability:
 - Converts successful command and edit traces into fully compliant Hermes `SKILL.md` files.
 - Generates a cryptographic **Skill Proof** verifying that the verification command passed with exit code 0.
 - Synchronizes skills into both the Markdown Vault and the active Hermes Agent skills directory (`~/.hermes/skills/`).
+- Mines repeatable workflows directly from **trimtok telemetry** with `--from-traces`: a command that ran N times and always compressed cleanly becomes a candidate skill. Mined skills are stamped `unverified` with a `## Evidence` block (run count, clean count, date window, characters saved) — repetition proves the command is real, it does not prove it succeeded, so one real verification is still required before promotion.
 
 ---
 
@@ -295,6 +296,10 @@ memcore crystallize \
   --step "Verify wear level is within normal threshold." \
   --category "hardware" \
   --vault ~/.memcore/vault
+
+# Mine repeatable workflows from trimtok telemetry (read-only input)
+memcore crystallize --from-traces --dry-run
+memcore crystallize --from-traces --min-runs 5 --limit 5   --traces ~/.trimtok/usage.jsonl --hermes ~/.hermes/skills
 
 # List crystallized skills in the vault
 memcore skill-list --vault ~/.memcore/vault

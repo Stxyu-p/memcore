@@ -654,9 +654,14 @@ def cmd_vault_sync(args):
 
 
 def cmd_crystallize(args):
+    if getattr(args, 'from_traces', False):
+        _crystallize_from_traces(args)
+        return
     name = getattr(args, 'name', '')
     desc = getattr(args, 'desc', '')
     cmd = getattr(args, 'cmd', '')
+    if not (name and desc and cmd):
+        sys.exit('error: --name, --desc and --cmd are required unless --from-traces is used')
     steps = getattr(args, 'step', None) or ["Execute validated procedure via terminal."]
     cat = getattr(args, 'category', 'devops')
     v_path = getattr(args, 'vault', '~/.memcore/vault')
@@ -675,6 +680,66 @@ def cmd_crystallize(args):
     _out(f"  Vault: {res.get('vault_file')}")
     if res.get('hermes_file'):
         _out(f"  Hermes: {res.get('hermes_file')}")
+
+
+def _crystallize_from_traces(args):
+    """Turn repeated, cleanly-compressed trimtok commands into candidate skills."""
+    from .crystallize import crystallize_skill, save_crystallized_skill
+    from .trace_skills import evidence_lines, mine_traces, skill_name
+
+    traces = getattr(args, 'traces', None) or None
+    min_runs = int(getattr(args, 'min_runs', 3) or 3)
+    limit = int(getattr(args, 'limit', 8) or 8)
+    category = getattr(args, 'category', 'devops') or 'devops'
+    vault_path = getattr(args, 'vault', '~/.memcore/vault')
+    hermes_path = getattr(args, 'hermes', None)
+    dry_run = bool(getattr(args, 'dry_run', False))
+
+    evidence = mine_traces(traces, min_runs=min_runs, limit=limit)
+    if not evidence:
+        _out(
+            f"No repeatable workflows found (need >= {min_runs} runs with >= 80% clean "
+            "compression) in the trace file."
+        )
+        return
+
+    for ev in evidence:
+        name = skill_name(ev)
+        desc = f"Repeatable {ev.signature} workflow ({ev.runs} observed runs)"
+        steps = [
+            f"Run `{ev.signature}` from the project root.",
+            "Read the output; trimtok compresses it into context automatically.",
+            "Confirm the command exits 0 before treating the result as fact.",
+        ]
+        skill_md, proof = crystallize_skill(
+            name=name,
+            description=desc,
+            steps=steps,
+            verification_cmd=ev.signature,
+            category=category,
+            when_to_use=f"Use when the task requires `{ev.signature}` repeatedly.",
+            pitfalls=[
+                "Mined from telemetry: the observed runs compressed cleanly, but a "
+                "clean compression is not proof that the command succeeded.",
+            ],
+            evidence=evidence_lines(ev),
+        )
+        if dry_run:
+            _out(f"[dry-run] {name}: {ev.runs} runs ({ev.clean_runs} clean), "
+                 f"{ev.saved_chars:,} chars saved - status {proof.status}")
+            continue
+        res = save_crystallized_skill(
+            skill_md=skill_md,
+            name=name,
+            category=category,
+            vault_dir=vault_path,
+            hermes_skills_dir=hermes_path,
+        )
+        _out(f"Crystallized '{name}' from traces (status: {proof.status}, "
+             f"runs: {ev.runs}, proof: {proof.proof_hash[:12]}...)")
+        _out(f"  Vault: {res.get('vault_file')}")
+        if res.get('hermes_file'):
+            _out(f"  Hermes: {res.get('hermes_file')}")
 
 
 def cmd_skill_list(args):

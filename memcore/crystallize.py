@@ -72,10 +72,15 @@ def crystallize_skill(
     commit: str = "",
     when_to_use: str | None = None,
     pitfalls: list[str] | None = None,
+    evidence: list[str] | None = None,
 ) -> tuple[str, SkillProof]:
     slug = _slugify_skill_name(name)
     desc = _clamp_description(description)
     proof = SkillProof.create(slug, verification_cmd, exit_code=exit_code, commit=commit)
+    if evidence:
+        # A mined trace proves the command repeats, not that it succeeds.
+        # Downloading it to unverified keeps the proof from claiming more.
+        proof = dataclasses.replace(proof, status="unverified")
 
     w_trigger = when_to_use or f"Use when executing {slug} workflow."
     p_items = pitfalls or ["Ensure environment dependencies and permissions are satisfied before running."]
@@ -95,7 +100,7 @@ def crystallize_skill(
         f"    status: {proof.status}",
         f"    proof_hash: {proof.proof_hash}",
         f'    verification_cmd: "{verification_cmd}"',
-        f"    exit_code: {proof.exit_code}",
+        f"    exit_code: {'null' if evidence else proof.exit_code}",
         f'    timestamp: "{proof.timestamp}"',
         "---",
         "",
@@ -122,11 +127,24 @@ def crystallize_skill(
     for pitfall in p_items:
         body_lines.append(f"- {pitfall}")
 
+    if evidence:
+        body_lines.extend(["", "## Evidence"])
+        body_lines.extend(evidence)
+
     body_lines.extend([
         "",
         "## Verification",
         f"Run: `{verification_cmd or 'true'}`",
-        f"Expected: exit code {exit_code}.",
+    ])
+    if evidence:
+        body_lines.append(
+            "Expected: exit code 0. Not asserted here: this skill was mined from "
+            "observed runs and still needs one real verification before promotion."
+        )
+    else:
+        body_lines.append(f"Expected: exit code {exit_code}.")
+
+    body_lines.extend([
         "",
         f"<!-- skill_proof: {proof.proof_hash} -->",
         "",

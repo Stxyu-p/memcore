@@ -532,10 +532,17 @@ def main(argv=None):
     vs.set_defaults(func=cmd_vault_sync)
 
     p = sub.add_parser('crystallize', help='crystallize an execution trace into a verified SKILL.md', parents=[common])
-    p.add_argument('--name', required=True, help='skill slug name')
-    p.add_argument('--desc', required=True, help='short capability description (under 60 chars)')
-    p.add_argument('--cmd', required=True, help='verification command (must pass)')
+    p.add_argument('--name', help='skill slug name')
+    p.add_argument('--desc', help='short capability description (under 60 chars)')
+    p.add_argument('--cmd', help='verification command (must pass)')
     p.add_argument('--step', action='append', help='procedure step (repeatable)')
+    p.add_argument('--from-traces', action='store_true',
+                   help='mine repeated, cleanly-compressed commands from trimtok telemetry')
+    p.add_argument('--traces', action='append',
+                   help='trimtok usage.jsonl path (repeatable; default ~/.trimtok/usage.jsonl)')
+    p.add_argument('--min-runs', type=int, default=3, help='minimum observed runs per command (default: 3)')
+    p.add_argument('--limit', type=int, default=8, help='maximum skills to emit (default: 8)')
+    p.add_argument('--dry-run', action='store_true', help='report what would be crystallized')
     p.add_argument('--category', default='devops', help='skill category (default: devops)')
     p.add_argument('--vault', default='~/.memcore/vault', help='vault directory')
     p.add_argument('--hermes', help='Hermes profile skills directory')

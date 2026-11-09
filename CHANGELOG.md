@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Trace-to-skill mining from trimtok telemetry (`memcore crystallize --from-traces`).**
+  Reads `~/.trimtok/usage.jsonl` read-only, normalizes each command into a
+  signature (`cd X && uv run pytest tests/a.py` -> `uv run pytest`), and keeps
+  signatures with repeated runs that trimtok handled without reverting. Emits a
+  compliant `SKILL.md` per workflow into the Markdown vault. Mining is evidence,
+  not verification: proof status is forced to `unverified`, `exit_code` is
+  `null`, and a `## Evidence` block states the observed runs, clean runs, date
+  window, and characters saved. Promoted truth still requires a real run plus
+  governance. Article-level tests cover signature extraction, thresholds, the
+  proof downgrade, and a dry-run that writes nothing.
+- `memcore crystallize` no longer requires `--name/--desc/--cmd` when
+  `--from-traces` is used; the manual path still validates them.
+
+### Fixed
+- `crystallize_skill` now accepts `evidence=` and no longer stamps a mined skill
+  with `exit_code: 0`, which previously implied a verification run that never
+  happened.
+
 ## [2.10.0] - 2026-11-08
 
 ### Added

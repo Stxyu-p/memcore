@@ -241,8 +241,31 @@ class MemCoreMemoryProvider(MemoryProvider):
             self._project_id, self._agent_id = agent_plugin._require_bound_membership(
                 conn, self._project_ref, agent_name
             )
+            self._maybe_run_auto_sleep(conn)
         finally:
             conn.close()
+
+    def _maybe_run_auto_sleep(self, conn) -> None:
+        try:
+            vault_dir = pathlib.Path(self._store_path).parent / 'vault'
+            if not vault_dir.is_dir():
+                return
+            marker = vault_dir / '.last_sleep'
+            now = time.time()
+            if marker.exists():
+                try:
+                    last_ts = float(marker.read_text(encoding='utf-8').strip())
+                    if now - last_ts < 86400:
+                        return
+                except Exception:
+                    pass
+            from memcore.sleep import consolidate_memories
+            from memcore.vault import export_vault
+            consolidate_memories(conn, self._project_id, self._agent_id, vault_dir=str(vault_dir))
+            export_vault(conn, str(vault_dir))
+            marker.write_text(str(now), encoding='utf-8')
+        except Exception:
+            pass
 
     def system_prompt_block(self) -> str:
         return (
@@ -416,6 +439,13 @@ class MemCoreMemoryProvider(MemoryProvider):
                 builtin_metadata=builtin_metadata
             )
         )
+        try:
+            vault_dir = pathlib.Path(self._store_path).parent / 'vault'
+            if vault_dir.is_dir():
+                from memcore.vault import export_vault
+                export_vault(conn, str(vault_dir))
+        except Exception:
+            pass
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = '', **kwargs):
         if not task and not result:

@@ -249,10 +249,64 @@ def record_recall(conn, memory_ids) -> int:
 
 
 
+def _rrf_fuse_lanes(base_rows, exact_rows, k=60, base_weight=1.0, exact_weight=0.8):
+    """Reciprocal Rank Fusion (RRF) for multi-lane retrieval (ChronoHybridMem pattern).
+
+    Combines primary FTS5 ranking and Unicode substring matching without
+    ad-hoc score normalization. Items matching both lanes receive boosted
+    priority; high-rank substring matches are not relegated below all FTS hits.
+    """
+    if not exact_rows:
+        return list(base_rows)
+    if not base_rows:
+        return list(exact_rows)
+
+    scores = {}
+    row_by_id = {}
+
+    for rank, row in enumerate(base_rows):
+        mid = row[0]
+        row_by_id[mid] = row
+        scores[mid] = scores.get(mid, 0.0) + (base_weight / (k + rank + 1))
+
+    for rank, row in enumerate(exact_rows):
+        mid = row[0]
+        if mid not in row_by_id:
+            row_by_id[mid] = row
+        scores[mid] = scores.get(mid, 0.0) + (exact_weight / (k + rank + 1))
+
+    # Stable sort by RRF score descending; preserve insertion tie-break
+    ranked_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+    return [row_by_id[mid] for mid in ranked_ids]
+
+
+def _log_recall_telemetry(project_id, query, result_ids, elapsed_ms):
+    """Best-effort usage telemetry append to ~/.memcore/usage.jsonl (fail-open)."""
+    try:
+        import os, time, json
+        data_dir = os.environ.get("MEMCORE_DATA_DIR")
+        if not data_dir:
+            data_dir = os.path.expanduser("~/.memcore")
+        os.makedirs(data_dir, exist_ok=True)
+        log_path = os.path.join(data_dir, "usage.jsonl")
+        rec = {
+            "ts": time.time(),
+            "project_id": str(project_id),
+            "query": str(query)[:120],
+            "hit_count": len(result_ids),
+            "recalled_ids": list(result_ids)[:20],
+            "elapsed_ms": round(elapsed_ms, 2),
+        }
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _merge_exact_fallback(base_rows, exact_rows, limit, user_query,
                           query_tok=None, query_numbers=None,
                           query_tokens=None):
-    """Merge ranked primary candidates with exact substring fallback rows.
+    """Merge ranked primary candidates with exact substring fallback rows via RRF.
 
     C3: collapse across the whole overfetch window, demote contradictory
     rows (numbers, exclusive choices, negated phrases), and only THEN slice
@@ -262,16 +316,10 @@ def _merge_exact_fallback(base_rows, exact_rows, limit, user_query,
     search() so the query side of the incompatibility check is analyzed
     exactly once (C2).
     """
-    merged = list(base_rows)
-    if exact_rows:
-        seen = {row[0] for row in merged}
-        merge_cap = min(500, limit * DISTINCT_OVERFETCH)
-        for row in exact_rows:
-            if row[0] not in seen:
-                merged.append(row)
-                seen.add(row[0])
-                if len(merged) >= merge_cap:
-                    break
+    merged = _rrf_fuse_lanes(base_rows, exact_rows)
+    merge_cap = min(500, limit * DISTINCT_OVERFETCH)
+    if len(merged) > merge_cap:
+        merged = merged[:merge_cap]
     collapsed = _collapse_duplicate_claims(merged, limit=None)
     return _demote_numeric_mismatch(
         user_query, collapsed, query_tok=query_tok,
@@ -504,6 +552,8 @@ def search(conn, project_id, agent_id, query, limit=20,
     if limit < 1:
         raise MemCoreError('search limit must be >= 1')
     limit = min(limit, 500)
+    import time
+    t0 = time.perf_counter()
     mode_norm = str(mode or 'standard').strip().lower()
     if mode_norm not in ('standard', 'strict', 'historical'):
         raise MemCoreError(f'invalid search mode: {mode}; must be standard|strict|historical')
@@ -604,7 +654,9 @@ def search(conn, project_id, agent_id, query, limit=20,
         results = _filter_changed_since(conn, results, changed_since)
     if mode_norm == 'strict':
         results = _filter_strict_rows(conn, results)
-    return results[:limit]
+    final_res = results[:limit]
+    _log_recall_telemetry(project_id, user_query, [r[0] for r in final_res], (time.perf_counter() - t0) * 1000)
+    return final_res
 
 
 

@@ -250,7 +250,7 @@ def record_recall(conn, memory_ids) -> int:
 
 
 def _rrf_fuse_lanes(base_rows, exact_rows, k=60, base_weight=1.0, exact_weight=0.8):
-    """Reciprocal Rank Fusion (RRF) for multi-lane retrieval (ChronoHybridMem pattern).
+    """Reciprocal Rank Fusion (RRF) for multi-lane retrieval.
 
     Combines primary FTS5 ranking and Unicode substring matching without
     ad-hoc score normalization. Items matching both lanes receive boosted

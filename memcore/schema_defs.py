@@ -487,3 +487,47 @@ CREATE INDEX IF NOT EXISTS idx_decision_link_target ON decision_link(target_type
 
 """
 
+_TRIPWIRE_REGISTRY = """
+CREATE TABLE IF NOT EXISTS tripwire (
+    id                TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL REFERENCES project(id),
+    error_pattern     TEXT NOT NULL,
+    failed_action     TEXT NOT NULL,
+    root_cause        TEXT,
+    file_path         TEXT,
+    kind              TEXT NOT NULL DEFAULT 'break_loop' CHECK (kind IN ('break_loop', 'architectural')),
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    disarmed_at       TEXT,
+    disarmed_reason   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tripwire_project ON tripwire(project_id, kind);
+CREATE INDEX IF NOT EXISTS idx_tripwire_file ON tripwire(file_path);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS tripwire_fts USING fts5(
+    error_pattern,
+    failed_action,
+    root_cause,
+    content='tripwire',
+    content_rowid='rowid',
+    tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS tripwire_ai AFTER INSERT ON tripwire BEGIN
+  INSERT INTO tripwire_fts(rowid, error_pattern, failed_action, root_cause)
+  VALUES (new.rowid, new.error_pattern, new.failed_action, new.root_cause);
+END;
+
+CREATE TRIGGER IF NOT EXISTS tripwire_ad AFTER DELETE ON tripwire BEGIN
+  INSERT INTO tripwire_fts(tripwire_fts, rowid, error_pattern, failed_action, root_cause)
+  VALUES ('delete', old.rowid, old.error_pattern, old.failed_action, old.root_cause);
+END;
+
+CREATE TRIGGER IF NOT EXISTS tripwire_au AFTER UPDATE ON tripwire BEGIN
+  INSERT INTO tripwire_fts(tripwire_fts, rowid, error_pattern, failed_action, root_cause)
+  VALUES ('delete', old.rowid, old.error_pattern, old.failed_action, old.root_cause);
+  INSERT INTO tripwire_fts(rowid, error_pattern, failed_action, root_cause)
+  VALUES (new.rowid, new.error_pattern, new.failed_action, new.root_cause);
+END;
+"""
+

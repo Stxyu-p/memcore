@@ -40,6 +40,12 @@ from .cli_decision import (
     cmd_decision_supersede,
 )
 
+from .cli_tripwire import (
+    cmd_tripwire_arm,
+    cmd_tripwire_check,
+    cmd_tripwire_disarm,
+)
+
 from .cli_memory import (
     cmd_remember,
     cmd_search,
@@ -333,6 +339,32 @@ def main(argv=None):
     dsp.add_argument('--rationale', required=True)
     dsp.add_argument('--reason', default=None)
     dsp.set_defaults(func=cmd_decision_supersede)
+
+    p = sub.add_parser('tripwire', help='tripwire registry: trap recurring failure loops', parents=[common])
+    twsub = p.add_subparsers(dest='subcommand', required=True)
+    twa = twsub.add_parser('arm', help='arm a tripwire against a failed action or hazard', parents=[common])
+    twa.add_argument('--project', default=None)
+    twa.add_argument('--agent', default=None)
+    twa.add_argument('--error', required=True, help='error message or hazard pattern')
+    twa.add_argument('--failed', required=True, help='failed action that must not be repeated')
+    twa.add_argument('--root-cause', default=None, help='root cause explanation')
+    twa.add_argument('--file', default=None, help='affected file path')
+    twa.add_argument('--kind', default='break_loop', choices=['break_loop', 'architectural'])
+    twa.set_defaults(func=cmd_tripwire_arm)
+    twc = twsub.add_parser('check', help='check active tripwires', parents=[common])
+    twc.add_argument('--project', default=None)
+    twc.add_argument('--query', default=None)
+    twc.add_argument('--file', default=None)
+    twc.add_argument('--kind', default=None, choices=['break_loop', 'architectural'])
+    twc.add_argument('--limit', type=int, default=10)
+    twc.add_argument('--all', action='store_true', help='include disarmed tripwires')
+    twc.set_defaults(func=cmd_tripwire_check)
+    twd = twsub.add_parser('disarm', help='disarm a resolved tripwire', parents=[common])
+    twd.add_argument('tripwire_id')
+    twd.add_argument('--project', default=None)
+    twd.add_argument('--agent', default=None)
+    twd.add_argument('--reason', required=True)
+    twd.set_defaults(func=cmd_tripwire_disarm)
 
     sub.add_parser('stats', help='operational statistics', parents=[common]).set_defaults(func=cmd_stats)
 

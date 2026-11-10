@@ -53,6 +53,7 @@ from .cli_memory import (
     cmd_search,
     cmd_list,
     cmd_show,
+    cmd_read,
     cmd_pulse,
     cmd_promote,
     cmd_supersede,
@@ -228,6 +229,13 @@ def main(argv=None):
     p.add_argument('--agent', required=True)
     p.add_argument('--json', action='store_true', dest='json')
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser('read', help='read one memory at a progressive level', parents=[common])
+    p.add_argument('memory_id')
+    p.add_argument('--agent', required=True)
+    p.add_argument('--level', choices=['outline', 'full'], default='full')
+    p.add_argument('--json', action='store_true', dest='json')
+    p.set_defaults(func=cmd_read)
 
     p = sub.add_parser('pulse', help='one-screen operational snapshot', parents=[common])
     p.add_argument('--project', required=True,

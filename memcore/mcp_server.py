@@ -29,11 +29,11 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 try:
-    from . import core, ingest, store
+    from . import core, ingest, store, progressive
     from .client import DEFAULT_DB, MemCore
     from .write_support import ContradictionHold
 except ImportError:
-    from memcore import core, ingest, store  # type: ignore
+    from memcore import core, ingest, store, progressive  # type: ignore
     from memcore.client import DEFAULT_DB, MemCore  # type: ignore
     from memcore.write_support import ContradictionHold  # type: ignore
 
@@ -200,7 +200,8 @@ TOOLS = [
     {
         "name": "memory_get",
         "description": (
-            "Layer-3 progressive disclosure: fetch full governed memory records (content, when_to_use, provenance, optional version history and evidence) by ID list."
+            "Layer-3 progressive disclosure: fetch governed memory records by ID. "
+            "Use level='outline' for headings and list items without prose/code, or level='full' (default) for complete content."
         ),
         "inputSchema": {
             "type": "object",
@@ -221,6 +222,11 @@ TOOLS = [
                 "include_evidence": {
                     "type": "boolean",
                     "description": "Include linked evidence records (default: false)",
+                },
+                "level": {
+                    "type": "string",
+                    "enum": ["full", "outline"],
+                    "description": "Read depth: full returns content (default); outline returns headings and list items without prose or code",
                 },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
                 "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
@@ -508,19 +514,33 @@ def _tool_get(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("memory_ids (or memory_id) is required")
     include_history = bool(args.get("include_history", False))
     include_evidence = bool(args.get("include_evidence", False))
+    level = args.get("level", "full")
+    if level not in ("full", "outline"):
+        raise ValueError("level must be 'full' or 'outline'")
     with _client(args) as mc:
         items = mc.get(
             ids,
             include_history=include_history,
             include_evidence=include_evidence,
         )
-        return {
+        result = {
             "success": True,
             "project": mc.project,
             "agent": mc.agent,
             "count": len(items),
             "results": items,
         }
+        if level == "outline":
+            for item in items:
+                item["outline"] = progressive.markdown_outline(item.pop("content", "") or "")
+                for version in item.get("history", []):
+                    version["outline"] = progressive.markdown_outline(version.pop("content", "") or "")
+                for evidence in item.get("evidence", []):
+                    excerpt = evidence.pop("excerpt", None)
+                    if excerpt:
+                        evidence["outline"] = progressive.markdown_outline(excerpt)
+            result["level"] = "outline"
+        return result
 
 
 def _tool_promote(args: dict[str, Any]) -> dict[str, Any]:

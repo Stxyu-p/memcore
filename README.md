@@ -272,6 +272,10 @@ memcore remember "Python 3.10+ required for core services" --project default --a
 # Search memories (FTS5 BM25 + Thai bigrams + aliases)
 memcore search "python version" --project default --agent hermes
 
+# Read structure/provenance only, without loading Markdown prose or code
+memcore read <memory-id> --agent hermes --level outline
+memcore read <memory-id> --agent hermes --level full  # complete record (default)
+
 # Supersede an existing memory (creates new version, archives old)
 memcore supersede <memory-id> "Python 3.11+ required" --agent hermes --reason "Dependency update"
 
@@ -392,7 +396,7 @@ trimtok install && memcore install && skill-proof install
 
 MemCore enforces non-regression invariants across SQL migrations, bitemporal validities, and search lanes:
 ```bash
-python -m harness   # 614 passed tests across bitemporal chains, RRF recall, tripwires, file gotchas, and migrations (0 failures)
+python -m harness   # 616 passed tests across bitemporal chains, RRF recall, tripwires, gotchas, and progressive reads (0 failures)
 ```
 
 ---

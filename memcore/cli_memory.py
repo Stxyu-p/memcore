@@ -2,6 +2,7 @@
 import sys
 
 from . import core
+from .progressive import markdown_outline
 
 from .cli_support import (
     _agent_identity_or_exit,
@@ -189,6 +190,58 @@ def cmd_show(args):
                   f"({l['relation']})")
     else:
         print('linked decisions: none')
+
+
+def cmd_read(args):
+    """Read a memory as a compact outline or delegate to the full inspector."""
+    if getattr(args, 'level', 'full') == 'full':
+        return cmd_show(args)
+
+    conn = _open_readonly(args)
+    try:
+        agent_id, exists = _agent_identity_or_exit(conn, args.agent)
+        if not exists:
+            sys.exit(f'error: agent {agent_id} does not exist; create it first')
+        row = conn.execute(
+            'SELECT project_id FROM memory WHERE id = ?', (args.memory_id,)
+        ).fetchone()
+        if row is None:
+            sys.exit(f'error: memory {args.memory_id} not found')
+        detail = core.get_memory_detail(conn, row[0], agent_id, args.memory_id)
+    finally:
+        conn.close()
+    if detail is None:
+        sys.exit(f'error: memory {args.memory_id} not found or not accessible')
+
+    memory = detail['memory']
+    version = detail['version']
+    payload = {
+        'level': 'outline',
+        'memory_id': memory['id'],
+        'project_id': memory['project_id'],
+        'labels': {
+            'scope': memory['scope'],
+            'lifecycle': memory['lifecycle'],
+            'verification': memory['verification'],
+            'freshness': memory['freshness'],
+        },
+        'type': memory['type'],
+        'when_to_use': version['when_to_use'] if version else None,
+        'source_file': version['source_file'] if version else None,
+        'outline': markdown_outline(version['content'] if version else ''),
+    }
+    if args.json:
+        _out(payload)
+        return
+    print(f"memory: {payload['memory_id']} ({payload['project_id']})")
+    labels = payload['labels']
+    print(f"labels: {labels['scope']} | {labels['lifecycle']} | {labels['verification']} | {labels['freshness']}")
+    print(f"type: {payload['type']}")
+    if payload['when_to_use']:
+        print(f"when_to_use: {payload['when_to_use']}")
+    print('outline:')
+    for line in payload['outline']:
+        print(f'  {line}')
 
 
 def cmd_pulse(args):

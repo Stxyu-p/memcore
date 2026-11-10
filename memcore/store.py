@@ -202,7 +202,6 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0020_binary_vector', _BINARY_VECTOR_COLUMN),
     ('0021_decision_layer', _DECISION_LAYER),
     ('0022_drop_embedding', _DROP_EMBEDDING),
-    ('0023_tripwire_registry', _TRIPWIRE_REGISTRY),
 ]
 
 
@@ -458,6 +457,10 @@ def apply_migrations(conn):
     known = [ver for ver, _ in MIGRATIONS]
     if '0018_memory_embedding' in known and v in known and known.index(v) >= known.index('0018_memory_embedding'):
         _ensure_column(conn, 'memory_version', 'when_to_use', 'TEXT')
+    try:
+        conn.executescript(_TRIPWIRE_REGISTRY)
+    except Exception:
+        pass
     _invalidate_core_schema_caches()
 
 

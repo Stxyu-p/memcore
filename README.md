@@ -30,11 +30,11 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
 | :--- | :--- | :--- | :--- |
 | **Contradictory Facts** | Dumps conflicting historical guesses into context. | **Bitemporal Superseding (`superseded`)**: exactly one current truth. | Eliminates regression loops & wrong guesses. |
 | **Disproven Assumptions** | Agents re-learn debunked errors across sessions. | **Cryptographic Tombstones (`tombstone`)**: immutable hard veto barrier. | Permanent protection against recurring mistakes. |
-| **Context Window Overhead** | Dumps verbose prose blocks (1,200+ chars) every turn. | **Progressive L0 Index**: `#mID [scope\|status] headline` (~100 tokens). | **-70% to -85% active prompt memory tokens**. |
+| **Context Window Overhead** | Dumps verbose prose blocks (1,200+ chars) every turn. | **Progressive L0 Index**: `#mID [scope/status] headline` (~100 tokens). | **-70% to -85% active prompt memory tokens**. |
 | **Data Transparency** | Opaque binary database or remote SaaS black box. | **Markdown Vault Mirror (`vault/`)**: human-readable `.md` files + Git. | 100% diffable, editable in VS Code or Obsidian. |
 | **Database Failure / Loss** | Database corruption means total loss of knowledge. | **Disposable Cache Rebuilder (`memcore rebuild`)**: full DB reconstituted. | Zero knowledge loss; SQLite is a disposable cache. |
 | **Memory Fragmentation** | Hundreds of scattered, repetitive micro-notes. | **Sleep Metabolism (`memcore sleep`)**: synthesized Master Records. | Daily Dream Reports summarize auto-consolidation. |
-| **Procedural Mastery** | Remembers facts, but forgets how to execute fixes. | **Trace-to-Skill Crystallization (`SKILL.md`)**: verified Skill Proofs. | Turns successful terminal fixes into reusable skills. |
+| **Procedural Mastery** | Remembers facts, but forgets how to execute fixes. | **Trinity Handoff (`skill-proof`)**: verified Skill Proofs & `SKILL.md`. | Reusable operational capability decoupled from fact recall. |
 | **Indirect Prompt Injection**| Web pages and logs silently inject permanent memories. | **Tainted Context Guard**: auto-accept veto on untrusted tools. | Strict candidate quarantine for external input. |
 
 ---
@@ -78,7 +78,7 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
 
 | 🏛️ Architecture & Governance | ⚡ Core Engineering Pillars | 🛠️ Setup & Operations |
 | :--- | :--- | :--- |
-| • [⚡ At a Glance: Before vs After](#at-a-glance)<br>• [🏗️ How It Works](#how-it-works)<br>• [🥊 Market Comparison Matrix](#market-comparison)<br>• [🏛️ Four Pillars of Epistemic Trust](#the-four-pillars-of-epistemic-trust) | • **[Pillar 1: Epistemic Governance](#pillar-1-epistemic-governance)**<br>&nbsp;&nbsp;▫ [Bitemporal Superseding](#bitemporal-superseding)<br>&nbsp;&nbsp;▫ [Cryptographic Tombstones](#cryptographic-tombstones)<br>&nbsp;&nbsp;▫ [Tainted Context Guard](#tainted-context-guard)<br>• **[Pillar 2: Progressive Layered Context](#pillar-2-progressive-layered-context)**<br>&nbsp;&nbsp;▫ [Compact L0 Index Injection](#compact-l0-index)<br>&nbsp;&nbsp;▫ [On-Demand Detail Escalation](#detail-escalation)<br>• **[Pillar 3: Markdown Vault as Single Truth](#pillar-3-markdown-vault-as-single-source-of-truth)**<br>&nbsp;&nbsp;▫ [Vault Directory Structure](#vault-structure)<br>&nbsp;&nbsp;▫ [Disposable Cache Rebuilding](#disposable-cache-rebuilding)<br>• **[Pillar 4: Sleep Metabolism & Crystallization](#pillar-4-sleep-metabolism-and-skill-crystallization)**<br>&nbsp;&nbsp;▫ [Sleep Consolidation & Dream Reports](#sleep-consolidation)<br>&nbsp;&nbsp;▫ [Trace-to-Skill & Skill Proofs](#trace-to-skill) | • **[First-Time Setup (5 Mins)](#quickstart-5-minutes)**<br>&nbsp;&nbsp;▫ [Step 1: Installation](#step-1-install-memcore)<br>&nbsp;&nbsp;▫ [Step 2: Self-Healing Doctor](#step-2-initialize-database--run-self-healing-doctor)<br>&nbsp;&nbsp;▫ [Step 3: Vault Synchronization](#step-3-markdown-vault-synchronization)<br>• **[Universal Agent Support](#universal-agent-client-support-mcp--hermes)**<br>&nbsp;&nbsp;▫ [Hermes Native Provider](#native-hermes-agent-integration)<br>&nbsp;&nbsp;▫ [Stdio MCP Server](#universal-agent-client-support-mcp--hermes)<br>• **[CLI Command Reference](#cli-command-reference)**<br>&nbsp;&nbsp;▫ [Memory Operations](#memory-operations)<br>&nbsp;&nbsp;▫ [Vault & Rebuild Commands](#markdown-vault-mirror--rebuilder)<br>&nbsp;&nbsp;▫ [Sleep & Dream Reports](#sleep-metabolism--dream-reports)<br>&nbsp;&nbsp;▫ [Skill Crystallization](#skill-crystallization-cli) |
+| • [⚡ At a Glance: Before vs After](#at-a-glance)<br>• [🏗️ How It Works](#how-it-works)<br>• [🥊 Market Comparison Matrix](#market-comparison)<br>• [🏛️ Four Pillars of Epistemic Trust](#the-four-pillars-of-epistemic-trust) | • **[Pillar 1: Epistemic Governance](#pillar-1-epistemic-governance)**<br>&nbsp;&nbsp;▫ [Bitemporal Superseding](#bitemporal-superseding)<br>&nbsp;&nbsp;▫ [Cryptographic Tombstones](#cryptographic-tombstones)<br>&nbsp;&nbsp;▫ [Tainted Context Guard](#tainted-context-guard)<br>• **[Pillar 2: Progressive Layered Context](#pillar-2-progressive-layered-context)**<br>&nbsp;&nbsp;▫ [Compact L0 Index Injection](#compact-l0-index)<br>&nbsp;&nbsp;▫ [On-Demand Detail Escalation](#detail-escalation)<br>• **[Pillar 3: Markdown Vault as Single Truth](#pillar-3-markdown-vault-as-single-source-of-truth)**<br>&nbsp;&nbsp;▫ [Vault Directory Structure](#vault-structure)<br>&nbsp;&nbsp;▫ [Disposable Cache Rebuilding](#disposable-cache-rebuilding)<br>• **[Pillar 4: Sleep Knowledge Metabolism](#pillar-4-sleep-metabolism)**<br>&nbsp;&nbsp;▫ [Sleep Consolidation & Dream Reports](#sleep-consolidation)<br>&nbsp;&nbsp;▫ [Global Trinity Architecture](#part-of-the-global-agent-trinity) | • **[First-Time Setup (5 Mins)](#quickstart-5-minutes)**<br>&nbsp;&nbsp;▫ [Step 1: Installation](#step-1-install-memcore)<br>&nbsp;&nbsp;▫ [Step 2: Self-Healing Doctor](#step-2-initialize-database--run-self-healing-doctor)<br>&nbsp;&nbsp;▫ [Step 3: Vault Synchronization](#step-3-markdown-vault-synchronization)<br>• **[Universal Agent Support](#universal-agent-client-support-mcp--hermes)**<br>&nbsp;&nbsp;▫ [Hermes Native Provider](#native-hermes-agent-integration)<br>&nbsp;&nbsp;▫ [Stdio MCP Server](#universal-agent-client-support-mcp--hermes)<br>• **[CLI Command Reference](#cli-command-reference)**<br>&nbsp;&nbsp;▫ [Memory Operations](#memory-operations)<br>&nbsp;&nbsp;▫ [Vault & Rebuild Commands](#markdown-vault-mirror--rebuilder)<br>&nbsp;&nbsp;▫ [Sleep & Dream Reports](#sleep-metabolism--dream-reports) |
 
 ---
 
@@ -102,6 +102,10 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
 ---
 
 <a id="the-four-pillars-of-epistemic-trust"></a>
+<a id="pillar-1-epistemic-governance"></a>
+<a id="the-four-pillars-of-epistemic-trust"></a>
+<a id="pillar-1-epistemic-governance"></a>
+<a id="the-four-pillars-of-epistemic-trust"></a>
 ## 🏛️ Pillar 1: Epistemic Governance & Trust Model
 
 Every canonical memory in MemCore is stamped with four orthogonal governance dimensions:
@@ -117,7 +121,9 @@ Every canonical memory in MemCore is stamped with four orthogonal governance dim
    - `candidate`: Quarantined observation under review; excluded from active recall.
    - `accepted`: Verified, authoritative operational truth.
    - `conflict`: Flagged by contradiction detector; paused from active recall.
+<a id="cryptographic-tombstones"></a>
    - `rejected` / `tombstone`: Cryptographically disproven assertion acting as an immutable veto barrier.
+<a id="bitemporal-superseding"></a>
    - `superseded`: Historical version preserved for bitemporal point-in-time auditing.
    - `disabled`: Deactivated by operator.
 3. **Provable Verification (`verification`):**
@@ -129,6 +135,7 @@ Every canonical memory in MemCore is stamped with four orthogonal governance dim
    - Computes continuous decay: `salience * exp(-lambda * age) + reinforcement`.
    - Distinguishes between `current`, `aging`, and `stale`. When underlying source files change on disk, dependent memories automatically transition to `stale`.
 
+<a id="tainted-context-guard"></a>
 ### Tainted Context Guard (Anti-Poisoning Rail)
 Untrusted I/O operations (`web_search`, `web_extract`, `browser_exec`, and shell fetches like `curl`, `wget`, `git clone`) automatically stamp `tainted: True` on the turn event:
 - **Auto-Accept Veto:** Disqualifies all automatic promotion rules.
@@ -141,6 +148,7 @@ Untrusted I/O operations (`web_search`, `web_extract`, `browser_exec`, and shell
 
 MemCore eliminates prompt bloat through a 3-tier retrieval ladder:
 
+<a id="compact-l0-index"></a>
 ### 1. Compact L0 Index Injection (~100 tokens)
 Instead of dumping full paragraphs every turn, MemCore injects a compact index header:
 
@@ -153,6 +161,7 @@ Shared project memory (memcore):
 (Details: call memory_show(id) or memory_search(query))
 ```
 
+<a id="detail-escalation"></a>
 ### 2. On-Demand Detail Escalation (L1 / L2)
 - **L1 Salience Outline:** `memory_search(query)` returns concise, relevance-ranked previews.
 - **L2 Full Provenance:** `memory_show(id)` reveals the complete record: exact wording, author, commit hash, version chain, linked decisions, and active tombstones.
@@ -164,6 +173,7 @@ Shared project memory (memcore):
 
 MemCore bridges human readability with machine speed. The Markdown Vault (`~/.memcore/vault/`) is the single source of truth, while SQLite WAL acts as a fast, disposable index.
 
+<a id="vault-structure"></a>
 ```text
 ~/.memcore/vault/
 ├── profile.md                  # User & Agent profile / core persona
@@ -178,6 +188,7 @@ MemCore bridges human readability with machine speed. The Markdown Vault (`~/.me
 ```
 
 
+<a id="disposable-cache-rebuilding"></a>
 ### Disposable Cache Rebuilding (`memcore rebuild`)
 If the SQLite database is lost, corrupted, or deleted:
 ```bash
@@ -190,6 +201,7 @@ memcore rebuild --path ~/.memcore/vault
 <a id="pillar-4-sleep-metabolism"></a>
 ## 🌙 Pillar 4: Sleep Knowledge Metabolism
 
+<a id="sleep-consolidation"></a>
 ### 1. Sleep Knowledge Metabolism (`memcore sleep`)
 Memory shouldn't just accumulate—it must metabolize. During offline sleep cycles, MemCore:
 - Clusters fragmented memories sharing common topics or files.
@@ -202,11 +214,13 @@ Memory shouldn't just accumulate—it must metabolize. During offline sleep cycl
 <a id="quickstart-5-minutes"></a>
 ## 🛠️ Quickstart (5 Minutes)
 
+<a id="step-1-install-memcore"></a>
 ### Step 1: Install MemCore
 ```bash
 pip install memcore-omnix
 ```
 
+<a id="step-2-initialize-database--run-self-healing-doctor"></a>
 ### Step 2: Initialize Database & Run Self-Healing Doctor
 ```bash
 # Verify SQLite integrity, foreign keys, and schema migrations
@@ -216,6 +230,7 @@ memcore doctor
 memcore pulse --project default --agent hermes
 ```
 
+<a id="step-3-markdown-vault-synchronization"></a>
 ### Step 3: Markdown Vault Synchronization
 ```bash
 # Export existing SQLite memories to human-readable Markdown vault
@@ -246,6 +261,7 @@ memcore show mem-abc123 --agent hermes
 memcore doctor
 ```
 
+<a id="memory-operations"></a>
 ### Memory Operations
 ```bash
 # Store a verified fact
@@ -261,6 +277,7 @@ memcore supersede <memory-id> "Python 3.11+ required" --agent hermes --reason "D
 memcore reject <memory-id> "Disproven in production load test" --agent hermes
 ```
 
+<a id="markdown-vault-mirror--rebuilder"></a>
 ### Markdown Vault Mirror & Rebuilder
 ```bash
 # Export SQLite memories to Markdown vault
@@ -273,6 +290,7 @@ memcore vault sync --path ~/.memcore/vault
 memcore rebuild --path ~/.memcore/vault
 ```
 
+<a id="sleep-metabolism--dream-reports"></a>
 ### Sleep Metabolism & Dream Reports
 ```bash
 # Run offline knowledge consolidation and generate Dream Report
@@ -292,6 +310,7 @@ memcore install
 memcore clients
 ```
 
+<a id="native-hermes-agent-integration"></a>
 ### 2. Native Hermes Agent Integration
 ```yaml
 # ~/.hermes/config.yaml

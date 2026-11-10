@@ -80,7 +80,7 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
 
 | 🏛️ Architecture & Governance | ⚡ Core Engineering Pillars | 🛠️ Setup & Operations |
 | :--- | :--- | :--- |
-| • [⚡ At a Glance: Before vs After](#at-a-glance)<br>• [🏗️ How It Works](#how-it-works)<br>• [🥊 Market Comparison Matrix](#market-comparison)<br>• [🏛️ Four Pillars of Epistemic Trust](#the-four-pillars-of-epistemic-trust) | • **[Pillar 1: Epistemic Governance](#pillar-1-epistemic-governance)**<br>&nbsp;&nbsp;▫ [Bitemporal Superseding](#bitemporal-superseding)<br>&nbsp;&nbsp;▫ [Cryptographic Tombstones](#cryptographic-tombstones)<br>&nbsp;&nbsp;▫ [Tainted Context Guard](#tainted-context-guard)<br>• **[Pillar 2: Progressive Layered Context](#pillar-2-progressive-layered-context)**<br>&nbsp;&nbsp;▫ [Compact L0 Index Injection](#compact-l0-index)<br>&nbsp;&nbsp;▫ [On-Demand Detail Escalation](#detail-escalation)<br>• **[Pillar 3: Markdown Vault as Single Truth](#pillar-3-markdown-vault-as-single-source-of-truth)**<br>&nbsp;&nbsp;▫ [Vault Directory Structure](#vault-structure)<br>&nbsp;&nbsp;▫ [Disposable Cache Rebuilding](#disposable-cache-rebuilding)<br>• **[Pillar 4: Sleep Knowledge Metabolism](#pillar-4-sleep-metabolism)**<br>&nbsp;&nbsp;▫ [Sleep Consolidation & Dream Reports](#sleep-consolidation)<br>&nbsp;&nbsp;▫ [Autonomous Agent Ecosystem](#autonomous-agent-ecosystem) | • **[First-Time Setup (5 Mins)](#quickstart-5-minutes)**<br>&nbsp;&nbsp;▫ [Step 1: Installation](#step-1-install-memcore)<br>&nbsp;&nbsp;▫ [Step 2: Self-Healing Doctor](#step-2-initialize-database--run-self-healing-doctor)<br>&nbsp;&nbsp;▫ [Step 3: Vault Synchronization](#step-3-markdown-vault-synchronization)<br>• **[Universal Agent Support](#universal-agent-client-support-mcp--hermes)**<br>&nbsp;&nbsp;▫ [Hermes Native Provider](#native-hermes-agent-integration)<br>&nbsp;&nbsp;▫ [Stdio MCP Server](#universal-agent-client-support-mcp--hermes)<br>• **[CLI Command Reference](#cli-command-reference)**<br>&nbsp;&nbsp;▫ [Memory Operations](#memory-operations)<br>&nbsp;&nbsp;▫ [Vault & Rebuild Commands](#markdown-vault-mirror--rebuilder)<br>&nbsp;&nbsp;▫ [Tripwire Registry](#tripwire-registry)<br>&nbsp;&nbsp;▫ [Sleep & Dream Reports](#sleep-metabolism--dream-reports) |
+| • [⚡ At a Glance: Before vs After](#at-a-glance)<br>• [🏗️ How It Works](#how-it-works)<br>• [🥊 Market Comparison Matrix](#market-comparison)<br>• [🏛️ Four Pillars of Epistemic Trust](#the-four-pillars-of-epistemic-trust) | • **[Pillar 1: Epistemic Governance](#pillar-1-epistemic-governance)**<br>&nbsp;&nbsp;▫ [Bitemporal Superseding](#bitemporal-superseding)<br>&nbsp;&nbsp;▫ [Cryptographic Tombstones](#cryptographic-tombstones)<br>&nbsp;&nbsp;▫ [Tainted Context Guard](#tainted-context-guard)<br>• **[Pillar 2: Progressive Layered Context](#pillar-2-progressive-layered-context)**<br>&nbsp;&nbsp;▫ [Compact L0 Index Injection](#compact-l0-index)<br>&nbsp;&nbsp;▫ [On-Demand Detail Escalation](#detail-escalation)<br>• **[Pillar 3: Markdown Vault as Single Truth](#pillar-3-markdown-vault-as-single-source-of-truth)**<br>&nbsp;&nbsp;▫ [Vault Directory Structure](#vault-structure)<br>&nbsp;&nbsp;▫ [Disposable Cache Rebuilding](#disposable-cache-rebuilding)<br>• **[Pillar 4: Sleep Knowledge Metabolism](#pillar-4-sleep-metabolism)**<br>&nbsp;&nbsp;▫ [Sleep Consolidation & Dream Reports](#sleep-consolidation)<br>&nbsp;&nbsp;▫ [Autonomous Agent Ecosystem](#autonomous-agent-ecosystem) | • **[First-Time Setup (5 Mins)](#quickstart-5-minutes)**<br>&nbsp;&nbsp;▫ [Step 1: Installation](#step-1-install-memcore)<br>&nbsp;&nbsp;▫ [Step 2: Self-Healing Doctor](#step-2-initialize-database--run-self-healing-doctor)<br>&nbsp;&nbsp;▫ [Step 3: Vault Synchronization](#step-3-markdown-vault-synchronization)<br>• **[Universal Agent Support](#universal-agent-client-support-mcp--hermes)**<br>&nbsp;&nbsp;▫ [Hermes Native Provider](#native-hermes-agent-integration)<br>&nbsp;&nbsp;▫ [Stdio MCP Server](#universal-agent-client-support-mcp--hermes)<br>• **[CLI Command Reference](#cli-command-reference)**<br>&nbsp;&nbsp;▫ [Memory Operations](#memory-operations)<br>&nbsp;&nbsp;▫ [Vault & Rebuild Commands](#markdown-vault-mirror--rebuilder)<br>&nbsp;&nbsp;▫ [Tripwire Registry](#tripwire-registry)<br>&nbsp;&nbsp;▫ [File Gotchas](#file-gotchas)<br>&nbsp;&nbsp;▫ [Sleep & Dream Reports](#sleep-metabolism--dream-reports) |
 
 ---
 
@@ -306,6 +306,14 @@ memcore tripwire check --project default --file "src/engine.py"
 memcore tripwire disarm tw-123456 --project default --agent hermes --reason "Fixed off-by-one condition in loop"
 ```
 
+<a id="file-gotchas"></a>
+### File-Anchored Gotchas & Hazards
+```bash
+# Inspect all active tripwires and anchored invariants before editing a file
+memcore gotchas src/engine.py
+memcore gotchas src/engine.py --json
+```
+
 <a id="sleep-metabolism--dream-reports"></a>
 ### Sleep Metabolism & Dream Reports
 ```bash
@@ -384,7 +392,7 @@ trimtok install && memcore install && skill-proof install
 
 MemCore enforces non-regression invariants across SQL migrations, bitemporal validities, and search lanes:
 ```bash
-python -m harness   # 611 passed tests across bitemporal chains, RRF recall, tripwires, and migrations (0 failures)
+python -m harness   # 614 passed tests across bitemporal chains, RRF recall, tripwires, file gotchas, and migrations (0 failures)
 ```
 
 ---

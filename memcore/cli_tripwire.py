@@ -43,7 +43,8 @@ def cmd_tripwire_arm(args):
 def cmd_tripwire_check(args):
     conn = _open_readonly(args)
     try:
-        project_id = _project_or_exit(conn, getattr(args, "project", None))
+        project_ref = getattr(args, "project", None) or "default"
+        project_id = _project_or_exit(conn, project_ref)
         if not project_id:
             sys.exit("error: project is required")
         try:

@@ -46,6 +46,8 @@ from .cli_tripwire import (
     cmd_tripwire_disarm,
 )
 
+from .cli_gotchas import cmd_gotchas
+
 from .cli_memory import (
     cmd_remember,
     cmd_search,
@@ -365,6 +367,13 @@ def main(argv=None):
     twd.add_argument('--agent', default=None)
     twd.add_argument('--reason', required=True)
     twd.set_defaults(func=cmd_tripwire_disarm)
+
+    p_got = sub.add_parser('gotchas', help='inspect hazards and invariants anchored to a file', parents=[common])
+    p_got.add_argument('file', help='file path to inspect')
+    p_got.add_argument('--project', default=None)
+    p_got.add_argument('--limit', type=int, default=20)
+    p_got.add_argument('--json', action='store_true', help='output as json')
+    p_got.set_defaults(func=cmd_gotchas)
 
     sub.add_parser('stats', help='operational statistics', parents=[common]).set_defaults(func=cmd_stats)
 

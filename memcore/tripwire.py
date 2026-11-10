@@ -130,8 +130,8 @@ def check_tripwires(
 
     if file_path:
         norm_file = str(file_path).strip().replace("\\", "/")
-        where_clauses.append("(t.file_path = ? OR instr(?, t.file_path) > 0)")
-        params.extend([norm_file, norm_file])
+        where_clauses.append("(t.file_path = ? OR instr(t.file_path, ?) > 0 OR instr(?, t.file_path) > 0)")
+        params.extend([norm_file, norm_file, norm_file])
 
     user_query = str(query or "").strip()
     if user_query:

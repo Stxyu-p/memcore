@@ -34,7 +34,9 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
 | **Data Transparency** | Opaque binary database or remote SaaS black box. | **Markdown Vault Mirror (`vault/`)**: human-readable `.md` files + Git. | 100% diffable, editable in VS Code or Obsidian. |
 | **Database Failure / Loss** | Database corruption means total loss of knowledge. | **Disposable Cache Rebuilder (`memcore rebuild`)**: full DB reconstituted. | Zero knowledge loss; SQLite is a disposable cache. |
 | **Memory Fragmentation** | Hundreds of scattered, repetitive micro-notes. | **Sleep Metabolism (`memcore sleep`)**: synthesized Master Records. | Daily Dream Reports summarize auto-consolidation. |
-| **Procedural Mastery** | Remembers facts, but forgets how to execute fixes. | **Trinity Handoff (`skill-proof`)**: verified Skill Proofs & `SKILL.md`. | Reusable operational capability decoupled from fact recall. |
+| **Debugging & Execution Loops** | Agents repeat the same failing fix in circles. | **Tripwire Registry (`tripwire`)**: traps failed actions & structural hazards. | Permanent 3-strike circuit breaker against repeating errors. |
+| **Bilingual Hybrid Retrieval** | BM25 fails on glued Thai/CJK, ad-hoc score scaling breaks. | **Reciprocal Rank Fusion (RRF $k=60$)**: fuses FTS5 BM25 with Thai substring lane. | Exact mathematical composite rank without score calibration. |
+| **Procedural Mastery** | Remembers facts, but forgets how to execute fixes. | **Skill Crystallization Protocol**: verified Skill Proofs & `SKILL.md`. | Reusable operational capability decoupled from fact recall. |
 | **Indirect Prompt Injection**| Web pages and logs silently inject permanent memories. | **Tainted Context Guard**: auto-accept veto on untrusted tools. | Strict candidate quarantine for external input. |
 
 ---
@@ -78,7 +80,7 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
 
 | 🏛️ Architecture & Governance | ⚡ Core Engineering Pillars | 🛠️ Setup & Operations |
 | :--- | :--- | :--- |
-| • [⚡ At a Glance: Before vs After](#at-a-glance)<br>• [🏗️ How It Works](#how-it-works)<br>• [🥊 Market Comparison Matrix](#market-comparison)<br>• [🏛️ Four Pillars of Epistemic Trust](#the-four-pillars-of-epistemic-trust) | • **[Pillar 1: Epistemic Governance](#pillar-1-epistemic-governance)**<br>&nbsp;&nbsp;▫ [Bitemporal Superseding](#bitemporal-superseding)<br>&nbsp;&nbsp;▫ [Cryptographic Tombstones](#cryptographic-tombstones)<br>&nbsp;&nbsp;▫ [Tainted Context Guard](#tainted-context-guard)<br>• **[Pillar 2: Progressive Layered Context](#pillar-2-progressive-layered-context)**<br>&nbsp;&nbsp;▫ [Compact L0 Index Injection](#compact-l0-index)<br>&nbsp;&nbsp;▫ [On-Demand Detail Escalation](#detail-escalation)<br>• **[Pillar 3: Markdown Vault as Single Truth](#pillar-3-markdown-vault-as-single-source-of-truth)**<br>&nbsp;&nbsp;▫ [Vault Directory Structure](#vault-structure)<br>&nbsp;&nbsp;▫ [Disposable Cache Rebuilding](#disposable-cache-rebuilding)<br>• **[Pillar 4: Sleep Knowledge Metabolism](#pillar-4-sleep-metabolism)**<br>&nbsp;&nbsp;▫ [Sleep Consolidation & Dream Reports](#sleep-consolidation)<br>&nbsp;&nbsp;▫ [Global Trinity Architecture](#part-of-the-global-agent-trinity) | • **[First-Time Setup (5 Mins)](#quickstart-5-minutes)**<br>&nbsp;&nbsp;▫ [Step 1: Installation](#step-1-install-memcore)<br>&nbsp;&nbsp;▫ [Step 2: Self-Healing Doctor](#step-2-initialize-database--run-self-healing-doctor)<br>&nbsp;&nbsp;▫ [Step 3: Vault Synchronization](#step-3-markdown-vault-synchronization)<br>• **[Universal Agent Support](#universal-agent-client-support-mcp--hermes)**<br>&nbsp;&nbsp;▫ [Hermes Native Provider](#native-hermes-agent-integration)<br>&nbsp;&nbsp;▫ [Stdio MCP Server](#universal-agent-client-support-mcp--hermes)<br>• **[CLI Command Reference](#cli-command-reference)**<br>&nbsp;&nbsp;▫ [Memory Operations](#memory-operations)<br>&nbsp;&nbsp;▫ [Vault & Rebuild Commands](#markdown-vault-mirror--rebuilder)<br>&nbsp;&nbsp;▫ [Sleep & Dream Reports](#sleep-metabolism--dream-reports) |
+| • [⚡ At a Glance: Before vs After](#at-a-glance)<br>• [🏗️ How It Works](#how-it-works)<br>• [🥊 Market Comparison Matrix](#market-comparison)<br>• [🏛️ Four Pillars of Epistemic Trust](#the-four-pillars-of-epistemic-trust) | • **[Pillar 1: Epistemic Governance](#pillar-1-epistemic-governance)**<br>&nbsp;&nbsp;▫ [Bitemporal Superseding](#bitemporal-superseding)<br>&nbsp;&nbsp;▫ [Cryptographic Tombstones](#cryptographic-tombstones)<br>&nbsp;&nbsp;▫ [Tainted Context Guard](#tainted-context-guard)<br>• **[Pillar 2: Progressive Layered Context](#pillar-2-progressive-layered-context)**<br>&nbsp;&nbsp;▫ [Compact L0 Index Injection](#compact-l0-index)<br>&nbsp;&nbsp;▫ [On-Demand Detail Escalation](#detail-escalation)<br>• **[Pillar 3: Markdown Vault as Single Truth](#pillar-3-markdown-vault-as-single-source-of-truth)**<br>&nbsp;&nbsp;▫ [Vault Directory Structure](#vault-structure)<br>&nbsp;&nbsp;▫ [Disposable Cache Rebuilding](#disposable-cache-rebuilding)<br>• **[Pillar 4: Sleep Knowledge Metabolism](#pillar-4-sleep-metabolism)**<br>&nbsp;&nbsp;▫ [Sleep Consolidation & Dream Reports](#sleep-consolidation)<br>&nbsp;&nbsp;▫ [Autonomous Agent Ecosystem](#autonomous-agent-ecosystem) | • **[First-Time Setup (5 Mins)](#quickstart-5-minutes)**<br>&nbsp;&nbsp;▫ [Step 1: Installation](#step-1-install-memcore)<br>&nbsp;&nbsp;▫ [Step 2: Self-Healing Doctor](#step-2-initialize-database--run-self-healing-doctor)<br>&nbsp;&nbsp;▫ [Step 3: Vault Synchronization](#step-3-markdown-vault-synchronization)<br>• **[Universal Agent Support](#universal-agent-client-support-mcp--hermes)**<br>&nbsp;&nbsp;▫ [Hermes Native Provider](#native-hermes-agent-integration)<br>&nbsp;&nbsp;▫ [Stdio MCP Server](#universal-agent-client-support-mcp--hermes)<br>• **[CLI Command Reference](#cli-command-reference)**<br>&nbsp;&nbsp;▫ [Memory Operations](#memory-operations)<br>&nbsp;&nbsp;▫ [Vault & Rebuild Commands](#markdown-vault-mirror--rebuilder)<br>&nbsp;&nbsp;▫ [Tripwire Registry](#tripwire-registry)<br>&nbsp;&nbsp;▫ [Sleep & Dream Reports](#sleep-metabolism--dream-reports) |
 
 ---
 
@@ -290,6 +292,20 @@ memcore vault sync --path ~/.memcore/vault
 memcore rebuild --path ~/.memcore/vault
 ```
 
+<a id="tripwire-registry"></a>
+### Tripwire Registry (Anti-Loop Guard)
+```bash
+# Arm a tripwire against a failed action or hazard
+memcore tripwire arm --project default --agent hermes --error "AssertionError: expected 1 got 2" --failed "Incremented counter without checking bounds" --file "src/engine.py"
+
+# Check active tripwires before retrying fixes
+memcore tripwire check --project default --query "AssertionError"
+memcore tripwire check --project default --file "src/engine.py"
+
+# Disarm a resolved tripwire once root cause is fixed
+memcore tripwire disarm tw-123456 --project default --agent hermes --reason "Fixed off-by-one condition in loop"
+```
+
 <a id="sleep-metabolism--dream-reports"></a>
 ### Sleep Metabolism & Dream Reports
 ```bash
@@ -344,10 +360,10 @@ plugins:
 
 ---
 
-<a id="global-agent-trinity"></a>
-## 🌐 Part of the Global Agent Trinity
+<a id="autonomous-agent-ecosystem"></a>
+## 🌐 Autonomous Agent Ecosystem
 
-**MemCore** forms the **Global Agent Trinity** alongside **trimtok** and **Skill Proof** — unifying context, governed memory, and local skills across all your AI coding agents without daemons or open network ports:
+**MemCore** operates seamlessly alongside complementary local tooling — unifying context, governed memory, and local skills across all your AI coding agents without daemons or open network ports:
 
 | Pillar | Hub | Role |
 | :--- | :--- | :--- |
@@ -359,6 +375,16 @@ plugins:
 # Install and link all three pillars in one pass
 pip install trimtok memcore-omnix skill-proof-router
 trimtok install && memcore install && skill-proof install
+```
+
+---
+
+<a id="verification"></a>
+## 🧪 Verification & Harness Suite
+
+MemCore enforces non-regression invariants across SQL migrations, bitemporal validities, and search lanes:
+```bash
+python -m harness   # 611 passed tests across bitemporal chains, RRF recall, tripwires, and migrations (0 failures)
 ```
 
 ---

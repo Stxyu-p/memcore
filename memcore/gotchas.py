@@ -40,8 +40,9 @@ def get_file_gotchas(
         include_disarmed=False,
     )
 
-    # 2. File-anchored memories
+    # 2. File-anchored memories (normalize Windows backslashes in SQL)
     tomb_guard = _recall_tombstone_guard("m")
+    norm_col = "replace(v.source_file, '\\', '/')"
     query_sql = f"""
         SELECT m.id, m.type, m.lifecycle, m.verification, v.content,
                v.source_file, v.source_hash
@@ -51,10 +52,10 @@ def get_file_gotchas(
           AND m.lifecycle IN ('candidate', 'accepted', 'conflict')
           AND v.source_file IS NOT NULL
           AND (
-                v.source_file = ?
-                OR instr(v.source_file, ?) > 0
-                OR instr(?, v.source_file) > 0
-                OR (length(?) > 0 AND (v.source_file = ? OR v.source_file LIKE '%/' || ?))
+                {norm_col} = ?
+                OR instr({norm_col}, ?) > 0
+                OR instr(?, {norm_col}) > 0
+                OR (length(?) > 0 AND ({norm_col} = ? OR {norm_col} LIKE '%/' || ?))
               )
           AND {tomb_guard}
         ORDER BY m.updated_at DESC

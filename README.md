@@ -26,7 +26,7 @@
 
 Autonomous agent memory frameworks typically dump raw conversational text into uncurated vector stores. Over multi-session projects, this inevitably triggers state poisoning, stale code hallucinations, and prompt bloat. **MemCore** replaces raw recall with epistemically governed, bitemporal memory, Markdown vault persistence, and trace-to-skill crystallization:
 
-| Dimension / Challenge | Ungoverned Vector Memory | MemCore v2.11.0 Architecture | Operational Impact |
+| Dimension / Challenge | Ungoverned Vector Memory | MemCore Architecture | Operational Impact |
 | :--- | :--- | :--- | :--- |
 | **Contradictory Facts** | Dumps conflicting historical guesses into context. | **Bitemporal Superseding (`superseded`)**: exactly one current truth. | Eliminates regression loops & wrong guesses. |
 | **Disproven Assumptions** | Agents re-learn debunked errors across sessions. | **Cryptographic Tombstones (`tombstone`)**: immutable hard veto barrier. | Permanent protection against recurring mistakes. |
@@ -85,7 +85,7 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
 <a id="market-comparison"></a>
 ## 🥊 Market Comparison: MemCore vs Industry Alternatives
 
-| Feature / Metric | **MemCore v2.11.0** 🌟 | Mem0 | Letta (MemGPT) | EverOS | Claude-Mem |
+| Feature / Metric | **MemCore** 🌟 | Mem0 | Letta (MemGPT) | EverOS | Claude-Mem |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Architecture** | **Local-First SQLite WAL** | Cloud SaaS API | Server Daemon | SQLite + LanceDB | Node.js Worker Daemon |
 | **Source of Truth** | **Markdown Vault + SQLite Cache** | Cloud Database | Postgres / Server | Markdown Files | SQLite / JSON files |

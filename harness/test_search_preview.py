@@ -4,6 +4,7 @@ Default must return a truncated preview, NOT full bodies.
 Full bodies only on explicit include_content=True.
 Isolated tmp stores; NEVER touches live ~/.memcore/memory.db.
 """
+import telemetry_test_support
 import json
 import pathlib
 import sys

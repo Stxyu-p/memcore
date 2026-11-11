@@ -1,3 +1,4 @@
+import telemetry_test_support
 import tempfile
 import pathlib
 import hashlib

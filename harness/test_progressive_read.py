@@ -57,19 +57,32 @@ class ProgressiveReadTests(unittest.TestCase):
 
     def test_memory_get_outline_omits_body_and_code_but_default_is_full(self):
         os.environ["MEMCORE_DB_PATH"] = self.db_path
+        os.environ["MEMCORE_AGENT"] = "agent-mika"
         try:
             def call_memory_get(arguments):
-                response = mcp_server.handle({
-                    "method": "tools/call",
-                    "params": {"name": "memory_get", "arguments": arguments},
-                })
-                self.assertFalse(response["isError"])
+                env = {**os.environ, "MEMCORE_DB_PATH": self.db_path, "MEMCORE_AGENT": "agent-mika"}
+                completed = subprocess.run(
+                    [
+                        sys.executable, "-c",
+                        "import json, sys; from memcore import mcp_server; "
+                        "print(json.dumps(mcp_server.handle({'method': 'tools/call', "
+                        "'params': {'name': 'memory_get', 'arguments': json.loads(sys.argv[1])}})))",
+                        json.dumps(arguments),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    env=env,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                response = json.loads(completed.stdout)
+                if response.get("isError"):
+                    raise AssertionError(response["content"][0]["text"])
                 return json.loads(response["content"][0]["text"])
 
             full = call_memory_get({
                 "memory_id": self.memory_id,
                 "project": "progressive",
-                "agent": "mika",
             })
             self.assertNotIn("level", full)
             self.assertEqual(full["results"][0]["content"], CONTENT)
@@ -86,7 +99,6 @@ class ProgressiveReadTests(unittest.TestCase):
             outline = call_memory_get({
                 "memory_id": self.memory_id,
                 "project": "progressive",
-                "agent": "mika",
                 "level": "outline",
                 "include_history": True,
             })
@@ -109,6 +121,7 @@ class ProgressiveReadTests(unittest.TestCase):
             self.assertNotIn("paragraph is intentionally omitted", str(item))
             self.assertNotIn("DROP TABLE", str(item))
         finally:
+            os.environ.pop("MEMCORE_AGENT", None)
             os.environ.pop("MEMCORE_DB_PATH", None)
 
     def test_memcore_read_outline_cli(self):

@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://pypi.org/project/memcore-omnix/"><img src="https://img.shields.io/pypi/v/memcore-omnix?style=flat-square&color=blue" alt="PyPI" /></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square" alt="Python" /></a>
-  <a href="#how-it-works"><img src="https://img.shields.io/badge/latency-%3C_4ms_in--process-10b981?style=flat-square" alt="Latency" /></a>
+  <a href="#how-it-works"><img src="https://img.shields.io/badge/latency-in--process_SQLite-10b981?style=flat-square" alt="In-process SQLite" /></a>
   <a href="#pillar-3-markdown-vault-as-single-source-of-truth"><img src="https://img.shields.io/badge/storage-Markdown_Vault_+_SQLite_WAL-07405E?style=flat-square" alt="Storage" /></a>
   <a href="#the-four-pillars-of-epistemic-trust"><img src="https://img.shields.io/badge/governance-Bitemporal_+_Tombstones-8b5cf6?style=flat-square" alt="Governance" /></a>
   <a href="#tainted-context-guard-anti-poisoning"><img src="https://img.shields.io/badge/security-Tainted_Context_Guard-00D2FF?style=flat-square" alt="Security" /></a>
@@ -59,7 +59,7 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
                              │  Bidirectional Sync / Rebuild
                              ▼
   ┌────────────────────────────────────────────────────────────┐
-  │ Engine Layer: In-Process SQLite WAL + FTS5 BM25 (<4ms)     │
+  │ Engine Layer: In-Process SQLite WAL + FTS5 BM25 (local)   │
   │ ├── Bitemporal Version Chains (valid_from / valid_until)   │
   │ ├── Tainted Context Guard (untrusted tool quarantine)      │
   │ ├── Bilingual Tokenizer & Thai Bigram Alias Bridges        │
@@ -339,6 +339,14 @@ memcore clients
 ```
 
 <a id="native-hermes-agent-integration"></a>
+### MCP Process Identity, Scope & Recall Telemetry
+
+For the stdio MCP server, configure `MEMCORE_AGENT` and `MEMCORE_DB_PATH` in the server process. Tool arguments cannot change the server identity or redirect its database. Existing projects require membership for that configured agent; a genuinely new project is initialized for it as owner. Do not treat a caller-provided `project` value as authorization by itself.
+
+The `memory_gotchas` and `memory_tripwire_check` tools expose file-anchored hazards and active tripwires. File-anchored memories respect scope: project memories are shared with project members, while private memories are visible only to their owner.
+
+Completed recall calls append to `~/.memcore/usage.jsonl` (or `MEMCORE_DATA_DIR/usage.jsonl`). Records include a query SHA-256 digest and character count, not raw query text; `hit_count` is only the number of returned memory IDs, not a relevance or success score. A plain hash does not anonymize low-entropy queries against guessing, so protect the log as potentially sensitive data.
+
 ### 2. Native Hermes Agent Integration
 ```yaml
 # ~/.hermes/config.yaml

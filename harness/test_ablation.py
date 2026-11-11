@@ -5,6 +5,7 @@ Production (all unset) is byte-identical. All tests use isolated tmp
 stores; NEVER touch live ~/.memcore/memory.db (no --db needed here —
 these tests never open the live path).
 """
+import telemetry_test_support
 import os
 import tempfile
 import unittest

@@ -8,6 +8,7 @@ Three query tiers per fact:
 The baseline pins current behaviour. Any future retrieval change (ranking,
 tokenizer, hybrid) must move these numbers up, never down.
 """
+import telemetry_test_support
 import os
 import tempfile
 import unittest

@@ -13,6 +13,7 @@ later optimisation cannot silently reintroduce it.
 4. The substring-lane fallback counted rows, so corroborating copies filled the
    window and the collapse had a freed slot with nothing to put in it.
 """
+import telemetry_test_support
 import os
 import sys
 import tempfile

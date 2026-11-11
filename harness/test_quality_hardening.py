@@ -6,6 +6,7 @@
 - Plugin connection pool dead-thread eviction
 - Private scope security isolation
 """
+import telemetry_test_support
 import os
 import pathlib
 import sqlite3

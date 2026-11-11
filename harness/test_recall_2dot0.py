@@ -5,6 +5,7 @@ Lane 3.1: Thai de-gluing via char bigrams in _fts_query + exact-fallback.
 
 All tests use isolated tmp stores; NEVER touch live ~/.memcore/memory.db.
 """
+import telemetry_test_support
 import os
 import tempfile
 import unittest

@@ -4,6 +4,7 @@ These pin the behaviour the 2026-10-03 zero-fill incident made necessary:
 a store must have a verified recovery path, and the tooling that creates and
 uses one must itself be trustworthy.
 """
+import telemetry_test_support
 import contextlib
 import io
 import os

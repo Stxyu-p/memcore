@@ -281,18 +281,20 @@ def _rrf_fuse_lanes(base_rows, exact_rows, k=60, base_weight=1.0, exact_weight=0
 
 
 def _log_recall_telemetry(project_id, query, result_ids, elapsed_ms):
-    """Best-effort usage telemetry append to ~/.memcore/usage.jsonl (fail-open)."""
+    """Best-effort aggregate telemetry; never persist raw search queries."""
     try:
-        import os, time, json
+        import hashlib, os, time, json
         data_dir = os.environ.get("MEMCORE_DATA_DIR")
         if not data_dir:
             data_dir = os.path.expanduser("~/.memcore")
         os.makedirs(data_dir, exist_ok=True)
         log_path = os.path.join(data_dir, "usage.jsonl")
         rec = {
+            "schema": "memcore.recall.v1",
             "ts": time.time(),
             "project_id": str(project_id),
-            "query": str(query)[:120],
+            "query_sha256": hashlib.sha256(str(query).encode("utf-8", "replace")).hexdigest(),
+            "query_chars": len(str(query)),
             "hit_count": len(result_ids),
             "recalled_ids": list(result_ids)[:20],
             "elapsed_ms": round(elapsed_ms, 2),
@@ -560,8 +562,16 @@ def search(conn, project_id, agent_id, query, limit=20,
 
     user_query = str(query or '').strip()
     has_query = bool(user_query and any(c.isalnum() for c in user_query))
+
+    def _finish(rows):
+        _log_recall_telemetry(
+            project_id, user_query, [r[0] for r in rows],
+            (time.perf_counter() - t0) * 1000,
+        )
+        return rows
+
     if not has_query and as_of is None and changed_since is None and mode_norm != 'historical':
-        return []
+        return _finish([])
 
     now_iso = _eval_now_iso()
     retention_expr, retention_params = _retention_order(
@@ -570,26 +580,26 @@ def search(conn, project_id, agent_id, query, limit=20,
         (', ' + retention_expr + ' DESC') if retention_expr else '')
     raw_query = _expand_aliases(user_query) if has_query else ''
     if _membership_role(conn, project_id, agent_id) is None:
-        return []
+        return _finish([])
     detail_filter, detail_params = _search_detail_filter(conn, scope_detail)
     if detail_filter is None:
-        return []
+        return _finish([])
 
     if as_of is not None or mode_norm == 'historical':
         if not has_query and as_of is None and changed_since is None:
-            return []
-        return _search_historical(
+            return _finish([])
+        return _finish(_search_historical(
             conn, project_id, agent_id, user_query, raw_query,
             detail_filter, detail_params, now_iso, limit,
             as_of=as_of, changed_since=changed_since
-        )
+        ))
 
     if not has_query and changed_since is not None:
-        return _search_changed_since_only(
+        return _finish(_search_changed_since_only(
             conn, project_id, agent_id, changed_since,
             detail_filter, detail_params, retention_tail,
             retention_params, now_iso, limit, mode=mode_norm
-        )
+        ))
 
     substr_terms = _extract_non_ascii_substr_terms(user_query)
 
@@ -623,7 +633,7 @@ def search(conn, project_id, agent_id, query, limit=20,
             detail_params, retention_tail, retention_params, now_iso, limit)
 
     if not fts_rows and not exact_rows:
-        return []
+        return _finish([])
     # Query-side analysis for the demotion pass: computed once here, so the
     # incompatibility check never re-tokenizes the query per row (C2).
     from memcore import contradiction as _qd
@@ -655,8 +665,7 @@ def search(conn, project_id, agent_id, query, limit=20,
     if mode_norm == 'strict':
         results = _filter_strict_rows(conn, results)
     final_res = results[:limit]
-    _log_recall_telemetry(project_id, user_query, [r[0] for r in final_res], (time.perf_counter() - t0) * 1000)
-    return final_res
+    return _finish(final_res)
 
 
 

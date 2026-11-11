@@ -8,6 +8,7 @@ safe, and the collapse never loses a claim. Run directly:
 
 Each check is an assert so a break fails loudly instead of printing a number.
 """
+import telemetry_test_support
 import os
 import tempfile
 import unittest

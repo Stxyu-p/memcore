@@ -3,6 +3,7 @@
 Tests the read-only helper and its integration into all auto-accept entries.
 Isolated store per test_dispatch_roundtrip.py pattern — NEVER touches ~/.memcore.
 """
+import telemetry_test_support
 import os
 import tempfile
 import unittest

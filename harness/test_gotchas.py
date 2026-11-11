@@ -14,7 +14,13 @@ class TestGotchas(unittest.TestCase):
         self.conn.execute("INSERT INTO project (id, name) VALUES ('proj-1', 'Test Project')")
         self.conn.execute("INSERT INTO agent (id, name, profile_key) VALUES ('agent-1', 'Mika', 'mika-profile')")
         self.conn.execute(
+            "INSERT INTO agent (id, name, profile_key) VALUES ('agent-2', 'Nora', 'nora-profile')"
+        )
+        self.conn.execute(
             "INSERT INTO project_membership (project_id, agent_id, role) VALUES ('proj-1', 'agent-1', 'member')"
+        )
+        self.conn.execute(
+            "INSERT INTO project_membership (project_id, agent_id, role) VALUES ('proj-1', 'agent-2', 'member')"
         )
         self.conn.commit()
 
@@ -49,7 +55,7 @@ class TestGotchas(unittest.TestCase):
         self.conn.commit()
 
         # Query by exact path
-        res = gotchas.get_file_gotchas(self.conn, project_id="proj-1", file_path="src/engine.py")
+        res = gotchas.get_file_gotchas(self.conn, project_id="proj-1", agent_id="agent-1", file_path="src/engine.py")
         self.assertEqual(res["total_count"], 2)
         self.assertEqual(len(res["tripwires"]), 1)
         self.assertEqual(res["tripwires"][0]["id"], tw_id)
@@ -57,8 +63,40 @@ class TestGotchas(unittest.TestCase):
         self.assertEqual(res["memories"][0]["id"], "mem-1")
 
         # Query by filename suffix (engine.py)
-        res_suffix = gotchas.get_file_gotchas(self.conn, project_id="proj-1", file_path="engine.py")
+        res_suffix = gotchas.get_file_gotchas(self.conn, project_id="proj-1", agent_id="agent-1", file_path="engine.py")
         self.assertEqual(res_suffix["total_count"], 2)
+
+    def test_file_gotchas_include_only_requesting_agents_private_memories(self):
+        records = (
+            ("shared", "agent-1", "project", "Shared invariant"),
+            ("private-1", "agent-1", "private", "Mika's private note"),
+            ("private-2", "agent-2", "private", "Nora's private note"),
+        )
+        for memory_id, owner_id, scope, content in records:
+            version_id = f"ver-{memory_id}"
+            self.conn.execute(
+                "INSERT INTO memory (id, project_id, owner_agent_id, scope, type, lifecycle, verification, current_version_id, claim_fingerprint) "
+                "VALUES (?, 'proj-1', ?, ?, 'lesson', 'accepted', 'runtime_verified', ?, ?)",
+                (memory_id, owner_id, scope, version_id, f"fp-{memory_id}"),
+            )
+            self.conn.execute(
+                "INSERT INTO memory_version (id, memory_id, content, created_by_agent_id, source_file) VALUES (?, ?, ?, ?, 'src/private.py')",
+                (version_id, memory_id, content, owner_id),
+            )
+        self.conn.commit()
+
+        for agent_id, visible_ids, hidden_content in (
+            ("agent-1", {"shared", "private-1"}, "Nora's private note"),
+            ("agent-2", {"shared", "private-2"}, "Mika's private note"),
+        ):
+            result = gotchas.get_file_gotchas(
+                self.conn,
+                project_id="proj-1",
+                agent_id=agent_id,
+                file_path="src/private.py",
+            )
+            self.assertEqual({m["id"] for m in result["memories"]}, visible_ids)
+            self.assertNotIn(hidden_content, {m["content"] for m in result["memories"]})
 
     def test_disarmed_tripwire_omitted(self):
         tw_id = tripwire.arm_tripwire(
@@ -77,12 +115,12 @@ class TestGotchas(unittest.TestCase):
             reason="fixed",
         )
 
-        res = gotchas.get_file_gotchas(self.conn, project_id="proj-1", file_path="src/utils.py")
+        res = gotchas.get_file_gotchas(self.conn, project_id="proj-1", agent_id="agent-1", file_path="src/utils.py")
         self.assertEqual(res["total_count"], 0)
 
     def test_empty_file_path_raises(self):
         with self.assertRaises(MemCoreError):
-            gotchas.get_file_gotchas(self.conn, project_id="proj-1", file_path="")
+            gotchas.get_file_gotchas(self.conn, project_id="proj-1", agent_id="agent-1", file_path="")
 
 
 if __name__ == "__main__":

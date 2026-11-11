@@ -5,6 +5,7 @@ Tests the real core operations the harness evaluations don't cover:
 idempotency replay, promote permissions, deactivate/restore, search ranking,
 FTS trigger sync, tombstone-guarded creation, migration bookkeeping.
 """
+import telemetry_test_support
 import os
 import sqlite3
 import sys

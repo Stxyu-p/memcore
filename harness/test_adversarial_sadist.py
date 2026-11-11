@@ -6,6 +6,7 @@ Guarantees graceful typed rejection (MemCoreError / PermissionDenied / NotFound)
 and zero storage corruption under pathological conditions.
 """
 from __future__ import annotations
+import telemetry_test_support
 
 import concurrent.futures
 import os

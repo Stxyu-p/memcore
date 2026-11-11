@@ -20,6 +20,7 @@ def _normalize_path(path_str: str) -> tuple[str, str]:
 def get_file_gotchas(
     conn: sqlite3.Connection,
     project_id: str,
+    agent_id: str,
     file_path: str,
     *,
     limit: int = 20,
@@ -49,6 +50,7 @@ def get_file_gotchas(
         FROM memory m
         JOIN memory_version v ON v.id = m.current_version_id AND v.memory_id = m.id
         WHERE m.project_id = ?
+          AND (m.scope = 'project' OR m.owner_agent_id = ?)
           AND m.lifecycle IN ('candidate', 'accepted', 'conflict')
           AND v.source_file IS NOT NULL
           AND (
@@ -63,6 +65,7 @@ def get_file_gotchas(
     """
     params = [
         project_id,
+        agent_id,
         norm_path,
         norm_path,
         norm_path,

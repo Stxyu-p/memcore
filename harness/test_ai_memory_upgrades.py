@@ -9,12 +9,14 @@ Covers:
 6. Skill graduation candidate detection (content-free in stats/doctor, opt-in content in API)
 """
 from __future__ import annotations
+import telemetry_test_support
 
 import json
 import os
 import pathlib
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from memcore import client, core, export as export_mod, mcp_server, store
 
@@ -319,11 +321,11 @@ class AiMemoryUpgradesTest(unittest.TestCase):
 
         # MCP tool memory_get integration check
         os.environ['MEMCORE_DB_PATH'] = self.db_path
+        os.environ['MEMCORE_AGENT'] = 'agent-mika'
         try:
             mcp_res = mcp_server._tool_get({
                 'memory_ids': [m1],
                 'project': 'proj-u',
-                'agent': 'agent-mika',
                 'include_history': True,
             })
             self.assertTrue(mcp_res['success'])
@@ -331,6 +333,7 @@ class AiMemoryUpgradesTest(unittest.TestCase):
             self.assertEqual(mcp_res['results'][0]['id'], m1)
         finally:
             os.environ.pop('MEMCORE_DB_PATH', None)
+            os.environ.pop('MEMCORE_AGENT', None)
 
     # ── 5. <private> Redaction & Grouped / Tombstone Export ────────────────
 
@@ -459,14 +462,18 @@ class AiMemoryUpgradesTest(unittest.TestCase):
 
         # 3. MCP tool memory_search without query (delta sync via changed_since)
         t_before = '2026-09-01T00:00:00Z'
-        mcp_res = mcp_server._tool_search({
-            "db_path": self.db_path,
-            "changed_since": t_before,
-            "project": "proj-u",
-            "agent": "agent-sora",
-        })
-        self.assertTrue(mcp_res["success"])
-        self.assertGreaterEqual(mcp_res["count"], 1)
+        os.environ['MEMCORE_DB_PATH'] = self.db_path
+        os.environ['MEMCORE_AGENT'] = 'agent-sora'
+        try:
+            mcp_res = mcp_server._tool_search({
+                "changed_since": t_before,
+                "project": "proj-u",
+            })
+            self.assertTrue(mcp_res["success"])
+            self.assertGreaterEqual(mcp_res["count"], 1)
+        finally:
+            os.environ.pop('MEMCORE_DB_PATH', None)
+            os.environ.pop('MEMCORE_AGENT', None)
 
 
 if __name__ == '__main__':

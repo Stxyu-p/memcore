@@ -29,15 +29,13 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 try:
-    from . import core, ingest, store, progressive
+    from . import core, gotchas, ingest, progressive, store, tripwire
     from .client import DEFAULT_DB, MemCore
     from .write_support import ContradictionHold
 except ImportError:
-    from memcore import core, ingest, store, progressive  # type: ignore
+    from memcore import core, gotchas, ingest, progressive, store, tripwire  # type: ignore
     from memcore.client import DEFAULT_DB, MemCore  # type: ignore
     from memcore.write_support import ContradictionHold  # type: ignore
-
-    from memcore.client import DEFAULT_DB, MemCore  # type: ignore
 
 SERVER_INFO = {"name": "memcore", "version": "2.11.0"}
 FALLBACK_PROTOCOL = "2024-11-05"
@@ -110,7 +108,6 @@ TOOLS = [
                     "description": "Optional situational trigger describing WHEN this memory should be activated (e.g. 'when debugging SQLite WAL locks')",
                 },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
                 "source_file": {"type": "string", "description": "Optional path to source file for SHA-256 provenance (auto-detected from content if omitted)"},
                 "source_commit": {"type": "string", "description": "Optional git commit SHA"},
                 "auto_source_file": {
@@ -159,8 +156,7 @@ TOOLS = [
                     "description": "Optional token budget cap; packs results and downgrades overflow items to previews",
                 },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
-            },
+                },
             "required": [],
             "additionalProperties": False,
         },
@@ -192,8 +188,7 @@ TOOLS = [
                     "description": "Return full content instead of preview (default: false)",
                 },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
-            },
+                },
             "additionalProperties": False,
         },
     },
@@ -229,8 +224,7 @@ TOOLS = [
                     "description": "Read depth: full returns content (default); outline returns headings and list items without prose or code",
                 },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
-            },
+                },
             "additionalProperties": False,
         },
     },
@@ -242,8 +236,7 @@ TOOLS = [
             "properties": {
                 "memory_id": {"type": "string", "description": "ID of the private memory to promote"},
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
-            },
+                },
             "required": ["memory_id"],
             "additionalProperties": False,
         },
@@ -261,7 +254,6 @@ TOOLS = [
                 "reason": {"type": "string", "description": "Reason for superseding"},
                 "when_to_use": {"type": "string", "description": "Optional updated situational trigger condition"},
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
                 "source_file": {"type": "string", "description": "Optional source file path"},
                 "source_commit": {"type": "string", "description": "Optional git commit SHA"},
             },
@@ -278,8 +270,7 @@ TOOLS = [
                 "memory_id": {"type": "string", "description": "ID of the memory to reject"},
                 "reason": {"type": "string", "description": "Reason for rejection"},
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
-            },
+                },
             "required": ["memory_id"],
             "additionalProperties": False,
         },
@@ -297,8 +288,7 @@ TOOLS = [
                     "description": "Feedback outcome to apply",
                 },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
-            },
+                },
             "required": ["memory_id", "outcome"],
             "additionalProperties": False,
         },
@@ -314,8 +304,7 @@ TOOLS = [
             "properties": {
                 "limit": {"type": "integer", "description": "Maximum pending events to return (1-20, default: 10)"},
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
-            },
+                },
             "additionalProperties": False,
         },
     },
@@ -338,8 +327,7 @@ TOOLS = [
                 "confidence": {"type": "number", "description": "Confidence score (0.0 to 1.0)"},
                 "rationale": {"type": "string", "description": "Optional rationale for the decision"},
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
-                "agent": {"type": "string", "description": f"Agent identity (default: {DEFAULT_AGENT})"},
-            },
+                },
             "required": ["event_id", "verdict"],
             "additionalProperties": False,
         },
@@ -355,6 +343,34 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "memory_gotchas",
+        "description": "Inspect active tripwires and anchored lessons/invariants for a specific source file before editing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Target file path to inspect (e.g. src/engine.py or core.py)"},
+                "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
+                "limit": {"type": "integer", "description": "Max items to return (default: 20)"},
+            },
+            "required": ["file_path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "memory_tripwire_check",
+        "description": "Check active anti-loop tripwires across the project, optionally filtered by error query or file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Error pattern or keyword to query"},
+                "file_path": {"type": "string", "description": "Filter by affected file path"},
+                "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
+                "limit": {"type": "integer", "description": "Max tripwires to return (default: 20)"},
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -363,10 +379,58 @@ class MethodNotFound(Exception):
 
 
 def _client(args: dict[str, Any]) -> MemCore:
-    db_path = str(args.get("db_path") or os.environ.get("MEMCORE_DB_PATH") or DEFAULT_DB)
+    if args.get("db_path") is not None:
+        raise ValueError("db_path is server-configured via MEMCORE_DB_PATH")
+    requested_agent = args.get("agent")
+    if requested_agent and str(requested_agent).strip() != DEFAULT_AGENT:
+        raise PermissionError("agent identity is server-configured via MEMCORE_AGENT")
+
+    db_path = str(os.environ.get("MEMCORE_DB_PATH") or DEFAULT_DB)
     project = str(args.get("project") or DEFAULT_PROJECT).strip() or DEFAULT_PROJECT
-    agent = str(args.get("agent") or DEFAULT_AGENT).strip() or DEFAULT_AGENT
-    return MemCore(db_path=db_path, project=project, agent=agent)
+    client = MemCore(db_path=db_path, project=project, agent=DEFAULT_AGENT, auto_provision=False)
+    assert client.conn is not None
+    try:
+        with store.write_tx(client.conn):
+            project_row = client.conn.execute(
+                "SELECT id FROM project WHERE id=? OR name=?", (project, project)
+            ).fetchone()
+            agent_row = client.conn.execute(
+                "SELECT id FROM agent WHERE id=? OR profile_key=? OR name=?",
+                (DEFAULT_AGENT, DEFAULT_AGENT, DEFAULT_AGENT),
+            ).fetchone()
+
+            if project_row:
+                if not agent_row:
+                    raise PermissionError("configured agent is not registered for this project")
+                project_id, agent_id = project_row[0], agent_row[0]
+                membership = client.conn.execute(
+                    "SELECT 1 FROM project_membership WHERE project_id=? AND agent_id=?",
+                    (project_id, agent_id),
+                ).fetchone()
+                if not membership:
+                    raise PermissionError("configured agent is not a member of this project")
+                client.project, client.agent = project_id, agent_id
+            else:
+                if not agent_row:
+                    client.conn.execute(
+                        "INSERT INTO agent (id, name, profile_key) VALUES (?, ?, ?)",
+                        (DEFAULT_AGENT, DEFAULT_AGENT, DEFAULT_AGENT),
+                    )
+                    agent_id = DEFAULT_AGENT
+                else:
+                    agent_id = agent_row[0]
+                client.conn.execute(
+                    "INSERT INTO project (id, name) VALUES (?, ?)", (project, project)
+                )
+                client.conn.execute(
+                    "INSERT INTO project_membership (project_id, agent_id, role) VALUES (?, ?, 'owner')",
+                    (project, agent_id),
+                )
+                client.project, client.agent = project, agent_id
+        return client
+    except Exception:
+        client.close()
+        raise
 
 
 def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
@@ -680,6 +744,39 @@ def _tool_status(args: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _tool_gotchas(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = str(args.get("file_path") or "").strip()
+    if not file_path:
+        raise ValueError("file_path is required")
+    project = str(args.get("project") or DEFAULT_PROJECT).strip()
+    limit = int(args.get("limit") or 20)
+    with _client(args) as mc:
+        assert mc.conn is not None
+        res = gotchas.get_file_gotchas(
+            mc.conn, project_id=mc.project, agent_id=mc.agent,
+            file_path=file_path, limit=limit,
+        )
+        return {"success": True, **res}
+
+
+def _tool_tripwire_check(args: dict[str, Any]) -> dict[str, Any]:
+    project = str(args.get("project") or DEFAULT_PROJECT).strip()
+    query = args.get("query")
+    file_path = args.get("file_path")
+    limit = int(args.get("limit") or 20)
+    with _client(args) as mc:
+        assert mc.conn is not None
+        tw = tripwire.check_tripwires(
+            mc.conn,
+            project_id=project,
+            query=query,
+            file_path=file_path,
+            limit=limit,
+            include_disarmed=False,
+        )
+        return {"success": True, "count": len(tw), "tripwires": tw}
+
+
 _HANDLERS = {
     "memory_remember": _tool_remember,
     "memory_search": _tool_search,
@@ -692,6 +789,8 @@ _HANDLERS = {
     "memory_review_queue": _tool_review_queue,
     "memory_review_decide": _tool_review_decide,
     "memory_status": _tool_status,
+    "memory_gotchas": _tool_gotchas,
+    "memory_tripwire_check": _tool_tripwire_check,
 }
 
 

@@ -1,4 +1,5 @@
 """CLI regression tests for safe import preview."""
+import telemetry_test_support
 import contextlib
 import io
 import json

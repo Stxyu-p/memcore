@@ -6,6 +6,7 @@ Claude Code and Gemini all already read from the working tree. The properties
 worth pinning are therefore scope confinement (an export is a file OTHER agents
 read) and byte-stability (a re-run that changes nothing must not dirty git).
 """
+import telemetry_test_support
 import os
 import subprocess
 import sys

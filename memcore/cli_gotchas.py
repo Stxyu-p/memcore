@@ -5,7 +5,8 @@ import json
 import sys
 
 from . import gotchas
-from .cli_support import _open_readonly, _project_or_exit
+from .cli_support import _agent_identity_or_exit, _open_readonly, _project_or_exit
+from .mcp_server import DEFAULT_AGENT
 from .write_support import MemCoreError
 
 
@@ -16,10 +17,13 @@ def cmd_gotchas(args):
         project_id = _project_or_exit(conn, project_ref)
         if not project_id:
             sys.exit("error: project is required")
+        agent_name = getattr(args, "agent", None) or DEFAULT_AGENT
+        agent_id, _ = _agent_identity_or_exit(conn, agent_name)
         try:
             res = gotchas.get_file_gotchas(
                 conn,
                 project_id=project_id,
+                agent_id=agent_id,
                 file_path=args.file,
                 limit=getattr(args, "limit", 20),
             )

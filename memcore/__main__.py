@@ -379,6 +379,7 @@ def main(argv=None):
     p_got = sub.add_parser('gotchas', help='inspect hazards and invariants anchored to a file', parents=[common])
     p_got.add_argument('file', help='file path to inspect')
     p_got.add_argument('--project', default=None)
+    p_got.add_argument('--agent', default=mcp_server.DEFAULT_AGENT)
     p_got.add_argument('--limit', type=int, default=20)
     p_got.add_argument('--json', action='store_true', help='output as json')
     p_got.set_defaults(func=cmd_gotchas)

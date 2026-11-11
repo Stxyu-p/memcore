@@ -1,4 +1,5 @@
 """Tests for raw Hermes ingress journal and conservative analyzer."""
+import telemetry_test_support
 import os
 import tempfile
 import unittest

@@ -1,3 +1,4 @@
+import telemetry_test_support
 import unittest
 from memcore.store import open_store
 from memcore.write import create_memory

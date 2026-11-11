@@ -1,4 +1,5 @@
 """Regression tests for the deepened core.recall interface."""
+import telemetry_test_support
 import hashlib
 import os
 import pathlib

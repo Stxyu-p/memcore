@@ -4,6 +4,7 @@ Covers spec Part 3 (accepted outranks candidate, Golden pins surface first,
 fingerprint dedup in build_recall_block) and Part 5 (stale builtin
 auto-dismiss, defer-cap, sweepable vs young health).
 """
+import telemetry_test_support
 import os
 import tempfile
 import unittest

@@ -17,6 +17,7 @@ Hard constraints under test:
 
 All tests use isolated tmp stores; NEVER touch live ~/.memcore/memory.db.
 """
+import telemetry_test_support
 import os
 import tempfile
 import unittest

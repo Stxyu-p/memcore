@@ -126,6 +126,22 @@ def get_topic(
     }
 
 
+def topics_by_memory(conn: sqlite3.Connection) -> dict[str, frozenset[str]]:
+    """Map memory_id -> frozenset of topic slugs (empty dict if no table).
+
+    Shared by consolidation engines (sleep, compaction) so both partition on the
+    exact same notion of "which domain does this memory belong to".
+    """
+    if not _table_exists(conn, "memory_topic"):
+        return {}
+    out: dict[str, set[str]] = {}
+    for memory_id, topic_id in conn.execute(
+        "SELECT memory_id, topic_id FROM memory_topic"
+    ).fetchall():
+        out.setdefault(memory_id, set()).add(topic_id)
+    return {k: frozenset(v) for k, v in out.items()}
+
+
 def list_topics(conn: sqlite3.Connection, *, parent_id: str | None = None) -> list[dict[str, Any]]:
     """List all topics (global catalog). Optionally filter by direct parent."""
     if not _table_exists(conn, "knowledge_topic"):

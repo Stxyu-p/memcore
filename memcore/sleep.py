@@ -7,7 +7,6 @@ import sqlite3
 from typing import Any
 
 from memcore import write as _write
-from memcore import store
 
 
 def _tokenize(text: str) -> set[str]:
@@ -85,19 +84,13 @@ def consolidate_memories(
     # go into their own partition (frozenset() key). Using the full topic set
     # (not a single representative) keeps memories that share ANY topic in the
     # same partition so they can still consolidate.
-    topic_of = {}
-    if store._table_exists(conn, 'memory_topic'):
-        for (mem_id, topic_id) in conn.execute(
-            'SELECT memory_id, topic_id FROM memory_topic'
-        ).fetchall():
-            topic_of.setdefault(mem_id, set()).add(topic_id)
+    from .topic import topics_by_memory
+    topic_of = topics_by_memory(conn)
 
     partitions: dict[tuple, list] = {}
     for r in rows:
         mid = r[0]
-        tset = topic_of.get(mid)
-        key_topic = frozenset(tset) if tset else frozenset()
-        key = (key_topic, r[2], r[3])
+        key = (topic_of.get(mid, frozenset()), r[2], r[3])
         partitions.setdefault(key, []).append(r)
 
     clusters: list[list] = []

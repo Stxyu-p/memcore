@@ -52,16 +52,12 @@ def compact_project_memories(
 
     # Partition by (topic set, scope, type): one snapshot per knowledge domain,
     # never one snapshot spanning unrelated topics or visibility classes.
-    topic_of: dict[str, set[str]] = {}
-    if store._table_exists(conn, 'memory_topic'):
-        for mem_id, topic_id in conn.execute(
-            'SELECT memory_id, topic_id FROM memory_topic'
-        ).fetchall():
-            topic_of.setdefault(mem_id, set()).add(topic_id)
+    from .topic import topics_by_memory
+    topic_of = topics_by_memory(conn)
 
     partitions: dict[tuple, list] = {}
     for r in rows:
-        key = (frozenset(topic_of.get(r[0]) or ()), r[4], r[5])
+        key = (topic_of.get(r[0], frozenset()), r[4], r[5])
         partitions.setdefault(key, []).append(r)
 
     if dry_run:

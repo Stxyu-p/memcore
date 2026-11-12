@@ -33,8 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and git diffs stay meaningful.
 
 ### Changed
+- **One consolidation partition rule.** `sleep` and `compaction` now share
+  `topic.topics_by_memory()` instead of each re-querying the topic map, so both
+  partition on the identical notion of a memory's domain.
 - **`get_head`/`repo_root` formally deprecated** in `recall()` and
-  `check_source_staleness()`: still accepted, now emit a `DeprecationWarning`,
+  `check_source_staleness()`: still accepted, now emit a `FutureWarning`,
   and are documented for removal in 3.0 (source-file SHA-256 is authoritative).
 - **Single network-path implementation.** `cli_support._is_network_path` now
   delegates to `doctor.is_network_path` instead of duplicating the UNC/drive

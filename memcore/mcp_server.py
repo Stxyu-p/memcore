@@ -10,6 +10,7 @@ Speaks newline-delimited JSON-RPC 2.0 on stdin/stdout. Tools:
   memory_feedback       — mark a memory accepted, rejected, or stale after use
   memory_review_queue   — list pending raw MemCore journal events for curation
   memory_review_decide  — apply a governed semantic verdict (remember/ignore/defer) to a pending journal event
+  memory_triple_query   — query governed knowledge triples (subject/predicate/object) bound to memories
   memory_status         — inspect MemCore database health, WAL mode, and memory counts
 
 Register in Antigravity, Claude Code, Codex, Cursor, or any MCP client:
@@ -329,6 +330,33 @@ TOOLS = [
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
                 },
             "required": ["event_id", "verdict"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "memory_triple_query",
+        "description": (
+            "Query governed knowledge triples (subject-predicate-object) bound to canonical memories. "
+            "Filters by subject/predicate/object and active_only (default true keeps triples of accepted, non-superseded memories)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject": {"type": "string", "description": "Optional subject (entity) to match exactly"},
+                "predicate": {"type": "string", "description": "Optional predicate (relation) to match exactly"},
+                "object": {"type": "string", "description": "Optional object value to match exactly"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["project", "private"],
+                    "description": "Visibility scope filter. Default project; private returns only rows owned by the calling agent.",
+                },
+                "active_only": {
+                    "type": "boolean",
+                    "description": "Only triples whose parent memory is accepted & current (default: true)",
+                },
+                "limit": {"type": "integer", "description": "Maximum results to return (default: 50)"},
+                "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
+            },
             "additionalProperties": False,
         },
     },
@@ -721,6 +749,37 @@ def _tool_review_decide(args: dict[str, Any]) -> dict[str, Any]:
         return {"success": True, **result}
 
 
+def _tool_triple_query(args: dict[str, Any]) -> dict[str, Any]:
+    limit = max(1, min(100, int(args.get("limit") or 50)))
+    raw_active = args.get("active_only", True)
+    if isinstance(raw_active, str):
+        active_only = raw_active.strip().lower() not in ("", "0", "false", "no")
+    else:
+        active_only = bool(raw_active)
+    scope = args.get("scope") or "project"
+    if scope not in ("project", "private"):
+        raise ValueError("scope must be 'project' or 'private'")
+    with _client(args) as mc:
+        assert mc.conn is not None
+        hits = core.query_triples(
+            mc.conn, mc.project,
+            subject=args.get("subject"),
+            predicate=args.get("predicate"),
+            object_=args.get("object"),
+            active_only=active_only,
+            scope=scope,
+            agent_id=mc.agent if scope == "private" else None,
+        )
+        return {
+            "success": True,
+            "project": mc.project,
+            "agent": mc.agent,
+            "scope": scope or "project",
+            "count": len(hits[:limit]),
+            "results": hits[:limit],
+        }
+
+
 def _tool_status(args: dict[str, Any]) -> dict[str, Any]:
     with _client(args) as mc:
         total_mem = mc.conn.execute("SELECT COUNT(*) FROM memory WHERE lifecycle='accepted'").fetchone()[0]
@@ -788,6 +847,7 @@ _HANDLERS = {
     "memory_feedback": _tool_feedback,
     "memory_review_queue": _tool_review_queue,
     "memory_review_decide": _tool_review_decide,
+    "memory_triple_query": _tool_triple_query,
     "memory_status": _tool_status,
     "memory_gotchas": _tool_gotchas,
     "memory_tripwire_check": _tool_tripwire_check,

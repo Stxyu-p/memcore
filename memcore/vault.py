@@ -195,7 +195,7 @@ def _parse_multi_frontmatter(content: str) -> list[tuple[dict[str, str], str]]:
             for line in fm_text.splitlines():
                 if ":" in line:
                     k, v = line.split(":", 1)
-                    meta[k.strip()] = v.strip().strip('"\'')
+                    meta[k.strip()] = v.strip().strip('"\'').replace('\\"', '"')
             entries.append((meta, body))
             i += 2
         else:
@@ -209,11 +209,40 @@ def _parse_multi_frontmatter(content: str) -> list[tuple[dict[str, str], str]]:
                 for line in parts[1].strip().splitlines():
                     if ":" in line:
                         k, v = line.split(":", 1)
-                        meta[k.strip()] = v.strip().strip('"\'')
+                        meta[k.strip()] = v.strip().strip('"\'').replace('\\"', '"')
                 body = parts[2].strip()
         if body:
             entries.append((meta, body))
     return entries
+
+
+def _parse_decision_frontmatter(meta: dict[str, str], body: str) -> dict[str, Any]:
+    """Rebuild a decision dict from exported decisions/*.md frontmatter + body.
+       Round-trips title/date/rationale/context/options/consequences.
+    """
+    sections = {}
+    current: str | None = None
+    for line in body.splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip().lower()
+            sections[current] = []
+        elif current and line.strip():
+            sections[current].append(line)
+    d = {
+        "title": meta.get("title", "").strip(),
+        "date": meta.get("date"),
+        "scope": meta.get("scope", "project"),
+        "status": meta.get("status", "proposed"),
+        "lifecycle": meta.get("lifecycle", "candidate"),
+        "verification": meta.get("verification", "unverified"),
+        "freshness": meta.get("freshness", "current"),
+        "chosen": meta.get("chosen"),
+    }
+    if "context" in sections: d["context"] = "\n".join(sections["context"])
+    if "rationale" in sections: d["rationale"] = "\n".join(sections["rationale"])
+    if "options" in sections: d["options"] = "\n".join(sections["options"])
+    if "consequences" in sections: d["consequences"] = "\n".join(sections["consequences"])
+    return d
 
 
 def import_vault(
@@ -224,11 +253,12 @@ def import_vault(
 ) -> dict[str, int]:
     v_path = _normalize_vault_path(vault_dir)
     if not v_path.exists():
-        return {"memories_superseded": 0, "memories_created": 0, "unchanged": 0}
+        return {"memories_superseded": 0, "memories_created": 0, "decisions_created": 0, "unchanged": 0}
 
     stats = {
         "memories_superseded": 0,
         "memories_created": 0,
+        "decisions_created": 0,
         "unchanged": 0,
     }
 
@@ -284,6 +314,63 @@ def import_vault(
                 )
                 stats["memories_created"] += 1
 
+    if (v_path / "decisions").is_dir():
+        from memcore.decision import create_decision as _create_decision
+
+        for dec_file in sorted((v_path / "decisions").glob("*.md")):
+            try:
+                dec_content = dec_file.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            for meta, body in _parse_multi_frontmatter(dec_content):
+                body = body.strip()
+                if not body:
+                    continue
+                d = _parse_decision_frontmatter(meta, body)
+                title = d.get("title", "").strip()
+                rationale = d.get("rationale") or ""
+                if not title or not rationale:
+                    # decisions always carry a rationale; skip stray files
+                    continue
+                existing = conn.execute(
+                    "SELECT 1 FROM decision WHERE project_id = ? AND title = ? AND rationale = ?",
+                    (project_id, title, rationale),
+                ).fetchone()
+                if existing:
+                    stats["unchanged"] += 1
+                    continue
+                opts = d.get("options")
+                options_list = None
+                if opts:
+                    import json as _json
+                    try:
+                        parsed = _json.loads(opts)
+                        options_list = parsed if isinstance(parsed, list) else None
+                    except Exception:
+                        options_list = None
+                scope_in = d.get("scope") or "project"
+                if scope_in not in ("project", "private"):
+                    # treat an unknown scope like project rather than inventing a row
+                    scope_in = "project"
+                _create_decision(
+                    conn,
+                    project_id=project_id,
+                    agent_id=agent_id,
+                    title=title,
+                    rationale=rationale,
+                    scope=scope_in,
+                    context=d.get("context"),
+                    options=options_list,
+                    chosen=d.get("chosen"),
+                    consequences=d.get("consequences"),
+                    status=d.get("status", "proposed"),
+                    lifecycle=d.get("lifecycle") or "accepted",
+                    verification=d.get("verification", "unverified"),
+                    freshness=d.get("freshness", "current"),
+                    _manage_transaction=True,
+                )
+                stats["decisions_created"] += 1
+
     return stats
 
 
@@ -338,6 +425,7 @@ def rebuild_vault_to_db(
         rebuilt_memories = stats["memories_created"] + stats["memories_superseded"] + stats["unchanged"]
         return {
             "memories_rebuilt": rebuilt_memories,
+            "decisions_rebuilt": stats.get("decisions_created", 0),
             "tombstones_rebuilt": tomb_count,
             "vault_dir": str(v_path),
             "db_path": str(db_target),

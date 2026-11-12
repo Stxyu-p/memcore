@@ -1052,23 +1052,36 @@ def pack_search_results(results, max_tokens=None, preview_chars=180):
 
 def query_triples(conn, project_id: str, subject: str | None = None,
                   predicate: str | None = None, object_: str | None = None,
-                  active_only: bool = True) -> list[dict]:
+                  active_only: bool = True, scope: str | None = "project",
+                  agent_id: str | None = None) -> list[dict]:
     """Query knowledge triples with MemCore canonical governance.
 
     active_only=True filters to triples whose parent memory is currently 'accepted'
     and where the triple's version matches the memory's current_version_id.
+    Default scope='project' (all project-visible rows). Private rows are only
+    returned when scope='private' AND agent_id matches the owner; scope='private'
+    without agent_id returns [] (never silently broaden).
     """
     if not store._table_exists(conn, 'memory_triple'):
         return []
 
     query = """
         SELECT mt.id, mt.memory_id, mt.version_id, mt.subject, mt.predicate, mt.object,
-               mt.created_at, m.project_id, m.lifecycle, m.verification, m.freshness
+               mt.created_at, m.project_id, m.lifecycle, m.verification, m.freshness,
+               m.scope, m.owner_agent_id
         FROM memory_triple mt
         JOIN memory m ON mt.memory_id = m.id
         WHERE m.project_id = ?
     """
     params = [project_id]
+    if scope is not None:
+        query += " AND m.scope = ?"
+        params.append(scope)
+    if scope == 'private' and agent_id is None:
+        return []
+    if scope == 'private':
+        query += " AND m.owner_agent_id = ?"
+        params.append(agent_id)
     if active_only:
         query += " AND m.lifecycle NOT IN ('rejected', 'disabled', 'superseded') AND m.current_version_id = mt.version_id"
     if subject is not None:
@@ -1096,7 +1109,9 @@ def query_triples(conn, project_id: str, subject: str | None = None,
             "project_id": r[7],
             "lifecycle": r[8],
             "verification": r[9],
-            "freshness": r[10]
+            "freshness": r[10],
+            "scope": r[11],
+            "owner_agent_id": r[12],
         })
     return results
 

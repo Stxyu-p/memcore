@@ -138,5 +138,86 @@ class TestVaultTriples(unittest.TestCase):
         self.assertEqual(row[1], "Service analytics runs on port 9440")
 
 
+class TestVaultIntegrity(unittest.TestCase):
+    """Tombstone fidelity + terminal-lifecycle restore (real-data rebuild path)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = pathlib.Path(self.tmp.name) / "m.db"
+        self.vault = pathlib.Path(self.tmp.name) / "vault"
+        self.conn = store.open_store(str(self.db_path))
+        self.pid, self.aid = "proj-vi", "agent-vi"
+        self.conn.execute("INSERT INTO project (id,name) VALUES (?,?)", (self.pid, "VI"))
+        self.conn.execute("INSERT INTO agent (id,name,profile_key) VALUES (?,?,?)",
+                          (self.aid, "A", "default"))
+        self.conn.execute("INSERT INTO project_membership (project_id,agent_id,role) VALUES (?,?,?)",
+                          (self.pid, self.aid, "owner"))
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_tombstone_fingerprint_round_trips_in_full(self):
+        from memcore.write import create_memory, reject
+        mid, _ = create_memory(self.conn, self.pid, self.aid, "wrong port 5432",
+                               scope="project", lifecycle="accepted")
+        reject(self.conn, mid, self.aid, "actually 5433")
+        fp = self.conn.execute("SELECT claim_fingerprint FROM tombstone").fetchone()[0]
+        export_vault(self.conn, self.vault, project_id=self.pid)
+
+        new_db = pathlib.Path(self.tmp.name) / "rebuilt.db"
+        stats = rebuild_vault_to_db(str(new_db), self.vault, agent_id=self.aid, project_id=self.pid)
+        self.assertEqual(stats["tombstones_rebuilt"], 1)
+        self.assertEqual(stats["tombstones_truncated"], 0)
+        conn2 = store.open_store(str(new_db))
+        try:
+            restored = conn2.execute("SELECT claim_fingerprint FROM tombstone").fetchone()[0]
+            self.assertEqual(restored, fp)  # full fingerprint, not a 12-char prefix
+        finally:
+            conn2.close()
+
+    def test_legacy_truncated_fingerprint_is_skipped_not_poisoned(self):
+        tomb = (self.vault / "tombstones.md")
+        self.vault.mkdir(parents=True, exist_ok=True)
+        tomb.write_text(
+            "# Cryptographic Tombstones (Disproven Claims Barrier)\n\n"
+            "- **#tomb-aaaaaaaaaaaa** [`proj-vi`] old reason *(fp: 74dfb975a1eb...)*\n",
+            encoding="utf-8",
+        )
+        new_db = pathlib.Path(self.tmp.name) / "rebuilt2.db"
+        stats = rebuild_vault_to_db(str(new_db), self.vault, agent_id=self.aid, project_id=self.pid)
+        self.assertEqual(stats["tombstones_rebuilt"], 0)
+        self.assertEqual(stats["tombstones_truncated"], 1)
+
+    def test_terminal_lifecycle_is_restored(self):
+        from memcore.write import create_memory, deactivate
+        mid, _ = create_memory(self.conn, self.pid, self.aid, "retired fact",
+                               scope="project", lifecycle="accepted")
+        deactivate(self.conn, mid, self.aid, reason="no longer relevant")
+        export_vault(self.conn, self.vault, project_id=self.pid)
+
+        new_db = pathlib.Path(self.tmp.name) / "rebuilt3.db"
+        rebuild_vault_to_db(str(new_db), self.vault, agent_id=self.aid, project_id=self.pid)
+        conn2 = store.open_store(str(new_db))
+        try:
+            life = conn2.execute("SELECT lifecycle FROM memory WHERE id = ?", (mid,)).fetchone()
+            self.assertIsNotNone(life)
+            self.assertEqual(life[0], "disabled")
+        finally:
+            conn2.close()
+
+    def test_export_removes_stale_renamed_file(self):
+        from memcore.write import supersede
+        mid, _ = create_memory(self.conn, self.pid, self.aid, "port 9440 fact",
+                               scope="project", lifecycle="accepted")
+        export_vault(self.conn, self.vault, project_id=self.pid)
+        supersede(self.conn, mid, self.aid, "port 9443 fact", reason="bump")
+        export_vault(self.conn, self.vault, project_id=self.pid)
+        files = list((self.vault / "wiki").glob("*.md"))
+        self.assertEqual(len(files), 1)  # stale file for the old slug is gone
+        self.assertIn("port 9443", files[0].read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

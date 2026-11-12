@@ -212,7 +212,8 @@ def export_vault(
     if tomb_rows:
         tomb_lines = ["# Cryptographic Tombstones (Disproven Claims Barrier)\n"]
         for t in tomb_rows:
-            tomb_lines.append(f"- **#{t[0]}** [`{t[2]}`] {t[3]} *(fp: {t[1][:12]}...)*")
+            # Full fingerprint: a truncated one cannot block the claim it names.
+            tomb_lines.append(f"- **#{t[0]}** [`{t[2]}`] {t[3]} *(fp: {t[1]})*")
         tomb_lines.append("")
         (v_path / "tombstones.md").write_text("\n".join(tomb_lines), encoding="utf-8")
         stats["tombstones"] = len(tomb_rows)
@@ -310,6 +311,24 @@ def _parse_decision_frontmatter(meta: dict[str, str], body: str) -> dict[str, An
     return d
 
 
+_LEGAL_INITIAL_LIFECYCLES = ("candidate", "accepted", "conflict")
+
+
+def _restore_lifecycle(conn, memory_id: str, target: str, agent_id: str) -> None:
+    """Apply a terminal lifecycle (disabled/superseded) after creation.
+
+    create_memory only accepts candidate/accepted/conflict as an initial state;
+    a vault rebuild must still restore the recorded terminal state, so the row is
+    created legal and then transitioned with an audit entry.
+    """
+    if target in _LEGAL_INITIAL_LIFECYCLES or not target:
+        return
+    conn.execute("UPDATE memory SET lifecycle = ? WHERE id = ?", (target, memory_id))
+    from .write_support import _audit
+    _audit(conn, f'vault-restore-{target}', agent_id, memory_id, None,
+           {'lifecycle': target}, write_key=None)
+
+
 def import_vault(
     conn: sqlite3.Connection,
     vault_dir: str | pathlib.Path,
@@ -391,25 +410,29 @@ def import_vault(
                             _write.store_triples(conn, mem_id, curr_ver, parsed_triples)
                         stats["unchanged"] += 1
                 else:
-                    _write.create_memory(
+                    target_life = meta.get("lifecycle", "accepted")
+                    new_id, _ = _write.create_memory(
                         conn, project_id, agent_id, body,
                         scope=meta.get("scope", "project"),
                         memory_type=meta.get("type", "fact"),
-                        lifecycle=meta.get("lifecycle", "accepted"),
+                        lifecycle=target_life if target_life in _LEGAL_INITIAL_LIFECYCLES else "candidate",
                         topics=parsed_topics,
                         triples=parsed_triples,
                         memory_id=mem_id,
                     )
+                    _restore_lifecycle(conn, new_id, target_life, agent_id)
                     stats["memories_created"] += 1
             else:
-                _write.create_memory(
+                target_life = meta.get("lifecycle", "accepted")
+                new_id, _ = _write.create_memory(
                     conn, project_id, agent_id, body,
                     scope=meta.get("scope", "project"),
                     memory_type=meta.get("type", "fact"),
-                    lifecycle=meta.get("lifecycle", "accepted"),
+                    lifecycle=target_life if target_life in _LEGAL_INITIAL_LIFECYCLES else "candidate",
                     topics=parsed_topics,
                     triples=parsed_triples,
                 )
+                _restore_lifecycle(conn, new_id, target_life, agent_id)
                 stats["memories_created"] += 1
 
     if (v_path / "decisions").is_dir():
@@ -502,10 +525,20 @@ def rebuild_vault_to_db(
 
         tomb_file = v_path / "tombstones.md"
         tomb_count = 0
+        tomb_truncated = 0
         if tomb_file.is_file():
             t_content = tomb_file.read_text(encoding="utf-8")
-            for m in re.finditer(r"- \*\*#(tomb-[0-9a-f]+)\*\* \[`([^`]+)`\] (.*?) \(fp: ([0-9a-f]+)\.\.\.\)", t_content):
-                tid, scope, reason, fp = m.groups()
+            # Accept the current format (full fp) and the legacy truncated one
+            # `(fp: 74dfb975a1eb...)`. A truncated fingerprint cannot block its
+            # claim, so it is counted and skipped instead of poisoning the table.
+            for m in re.finditer(
+                r"- \*\*#(tomb-[0-9a-f]+)\*\* \[`([^`]+)`\] (.*?) \*\(fp: ([0-9a-f]+)(\.\.\.)?\)\*",
+                t_content,
+            ):
+                tid, scope, reason, fp, truncated = m.groups()
+                if truncated:
+                    tomb_truncated += 1
+                    continue
                 conn.execute(
                     "INSERT OR IGNORE INTO tombstone (id, claim_fingerprint, scope, reason) VALUES (?, ?, ?, ?)",
                     (tid, fp, scope, reason)
@@ -524,6 +557,7 @@ def rebuild_vault_to_db(
             "memories_rebuilt": rebuilt_memories,
             "decisions_rebuilt": stats.get("decisions_created", 0),
             "tombstones_rebuilt": tomb_count,
+            "tombstones_truncated": tomb_truncated,
             "vault_dir": str(v_path),
             "db_path": str(db_target),
         }

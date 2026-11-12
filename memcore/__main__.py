@@ -54,6 +54,12 @@ from .cli_topic import (
     cmd_topic_update,
 )
 
+from .cli_trading import (
+    cmd_trade_record,
+    cmd_trade_review,
+    cmd_trade_thesis,
+)
+
 from .cli_gotchas import cmd_gotchas
 
 from .cli_memory import (
@@ -394,6 +400,39 @@ def main(argv=None):
     td.add_argument('--cascade', action='store_true', default=False)
     td.add_argument('--json', action='store_true', dest='json')
     td.set_defaults(func=cmd_topic_delete)
+
+    p = sub.add_parser('trade', help='Trading Knowledge Pack: thesis, trade journal, review', parents=[common])
+    trsub = p.add_subparsers(dest='subcommand', required=True)
+    tt = trsub.add_parser('thesis', parents=[common], help='record why a symbol matters + invalidation')
+    tt.add_argument('--project', required=True)
+    tt.add_argument('--agent', required=True)
+    tt.add_argument('symbol')
+    tt.add_argument('thesis')
+    tt.add_argument('--invalidation', default=None)
+    tt.add_argument('--entry', default=None)
+    tt.add_argument('--risk', default=None)
+    tt.add_argument('--json', action='store_true', dest='json')
+    tt.set_defaults(func=cmd_trade_thesis)
+    tr = trsub.add_parser('record', parents=[common], help='record an executed trade')
+    tr.add_argument('--project', required=True)
+    tr.add_argument('--agent', required=True)
+    tr.add_argument('symbol')
+    tr.add_argument('side', choices=['buy', 'sell'])
+    tr.add_argument('entry')
+    tr.add_argument('--exit-price', default=None, dest='exit_price')
+    tr.add_argument('--size', default=None)
+    tr.add_argument('--note', default=None)
+    tr.add_argument('--json', action='store_true', dest='json')
+    tr.set_defaults(func=cmd_trade_record)
+    tv = trsub.add_parser('review', parents=[common], help='record the post-trade lesson')
+    tv.add_argument('--project', required=True)
+    tv.add_argument('--agent', required=True)
+    tv.add_argument('trade_memory_id')
+    tv.add_argument('symbol')
+    tv.add_argument('lesson')
+    tv.add_argument('--outcome', default=None)
+    tv.add_argument('--json', action='store_true', dest='json')
+    tv.set_defaults(func=cmd_trade_review)
 
     p = sub.add_parser('tripwire', help='tripwire registry: trap recurring failure loops', parents=[common])
     twsub = p.add_subparsers(dest='subcommand', required=True)

@@ -53,5 +53,48 @@ class TestGovernedCompaction(unittest.TestCase):
         superseded_count = cur2.fetchone()[0]
         self.assertEqual(superseded_count, 5)
 
+    def test_compaction_does_not_merge_across_topics(self):
+        a, _ = create_memory(self.conn, "proj-x", "agent-1", "Trading rule one",
+                             scope="project", memory_type="fact", lifecycle="accepted",
+                             topics=["trading"])
+        b, _ = create_memory(self.conn, "proj-x", "agent-1", "Trading rule two",
+                             scope="project", memory_type="fact", lifecycle="accepted",
+                             topics=["trading"])
+        c, _ = create_memory(self.conn, "proj-x", "agent-1", "Cooking note one",
+                             scope="project", memory_type="fact", lifecycle="accepted",
+                             topics=["cooking"])
+        self.conn.execute("UPDATE memory SET created_at = datetime('now', '-30 days')")
+        self.conn.commit()
+
+        res = compact_project_memories(self.conn, "proj-x", "agent-1", older_than_days=14)
+        self.assertEqual(res["compacted_count"], 3)
+        self.assertEqual(res["partitions"], 2)
+        self.assertEqual(len(res["new_memory_ids"]), 2)
+
+        # Each snapshot keeps its own topic; no snapshot spans both domains.
+        rows = self.conn.execute(
+            "SELECT m.id FROM memory m WHERE m.project_id='proj-x' AND m.lifecycle='accepted'"
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        for (snap_id,) in rows:
+            topics = [r[0] for r in self.conn.execute(
+                "SELECT topic_id FROM memory_topic WHERE memory_id=?", (snap_id,)
+            ).fetchall()]
+            self.assertEqual(len(topics), 1)
+
+    def test_dry_run_reports_partitions_without_writing(self):
+        create_memory(self.conn, "proj-x", "agent-1", "one", scope="project",
+                      memory_type="fact", lifecycle="accepted", topics=["t1"])
+        create_memory(self.conn, "proj-x", "agent-1", "two", scope="project",
+                      memory_type="fact", lifecycle="accepted", topics=["t2"])
+        self.conn.execute("UPDATE memory SET created_at = datetime('now', '-30 days')")
+        self.conn.commit()
+        res = compact_project_memories(self.conn, "proj-x", "agent-1", older_than_days=14, dry_run=True)
+        self.assertEqual(res["partitions"], 2)
+        self.assertEqual(res["compacted_count"], 2)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM memory WHERE lifecycle='accepted'").fetchone()[0], 2
+        )
+
 if __name__ == "__main__":
     unittest.main()

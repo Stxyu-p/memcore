@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import re
@@ -95,7 +96,7 @@ def export_vault(
     # 2. Wiki (Facts, Notes)
     wiki_sql = """
         SELECT m.id, m.scope, m.type, m.lifecycle, m.verification, m.freshness,
-               v.content, v.source_file, v.source_commit, m.updated_at
+               v.content, v.source_file, v.source_commit, m.updated_at, v.id
         FROM memory m
         JOIN memory_version v ON m.current_version_id = v.id
         WHERE m.type != 'preference' AND m.scope = 'project'
@@ -108,6 +109,25 @@ def export_vault(
     wiki_sql += " ORDER BY m.created_at ASC"
 
     wiki_rows = conn.execute(wiki_sql, w_params).fetchall()
+
+    # Drop stale wiki files for memories we are about to rewrite: a supersede
+    # changes the content, hence the slug-based filename, and the old file would
+    # otherwise survive as a contradictory duplicate for the same memory id.
+    exported_ids = {r[0] for r in wiki_rows}
+    if exported_ids:
+        for stale_file in wiki_path.glob("*.md"):
+            try:
+                entries = _parse_multi_frontmatter(stale_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            for meta, _body in entries:
+                if meta.get("id") in exported_ids:
+                    try:
+                        stale_file.unlink()
+                    except OSError:
+                        pass
+                    break
+
     for r in wiki_rows:
         meta = {
             "id": r[0], "scope": r[1], "type": r[2], "lifecycle": r[3],
@@ -126,6 +146,17 @@ def export_vault(
             ).fetchall()
             if t_rows:
                 meta["topics"] = ",".join(row[0] for row in t_rows)
+        # Optional knowledge triples bound to the CURRENT version only (JSON keeps
+        # arbitrary subject/predicate/object text round-trippable). Sorted for
+        # deterministic vault output so git diffs stay meaningful.
+        if store._table_exists(conn, 'memory_triple'):
+            tri_rows = conn.execute(
+                'SELECT subject, predicate, object FROM memory_triple '
+                'WHERE memory_id = ? AND version_id = ? '
+                'ORDER BY subject, predicate, object', (r[0], r[10])
+            ).fetchall()
+            if tri_rows:
+                meta["triples"] = json.dumps([list(t) for t in tri_rows], ensure_ascii=False)
         first_line = r[6].strip().split("\n")[0]
         slug = _slugify(first_line)
         f_name = f"{slug}.md" if slug != "item" else f"{r[0]}.md"
@@ -226,6 +257,30 @@ def _parse_multi_frontmatter(content: str) -> list[tuple[dict[str, str], str]]:
     return entries
 
 
+def _parse_triples_meta(meta: dict[str, str]) -> list | None:
+    """Parse the JSON 'triples' frontmatter value into [[s, p, o], ...].
+
+    Returns None when the key is absent OR unparseable — a typo in a vault file
+    must never unlink stored triples. An explicitly empty list is honoured.
+    """
+    raw = meta.get("triples")
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    out = []
+    for t in parsed:
+        if isinstance(t, (list, tuple)) and len(t) == 3:
+            s, p, o = (str(x).strip() for x in t)
+            if s and p and o:
+                out.append([s, p, o])
+    return out
+
+
 def _parse_decision_frontmatter(meta: dict[str, str], body: str) -> dict[str, Any]:
     """Rebuild a decision dict from exported decisions/*.md frontmatter + body.
        Round-trips title/date/rationale/context/options/consequences.
@@ -269,6 +324,7 @@ def import_vault(
         "memories_superseded": 0,
         "memories_created": 0,
         "decisions_created": 0,
+        "skipped_foreign": 0,
         "unchanged": 0,
     }
 
@@ -294,16 +350,29 @@ def import_vault(
             raw_topics = meta.get("topics")
             if raw_topics:
                 parsed_topics = [t.strip() for t in str(raw_topics).split(",") if t.strip()]
+            parsed_triples = _parse_triples_meta(meta)
             mem_id = meta.get("id")
             if mem_id:
                 row = conn.execute(
-                    "SELECT v.content, m.lifecycle FROM memory m JOIN memory_version v ON m.current_version_id = v.id WHERE m.id = ?",
-                    (mem_id,)
+                    "SELECT v.content, m.lifecycle, m.current_version_id FROM memory m "
+                    "JOIN memory_version v ON m.current_version_id = v.id "
+                    "WHERE m.id = ? AND m.project_id = ?",
+                    (mem_id, project_id)
                 ).fetchone()
+                if row is None:
+                    # The id may belong to another project: never write across
+                    # projects — count it and leave the foreign row untouched.
+                    foreign = conn.execute(
+                        "SELECT project_id FROM memory WHERE id = ?", (mem_id,)
+                    ).fetchone()
+                    if foreign is not None:
+                        stats["skipped_foreign"] = stats.get("skipped_foreign", 0) + 1
+                        continue
                 if row is not None:
-                    curr_content, curr_life = row[0].strip(), row[1]
+                    curr_content, curr_life, curr_ver = row[0].strip(), row[1], row[2]
                     if curr_content != body:
-                        _write.supersede(conn, mem_id, agent_id, body, reason="Markdown vault sync", topics=parsed_topics)
+                        _write.supersede(conn, mem_id, agent_id, body, reason="Markdown vault sync",
+                                         topics=parsed_topics, triples=parsed_triples)
                         desired_life = meta.get("lifecycle", curr_life)
                         if desired_life == "accepted":
                             conn.execute("UPDATE memory SET lifecycle='accepted' WHERE id=?", (mem_id,))
@@ -312,6 +381,14 @@ def import_vault(
                     else:
                         if parsed_topics is not None:
                             _write.store_topics(conn, mem_id, None, parsed_topics, replace=True)
+                        if parsed_triples is not None and store._table_exists(conn, 'memory_triple'):
+                            # Sync only this version: historical versions keep
+                            # their own triples (bitemporal history is intact).
+                            conn.execute(
+                                "DELETE FROM memory_triple WHERE memory_id = ? AND version_id = ?",
+                                (mem_id, curr_ver),
+                            )
+                            _write.store_triples(conn, mem_id, curr_ver, parsed_triples)
                         stats["unchanged"] += 1
                 else:
                     _write.create_memory(
@@ -320,6 +397,8 @@ def import_vault(
                         memory_type=meta.get("type", "fact"),
                         lifecycle=meta.get("lifecycle", "accepted"),
                         topics=parsed_topics,
+                        triples=parsed_triples,
+                        memory_id=mem_id,
                     )
                     stats["memories_created"] += 1
             else:
@@ -329,6 +408,7 @@ def import_vault(
                     memory_type=meta.get("type", "fact"),
                     lifecycle=meta.get("lifecycle", "accepted"),
                     topics=parsed_topics,
+                    triples=parsed_triples,
                 )
                 stats["memories_created"] += 1
 
@@ -360,9 +440,8 @@ def import_vault(
                 opts = d.get("options")
                 options_list = None
                 if opts:
-                    import json as _json
                     try:
-                        parsed = _json.loads(opts)
+                        parsed = json.loads(opts)
                         options_list = parsed if isinstance(parsed, list) else None
                     except Exception:
                         options_list = None

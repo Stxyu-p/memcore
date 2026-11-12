@@ -6,6 +6,7 @@ All reads: scope enforced in SQL WHERE (never post-filtering).
 import json
 import pathlib
 import unicodedata
+import warnings
 
 from . import store
 
@@ -131,14 +132,23 @@ FRESHNESS_STALE_DAYS = 90
 
 def _insert_memory_rows(conn, project_id, agent_id, content, scope, memory_type,
                         lifecycle, claim_fp, reason, detail, source_hash,
-                        source_commit, source_file, when_to_use=None):
+                        source_commit, source_file, when_to_use=None,
+                        memory_id: str | None = None):
     """Insert the memory header + first immutable version; returns (mem, ver, now).
 
     Scope_detail is schema-conditional: the column only exists after
     migration 0016, and an explicit detail tag on a pre-0016 store must
     refuse loudly instead of being silently dropped.
+
+    memory_id restores a known identity (vault rebuild/import) instead of
+    minting a new one, so a rebuild followed by a sync cannot duplicate rows.
     """
-    mem_id = _new_id('mem')
+    if memory_id is not None:
+        if conn.execute("SELECT 1 FROM memory WHERE id = ?", (memory_id,)).fetchone():
+            raise MemCoreError(f'memory id already exists: {memory_id}')
+        mem_id = str(memory_id)
+    else:
+        mem_id = _new_id('mem')
     ver_id = _new_id('ver')
     now = _now()
     mem_cols = _table_cols(conn, 'memory')
@@ -238,13 +248,14 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
                   reason=None, scope_detail=None, source_file=None,
                   source_commit=None, source_hash=None, when_to_use=None,
                   auto_source_file: bool = True, triples: list | None = None,
-                  topics: list | None = None,
+                  topics: list | None = None, memory_id: str | None = None,
                   _manage_transaction=True):
     """Create a memory + first immutable version. Tombstone guard applies.
 
     Returns (memory_id, version_id) or existing ids if idempotency_key replays.
     topics is optional; when given, attaches the memory to global knowledge
-    topics (ancestors auto-created).
+    topics (ancestors auto-created). memory_id restores a known identity
+    (vault rebuild/import); it must not already exist.
     """
     if not isinstance(memory_type, str) or not memory_type.strip():
         raise MemCoreError('memory_type must be a non-empty string')
@@ -291,7 +302,8 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
             conn, project_id, agent_id, content, scope, memory_type,
             lifecycle, claim_fp, prepared['reason'], prepared['detail'],
             prepared['source_hash'], prepared['source_commit'],
-            prepared['source_file'], when_to_use=clean_when
+            prepared['source_file'], when_to_use=clean_when,
+            memory_id=memory_id
         )
         if triples:
             store_triples(conn, mem_id, ver_id, triples)
@@ -1004,9 +1016,20 @@ def check_source_staleness(conn, memory_ids, get_head=None, repo_root=None):
     Git commit is provenance context only; unrelated commits do not change this
     fact's source. Rows without a saved file hash or with an unavailable source
     are skipped. Freshness changes without touching updated_at. Best-effort:
-    returns flipped ids and never raises. ``get_head`` and ``repo_root`` are
-    retained as ignored compatibility arguments; file content is authoritative.
+    returns flipped ids and never raises.
+
+    .. deprecated:: 2.12
+       ``get_head`` and ``repo_root`` are ignored compatibility arguments and
+       emit a DeprecationWarning when supplied; file content is authoritative.
+       They will be removed in 3.0.
     """
+    if get_head is not None or repo_root is not None:
+        warnings.warn(
+            "get_head/repo_root are deprecated and ignored; source-file SHA-256 "
+            "determines staleness. Removed in 3.0.",
+            FutureWarning,
+            stacklevel=2,
+        )
     ids = [m for m in dict.fromkeys(memory_ids or []) if m]
     if not ids:
         return []

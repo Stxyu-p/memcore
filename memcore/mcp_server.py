@@ -481,6 +481,57 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "trading_thesis",
+        "description": "Record a trading thesis (why a symbol matters + what invalidates it) as governed memory with topic and triples.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Ticker/asset symbol"},
+                "thesis": {"type": "string", "description": "The claim: why this symbol is interesting"},
+                "invalidation": {"type": "string", "description": "Condition that voids the thesis"},
+                "entry": {"type": "string", "description": "Optional entry conditions"},
+                "risk": {"type": "string", "description": "Optional risk limit"},
+                "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
+            },
+            "required": ["symbol", "thesis"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "trading_trade",
+        "description": "Record an executed trade (symbol, side, entry, optional exit/size) into the trading journal.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Ticker/asset symbol"},
+                "side": {"type": "string", "enum": ["buy", "sell"], "description": "Trade direction"},
+                "entry": {"type": "string", "description": "Entry price"},
+                "exit_price": {"type": "string", "description": "Optional exit price"},
+                "size": {"type": "string", "description": "Optional position size"},
+                "note": {"type": "string", "description": "Optional free-form note"},
+                "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
+            },
+            "required": ["symbol", "side", "entry"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "trading_review",
+        "description": "Record the post-trade lesson and link it back to the trade memory it came from.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "trade_memory_id": {"type": "string", "description": "Memory id of the trade being reviewed"},
+                "symbol": {"type": "string", "description": "Ticker/asset symbol"},
+                "lesson": {"type": "string", "description": "What was learned"},
+                "outcome": {"type": "string", "description": "Optional realized outcome"},
+                "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
+            },
+            "required": ["trade_memory_id", "symbol", "lesson"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -985,6 +1036,54 @@ def _tool_topic_delete(args: dict[str, Any]) -> dict[str, Any]:
         return {"success": True, **res}
 
 
+def _tool_trading_thesis(args: dict[str, Any]) -> dict[str, Any]:
+    with _client(args) as mc:
+        assert mc.conn is not None
+        core.ensure_trading_topics(mc.conn)
+        res = core.record_thesis(
+            mc.conn, mc.project, mc.agent,
+            symbol=str(args.get("symbol") or ""),
+            thesis=str(args.get("thesis") or ""),
+            invalidation=args.get("invalidation"),
+            entry=args.get("entry"),
+            risk=args.get("risk"),
+        )
+        mc.conn.commit()
+        return {"success": True, **res, "project": mc.project}
+
+
+def _tool_trading_trade(args: dict[str, Any]) -> dict[str, Any]:
+    with _client(args) as mc:
+        assert mc.conn is not None
+        core.ensure_trading_topics(mc.conn)
+        res = core.record_trade(
+            mc.conn, mc.project, mc.agent,
+            symbol=str(args.get("symbol") or ""),
+            side=str(args.get("side") or ""),
+            entry=str(args.get("entry") or ""),
+            exit_price=args.get("exit_price"),
+            size=args.get("size"),
+            note=args.get("note"),
+        )
+        mc.conn.commit()
+        return {"success": True, **res, "project": mc.project}
+
+
+def _tool_trading_review(args: dict[str, Any]) -> dict[str, Any]:
+    with _client(args) as mc:
+        assert mc.conn is not None
+        core.ensure_trading_topics(mc.conn)
+        res = core.review_trade(
+            mc.conn, mc.project, mc.agent,
+            trade_memory_id=str(args.get("trade_memory_id") or ""),
+            symbol=str(args.get("symbol") or ""),
+            lesson=str(args.get("lesson") or ""),
+            outcome=args.get("outcome"),
+        )
+        mc.conn.commit()
+        return {"success": True, **res, "project": mc.project}
+
+
 _HANDLERS = {
     "memory_remember": _tool_remember,
     "memory_search": _tool_search,
@@ -1005,6 +1104,9 @@ _HANDLERS = {
     "topic_show": _tool_topic_show,
     "topic_update": _tool_topic_update,
     "topic_delete": _tool_topic_delete,
+    "trading_thesis": _tool_trading_thesis,
+    "trading_trade": _tool_trading_trade,
+    "trading_review": _tool_trading_review,
 }
 
 

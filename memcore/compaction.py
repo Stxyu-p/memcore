@@ -25,7 +25,7 @@ def compact_project_memories(
     from primary active recall.
     """
     query = """
-        SELECT m.id, m.current_version_id, v.content, m.created_at
+        SELECT m.id, m.current_version_id, v.content, m.created_at, m.scope, m.type
         FROM memory m
         JOIN memory_version v ON m.current_version_id = v.id
         WHERE m.project_id = ?
@@ -43,60 +43,82 @@ def compact_project_memories(
         return {
             "compacted_count": 0,
             "new_memory_id": None,
+            "new_memory_ids": [],
             "dry_run": dry_run,
             "candidate_ids": []
         }
 
     candidate_ids = [r[0] for r in rows]
+
+    # Partition by (topic set, scope, type): one snapshot per knowledge domain,
+    # never one snapshot spanning unrelated topics or visibility classes.
+    topic_of: dict[str, set[str]] = {}
+    if store._table_exists(conn, 'memory_topic'):
+        for mem_id, topic_id in conn.execute(
+            'SELECT memory_id, topic_id FROM memory_topic'
+        ).fetchall():
+            topic_of.setdefault(mem_id, set()).add(topic_id)
+
+    partitions: dict[tuple, list] = {}
+    for r in rows:
+        key = (frozenset(topic_of.get(r[0]) or ()), r[4], r[5])
+        partitions.setdefault(key, []).append(r)
+
     if dry_run:
         return {
             "compacted_count": len(rows),
             "new_memory_id": None,
+            "new_memory_ids": [],
             "dry_run": True,
-            "candidate_ids": candidate_ids
+            "candidate_ids": candidate_ids,
+            "partitions": len(partitions),
         }
 
-    # Synthesize consolidated architecture proposition
-    bullets = "\n".join(f"- {r[2].strip()}" for r in rows)
-    synthesis_content = (
-        f"Consolidated architecture snapshot ({len(rows)} items, older than {older_than_days}d):\n"
-        f"{bullets}"
-    )
-
+    new_ids: list[str] = []
     with store.write_tx(conn):
-        # 1. Create the new canonical decision memory
-        new_mem_id, new_ver_id = create_memory(
-            conn,
-            project_id=project_id,
-            agent_id=agent_id,
-            content=synthesis_content,
-            scope="project",
-            memory_type="decision",
-            lifecycle="accepted",
-            reason=f"Compaction of {len(rows)} historical memories ({older_than_days}d cutoff)",
-            _manage_transaction=False
-        )
-
         now = conn.execute("SELECT datetime('now')").fetchone()[0]
+        for key in sorted(partitions, key=lambda k: (sorted(k[0]), k[1], k[2])):
+            group = partitions[key]
+            topic_set, scope, mtype = key
+            bullets = "\n".join(f"- {r[2].strip()}" for r in group)
+            domain = f" [{', '.join(sorted(topic_set))}]" if topic_set else ""
+            synthesis_content = (
+                f"Consolidated {mtype} snapshot{domain} ({len(group)} items, "
+                f"older than {older_than_days}d):\n{bullets}"
+            )
+            new_mem_id, _ = create_memory(
+                conn,
+                project_id=project_id,
+                agent_id=agent_id,
+                content=synthesis_content,
+                scope=scope,
+                memory_type=mtype,
+                lifecycle="accepted",
+                reason=f"Compaction of {len(group)} historical {mtype} memories ({older_than_days}d cutoff)",
+                topics=sorted(topic_set) or None,
+                _manage_transaction=False,
+            )
+            new_ids.append(new_mem_id)
 
-        # 2. Mark old individual memories as superseded with bitemporal close
-        for mid, ver_id, _, _ in rows:
-            conn.execute(
-                "UPDATE memory_version SET valid_until = ? WHERE id = ? AND valid_until IS NULL",
-                (now, ver_id)
-            )
-            conn.execute(
-                "UPDATE memory SET lifecycle = 'superseded', updated_at = ? WHERE id = ?",
-                (now, mid)
-            )
-            _audit(
-                conn, "compaction-supersede", agent_id, mid, project_id,
-                {"superseded_by": new_mem_id, "compaction_batch_size": len(rows)}
-            )
+            for mid, ver_id, _, _, _, _ in group:
+                conn.execute(
+                    "UPDATE memory_version SET valid_until = ? WHERE id = ? AND valid_until IS NULL",
+                    (now, ver_id)
+                )
+                conn.execute(
+                    "UPDATE memory SET lifecycle = 'superseded', updated_at = ? WHERE id = ?",
+                    (now, mid)
+                )
+                _audit(
+                    conn, "compaction-supersede", agent_id, mid, project_id,
+                    {"superseded_by": new_mem_id, "compaction_batch_size": len(group)}
+                )
 
     return {
         "compacted_count": len(rows),
-        "new_memory_id": new_mem_id,
+        "new_memory_id": new_ids[0] if new_ids else None,
+        "new_memory_ids": new_ids,
         "dry_run": False,
-        "candidate_ids": candidate_ids
+        "candidate_ids": candidate_ids,
+        "partitions": len(partitions),
     }

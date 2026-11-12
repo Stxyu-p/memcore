@@ -130,18 +130,9 @@ def _out(data):
 
 
 def _is_network_path(path):
-    raw = str(path)
-    if raw.startswith('\\\\') or raw.startswith('//'):
-        return True
-    if os.name == 'nt':
-        try:
-            import ctypes
-            anchor = pathlib.Path(path).anchor
-            if anchor:
-                return ctypes.windll.kernel32.GetDriveTypeW(anchor) == 4
-        except Exception:
-            pass
-    return False
+    """CLI alias for the canonical doctor.is_network_path (single implementation)."""
+    from .doctor import is_network_path
+    return is_network_path(path)
 
 
 

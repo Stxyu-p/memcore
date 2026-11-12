@@ -277,9 +277,11 @@ def cmd_compact(args):
     res = compact_project_memories(conn, project_id=project_id, agent_id=agent_id,
                                   older_than_days=days, dry_run=dry_run)
     if dry_run:
-        print(f"Dry-run: found {res['compacted_count']} candidate memories eligible for compaction in project '{project_id}'")
+        print(f"Dry-run: found {res['compacted_count']} candidate memories eligible for compaction in project '{project_id}' "
+              f"across {res.get('partitions', 0)} partition(s)")
     else:
-        print(f"Compacted {res['compacted_count']} memories in project '{project_id}' -> new decision memory {res['new_memory_id']}")
+        print(f"Compacted {res['compacted_count']} memories in project '{project_id}' -> "
+              f"{len(res.get('new_memory_ids') or [])} snapshot(s): {', '.join(res.get('new_memory_ids') or []) or '-'}")
 
 
 def cmd_export_project(args):

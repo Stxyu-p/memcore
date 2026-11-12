@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Knowledge Topics (global catalog + per-memory membership)**
+- **Trading Knowledge Pack (`memcore/trading.py`, `memcore trade`).**
+  Thin domain layer over memories + topics + triples: `record_thesis`
+  (claim + invalidation + risk), `record_trade` (symbol/side/entry/exit/size)
+  and `review_trade` (lesson linked back via a `review_of` triple). Seeds the
+  canonical `trading/*` topic tree idempotently. Exposed as MCP tools
+  `trading_thesis`, `trading_trade`, `trading_review` and CLI
+  `memcore trade thesis|record|review`. No new tables — external market data
+  and broker state stay external.
+- **Vault triples round-trip.** `export_vault` writes a `triples:` JSON
+  frontmatter block per memory and `import_vault` restores it, so a rebuild
+  keeps knowledge triples instead of dropping them. Frontmatter is treated as
+  the source of truth on sync (removed triples are unlinked).
+- **Memory identity preservation on vault import.** `create_memory` accepts an
+  optional `memory_id`; vault import/rebuild restores the original id, so a
+  rebuild followed by a sync no longer duplicates every row.
+
+### Fixed
+- **Compaction merged unrelated knowledge into one snapshot.** It now
+  partitions eligible memories by `(topic set, scope, memory_type)` and emits
+  one snapshot per partition, carrying the partition's topics forward, and
+  reports `new_memory_ids`/`partitions`.
+- **Vault export was non-deterministic.** Triples are ordered by
+  `subject, predicate, object`, so repeated exports produce identical bytes
+  and git diffs stay meaningful.
+
+### Changed
+- **`get_head`/`repo_root` formally deprecated** in `recall()` and
+  `check_source_staleness()`: still accepted, now emit a `DeprecationWarning`,
+  and are documented for removal in 3.0 (source-file SHA-256 is authoritative).
+- **Single network-path implementation.** `cli_support._is_network_path` now
+  delegates to `doctor.is_network_path` instead of duplicating the UNC/drive
+  probe.
+
+### Added — Knowledge Topics (global catalog + per-memory membership)
   - `knowledge_topic` (slug path PK, parent_id tree, optional freshness policy)
     and `memory_topic` (many-to-many) via migration `0023_knowledge_topics`.
   - `create_memory`/`supersede` accept optional `topics=[...]`; ancestors are

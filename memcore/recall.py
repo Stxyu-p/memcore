@@ -7,6 +7,7 @@ and scope-enforced reads.
 from __future__ import annotations
 
 import sqlite3
+import warnings
 
 from . import store
 from .write import MemCoreError
@@ -726,10 +727,20 @@ def recall(conn, project_id, agent_id, query, limit=20,
 
     Encapsulates candidate search, access reinforcement, source staleness
     verification, and final freshness resolution into a single interface.
-    Returns list of candidate tuples with finalized freshness state. The legacy
-    ``get_head`` and ``repo_root`` keywords are accepted for call compatibility;
-    source-file hashes now determine freshness.
+    Returns list of candidate tuples with finalized freshness state.
+
+    .. deprecated:: 2.12
+       ``get_head`` and ``repo_root`` are ignored compatibility arguments and
+       emit a DeprecationWarning when supplied. Source-file SHA-256 hashes
+       determine staleness. They will be removed in 3.0.
     """
+    if get_head is not None or repo_root is not None:
+        warnings.warn(
+            "get_head/repo_root are deprecated and ignored; source-file SHA-256 "
+            "determines freshness. Removed in 3.0.",
+            FutureWarning,
+            stacklevel=2,
+        )
     rows = search(
         conn, project_id, agent_id, query, limit=limit,
         scope_detail=scope_detail,

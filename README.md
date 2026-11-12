@@ -39,6 +39,7 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
 | **Procedural Mastery** | Remembers facts, but forgets how to execute fixes. | **Skill Crystallization Protocol**: verified Skill Proofs & `SKILL.md`. | Reusable operational capability decoupled from fact recall. |
 | **Indirect Prompt Injection**| Web pages and logs silently inject permanent memories. | **Tainted Context Guard**: auto-accept veto on untrusted tools. | Strict candidate quarantine for external input. |
 | **Scattered Knowledge** | Facts pile up with no domain organization. | **Knowledge Topics (`topic`)**: global slug-path catalog + per-memory membership. | Organize memories into `trading/strategies`, `ai/llm`, … with tree hierarchy & topic-scoped recall/freshness. |
+| **Trading Discipline** | Theses, fills and lessons live in scattered notes. | **Trading Knowledge Pack (`memcore trade`)**: thesis → trade → review as governed memory + triples. | Every position keeps its reasoning, invalidation rule and post-trade lesson recallable. |
 
 ---
 

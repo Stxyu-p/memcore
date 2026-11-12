@@ -38,7 +38,7 @@ except ImportError:
     from memcore.client import DEFAULT_DB, MemCore  # type: ignore
     from memcore.write_support import ContradictionHold  # type: ignore
 
-SERVER_INFO = {"name": "memcore", "version": "2.11.0"}
+SERVER_INFO = {"name": "memcore", "version": "2.12.0"}
 FALLBACK_PROTOCOL = "2024-11-05"
 SERVER_INSTRUCTIONS = (
     "MemCore — Governed Bitemporal Memory Engine (SQLite WAL + FTS5 BM25).\n\n"
@@ -115,6 +115,11 @@ TOOLS = [
                     "type": "boolean",
                     "description": "Auto-detect existing workspace file path in content for SHA-256 provenance (default: true)",
                 },
+                "topics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional knowledge topic slugs (e.g. ['trading/strategies']); ancestors auto-created",
+                },
             },
             "required": ["content"],
             "additionalProperties": False,
@@ -156,6 +161,11 @@ TOOLS = [
                     "type": "integer",
                     "description": "Optional token budget cap; packs results and downgrades overflow items to previews",
                 },
+                "topics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional topic slugs to narrow search results",
+                },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
                 },
             "required": [],
@@ -187,6 +197,11 @@ TOOLS = [
                 "include_content": {
                     "type": "boolean",
                     "description": "Return full content instead of preview (default: false)",
+                },
+                "topics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional topic slugs to narrow listed memories",
                 },
                 "project": {"type": "string", "description": f"Project namespace (default: {DEFAULT_PROJECT})"},
                 },
@@ -399,6 +414,73 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "topic_create",
+        "description": "Create a global knowledge topic (slug path like 'trading/strategies'); ancestors auto-created.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic_id": {"type": "string", "description": "Slug path, e.g. 'trading/strategies'"},
+                "name": {"type": "string", "description": "Display name (default: derived from last slug segment)"},
+                "description": {"type": "string", "description": "Optional description"},
+            },
+            "required": ["topic_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "topic_list",
+        "description": "List the global knowledge topic catalog (optionally by direct parent).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "parent_id": {"type": "string", "description": "Optional parent slug to list direct children"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "topic_show",
+        "description": "Fetch one knowledge topic by slug.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic_id": {"type": "string", "description": "Topic slug to fetch"},
+            },
+            "required": ["topic_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "topic_update",
+        "description": "Update topic metadata (name/description/parent/freshness).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic_id": {"type": "string", "description": "Topic slug to update"},
+                "name": {"type": "string", "description": "New display name"},
+                "description": {"type": "string", "description": "New description"},
+                "parent_id": {"type": "string", "description": "New parent slug ('' clears to root)"},
+                "freshness_aging_days": {"type": "integer", "description": "Override aging threshold"},
+                "freshness_stale_days": {"type": "integer", "description": "Override stale threshold"},
+            },
+            "required": ["topic_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "topic_delete",
+        "description": "Delete a topic. Refuses when it has children/linked memories unless cascade=true.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic_id": {"type": "string", "description": "Topic slug to delete"},
+                "cascade": {"type": "boolean", "description": "Delete children and unlink memories (default: false)"},
+            },
+            "required": ["topic_id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -471,6 +553,14 @@ def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
     source_commit = args.get("source_commit")
     when_to_use = args.get("when_to_use")
     auto_source_file = bool(args.get("auto_source_file", True))
+    topics = args.get("topics")
+    if topics is not None:
+        if isinstance(topics, str):
+            topics = [t.strip() for t in topics.split(",") if t.strip()]
+        elif isinstance(topics, list):
+            topics = [str(t).strip() for t in topics if str(t).strip()]
+        else:
+            raise ValueError("topics must be a list or comma-separated string")
     with _client(args) as mc:
         try:
             mid = mc.remember(
@@ -481,6 +571,7 @@ def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
                 source_commit=source_commit,
                 when_to_use=when_to_use,
                 auto_source_file=auto_source_file,
+                topics=topics,
             )
         except ContradictionHold as ch:
 
@@ -535,6 +626,9 @@ def _tool_search(args: dict[str, Any]) -> dict[str, Any]:
     as_of = args.get("as_of")
     changed_since = args.get("changed_since")
     max_tokens = args.get("max_tokens")
+    topics = args.get("topics")
+    if topics is not None:
+        topics = [str(t).strip() for t in (topics if isinstance(topics, list) else [topics]) if str(t).strip()]
     with _client(args) as mc:
         hits = mc.search(
             query.strip(),
@@ -545,6 +639,7 @@ def _tool_search(args: dict[str, Any]) -> dict[str, Any]:
             as_of=as_of,
             changed_since=changed_since,
             max_tokens=max_tokens,
+            topics=topics,
         )
         return {
             "success": True,
@@ -561,6 +656,9 @@ def _tool_list(args: dict[str, Any]) -> dict[str, Any]:
     limit = max(1, min(100, int(args.get("limit") or 20)))
     offset = max(0, int(args.get("offset") or 0))
     include_content = bool(args.get("include_content", False))
+    topics = args.get("topics")
+    if topics is not None:
+        topics = [str(t).strip() for t in (topics if isinstance(topics, list) else [topics]) if str(t).strip()]
     with _client(args) as mc:
         assert mc.conn is not None
         rows = core.list_memories(
@@ -569,7 +667,7 @@ def _tool_list(args: dict[str, Any]) -> dict[str, Any]:
             memory_type=args.get("type"),
             verification=args.get("verification"),
             freshness=args.get("freshness"),
-            limit=limit, offset=offset,
+            limit=limit, offset=offset, topics=topics,
         )
         items = []
         for r in rows:
@@ -836,6 +934,57 @@ def _tool_tripwire_check(args: dict[str, Any]) -> dict[str, Any]:
         return {"success": True, "count": len(tw), "tripwires": tw}
 
 
+def _tool_topic_create(args: dict[str, Any]) -> dict[str, Any]:
+    topic_id = str(args.get("topic_id") or "").strip()
+    if not topic_id:
+        raise ValueError("topic_id is required")
+    with _client(args) as mc:
+        topic = mc.topic_create(
+            topic_id,
+            name=args.get("name"),
+            description=args.get("description"),
+        )
+        return {"success": True, "topic": topic}
+
+
+def _tool_topic_list(args: dict[str, Any]) -> dict[str, Any]:
+    with _client(args) as mc:
+        topics = mc.topic_list(parent_id=args.get("parent_id"))
+        return {"success": True, "count": len(topics), "topics": topics}
+
+
+def _tool_topic_show(args: dict[str, Any]) -> dict[str, Any]:
+    topic_id = str(args.get("topic_id") or "").strip()
+    if not topic_id:
+        raise ValueError("topic_id is required")
+    with _client(args) as mc:
+        topic = mc.topic_get(topic_id)
+        if topic is None:
+            return {"success": True, "found": False, "topic": None}
+        return {"success": True, "found": True, "topic": topic}
+
+
+def _tool_topic_update(args: dict[str, Any]) -> dict[str, Any]:
+    topic_id = str(args.get("topic_id") or "").strip()
+    if not topic_id:
+        raise ValueError("topic_id is required")
+    kwargs = {k: args[k] for k in ("name", "description", "parent_id",
+                                   "freshness_aging_days", "freshness_stale_days") if k in args}
+    with _client(args) as mc:
+        topic = mc.topic_update(topic_id, **kwargs)
+        return {"success": True, "topic": topic}
+
+
+def _tool_topic_delete(args: dict[str, Any]) -> dict[str, Any]:
+    topic_id = str(args.get("topic_id") or "").strip()
+    if not topic_id:
+        raise ValueError("topic_id is required")
+    cascade = bool(args.get("cascade", False))
+    with _client(args) as mc:
+        res = mc.topic_delete(topic_id, cascade=cascade)
+        return {"success": True, **res}
+
+
 _HANDLERS = {
     "memory_remember": _tool_remember,
     "memory_search": _tool_search,
@@ -851,6 +1000,11 @@ _HANDLERS = {
     "memory_status": _tool_status,
     "memory_gotchas": _tool_gotchas,
     "memory_tripwire_check": _tool_tripwire_check,
+    "topic_create": _tool_topic_create,
+    "topic_list": _tool_topic_list,
+    "topic_show": _tool_topic_show,
+    "topic_update": _tool_topic_update,
+    "topic_delete": _tool_topic_delete,
 }
 
 

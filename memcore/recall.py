@@ -532,7 +532,7 @@ def _search_historical(conn, project_id, agent_id, user_query, raw_query,
 def search(conn, project_id, agent_id, query, limit=20,
            scope_detail=None, *,
            mode: str = 'standard', as_of: str | None = None,
-           changed_since: str | None = None):
+           changed_since: str | None = None, topics: list | None = None):
     """FTS5 lexical search over memory content, scope-enforced in SQL.
 
     Deterministic rank: FTS bm25 + pinned + lifecycle/verification/freshness
@@ -546,6 +546,8 @@ def search(conn, project_id, agent_id, query, limit=20,
     means no narrowing. Project-scope rows never carry a detail tag.
     mode supports 'standard' (default), 'strict' (accepted + current + non-disputed),
     and 'historical' (includes superseded versions or point-in-time as_of).
+    topics optionally narrows results to memories attached to any of the given
+    global topic slugs (post-filtered; project/scope isolation is untouched).
     """
     try:
         limit = int(limit)
@@ -664,6 +666,20 @@ def search(conn, project_id, agent_id, query, limit=20,
         results = _filter_changed_since(conn, results, changed_since)
     if mode_norm == 'strict':
         results = _filter_strict_rows(conn, results)
+    if topics:
+        topic_ids = [str(t).strip().lower().strip('/') for t in topics if str(t or '').strip()]
+        if topic_ids and store._table_exists(conn, 'memory_topic'):
+            # Post-filter: keep rows whose memory_id is attached to any topic slug.
+            qmarks = ",".join("?" * len(topic_ids))
+            keep = {
+                r[0] for r in conn.execute(
+                    f"SELECT DISTINCT mt.memory_id FROM memory_topic mt "
+                    f"JOIN knowledge_topic kt ON kt.id = mt.topic_id "
+                    f"WHERE kt.id IN ({qmarks})",
+                    topic_ids,
+                ).fetchall()
+            }
+            results = [r for r in results if r[0] in keep] if keep else []
     final_res = results[:limit]
     return _finish(final_res)
 
@@ -705,7 +721,7 @@ def finalize_recall(conn, rows):
 def recall(conn, project_id, agent_id, query, limit=20,
            scope_detail=None, get_head=None, repo_root=None,
            *, mode: str = 'standard', as_of: str | None = None,
-           changed_since: str | None = None):
+           changed_since: str | None = None, topics: list | None = None):
     """The unified, deep memory recall lifecycle.
 
     Encapsulates candidate search, access reinforcement, source staleness
@@ -717,7 +733,7 @@ def recall(conn, project_id, agent_id, query, limit=20,
     rows = search(
         conn, project_id, agent_id, query, limit=limit,
         scope_detail=scope_detail,
-        mode=mode, as_of=as_of, changed_since=changed_since
+        mode=mode, as_of=as_of, changed_since=changed_since, topics=topics
     )
     finalized = finalize_recall(conn, rows)
     if str(mode or 'standard').strip().lower() == 'strict':
@@ -1118,12 +1134,13 @@ def query_triples(conn, project_id: str, subject: str | None = None,
 
 def list_memories(conn, project_id, agent_id, *, scope=None, lifecycle=None,
                   memory_type=None, verification=None, freshness=None,
-                  limit=20, offset=0):
+                  limit=20, offset=0, topics: list | None = None):
     """Browse memories this agent may read, newest first. Scope-enforced.
 
     Default hides terminal states (superseded/rejected/disabled) unless
     ``lifecycle`` is given explicitly. Returns dict rows with full content and
     a ``tombstoned`` flag; an empty list means empty or unauthorized project.
+    topics optionally narrows to memories attached to any of the given slugs.
     """
     if _membership_role(conn, project_id, agent_id) is None:
         return []
@@ -1145,6 +1162,14 @@ def list_memories(conn, project_id, agent_id, *, scope=None, lifecycle=None,
             params.append(val)
     if not lifecycle:
         where.append("m.lifecycle NOT IN ('superseded','rejected','disabled')")
+    if topics:
+        topic_ids = [str(t).strip().lower().strip('/') for t in topics if str(t or '').strip()]
+        if topic_ids and store._table_exists(conn, 'memory_topic'):
+            qmarks = ",".join("?" * len(topic_ids))
+            where.append(f"m.id IN (SELECT DISTINCT mt.memory_id FROM memory_topic mt "
+                         f"JOIN knowledge_topic kt ON kt.id = mt.topic_id "
+                         f"WHERE kt.id IN ({qmarks}))")
+            params.extend(topic_ids)
     rows = conn.execute(
         'SELECT m.id, m.scope, m.lifecycle, m.verification, m.freshness, '
         '       m.type, m.pinned, m.critical, COALESCE(m.recall_count,0), '
@@ -1220,6 +1245,13 @@ def get_memory_detail(conn, project_id, agent_id, memory_id):
             "WHERE dl.target_type = 'memory' AND dl.target_id = ? "
             'ORDER BY dl.decision_id', (memory_id,)
         ).fetchall()
+    topics = []
+    if store._table_exists(conn, 'memory_topic'):
+        topics = conn.execute(
+            'SELECT kt.id FROM memory_topic mt '
+            'JOIN knowledge_topic kt ON kt.id = mt.topic_id '
+            'WHERE mt.memory_id = ? ORDER BY kt.id', (memory_id,)
+        ).fetchall()
     return {
         'memory': {
             'id': m[0], 'project_id': m[1], 'scope': m[2],
@@ -1252,6 +1284,7 @@ def get_memory_detail(conn, project_id, agent_id, memory_id):
             {'subject': r[0], 'predicate': r[1], 'object': r[2]}
             for r in triples
         ],
+        'topics': [r[0] for r in topics],
         'decisions': [
             {'id': r[0], 'title': r[1], 'status': r[2],
              'lifecycle': r[3], 'relation': r[4]}

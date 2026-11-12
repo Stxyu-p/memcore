@@ -38,6 +38,7 @@ Autonomous agent memory frameworks typically dump raw conversational text into u
 | **Bilingual Hybrid Retrieval** | BM25 fails on glued Thai/CJK, ad-hoc score scaling breaks. | **Reciprocal Rank Fusion (RRF $k=60$)**: fuses FTS5 BM25 with Thai substring lane. | Exact mathematical composite rank without score calibration. |
 | **Procedural Mastery** | Remembers facts, but forgets how to execute fixes. | **Skill Crystallization Protocol**: verified Skill Proofs & `SKILL.md`. | Reusable operational capability decoupled from fact recall. |
 | **Indirect Prompt Injection**| Web pages and logs silently inject permanent memories. | **Tainted Context Guard**: auto-accept veto on untrusted tools. | Strict candidate quarantine for external input. |
+| **Scattered Knowledge** | Facts pile up with no domain organization. | **Knowledge Topics (`topic`)**: global slug-path catalog + per-memory membership. | Organize memories into `trading/strategies`, `ai/llm`, … with tree hierarchy & topic-scoped recall/freshness. |
 
 ---
 

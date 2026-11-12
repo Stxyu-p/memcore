@@ -531,3 +531,29 @@ CREATE TRIGGER IF NOT EXISTS tripwire_au AFTER UPDATE ON tripwire BEGIN
 END;
 """
 
+_KNOWLEDGE_TOPICS = """
+-- 0023: governed knowledge topics (multi-domain organization).
+-- knowledge_topic is a GLOBAL catalog: the topic itself is shared system-wide,
+-- but which memories belong to a topic is per-memory and per-project via
+-- memory_topic (join keeps project/scope isolation naturally).
+CREATE TABLE IF NOT EXISTS knowledge_topic (
+    id            TEXT PRIMARY KEY,          -- human slug path: 'trading/strategies'
+    parent_id     TEXT REFERENCES knowledge_topic(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    description   TEXT,
+    freshness_aging_days  INTEGER,
+    freshness_stale_days  INTEGER,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_topic_parent ON knowledge_topic(parent_id);
+
+CREATE TABLE IF NOT EXISTS memory_topic (
+    memory_id   TEXT NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+    topic_id    TEXT NOT NULL REFERENCES knowledge_topic(id) ON DELETE CASCADE,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (memory_id, topic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_topic_topic ON memory_topic(topic_id);
+"""
+

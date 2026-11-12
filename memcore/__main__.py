@@ -46,6 +46,14 @@ from .cli_tripwire import (
     cmd_tripwire_disarm,
 )
 
+from .cli_topic import (
+    cmd_topic_create,
+    cmd_topic_delete,
+    cmd_topic_list,
+    cmd_topic_show,
+    cmd_topic_update,
+)
+
 from .cli_gotchas import cmd_gotchas
 
 from .cli_memory import (
@@ -188,6 +196,8 @@ def main(argv=None):
                    help='optional repository commit for provenance context')
     p.add_argument('--source-hash', default=None,
                    help='optional SHA-256; must match --source-file')
+    p.add_argument('--topic', action='append', default=None, dest='topics',
+                   help='optional knowledge topic slug (repeatable); ancestors auto-created')
     p.set_defaults(func=cmd_remember)
 
     p = sub.add_parser('search', help='FTS5 search over memories', parents=[common])
@@ -202,6 +212,8 @@ def main(argv=None):
                    help='optional ISO-8601 timestamp for point-in-time bitemporal query')
     p.add_argument('--changed-since', default=None, dest='changed_since',
                    help='optional ISO-8601 timestamp to return only memories updated since then')
+    p.add_argument('--topic', action='append', default=None, dest='topics',
+                   help='optional knowledge topic slug (repeatable) to narrow results')
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser('list', help='browse memories (read-only, filterable)', parents=[common])
@@ -221,6 +233,8 @@ def main(argv=None):
                    choices=['current', 'aging', 'stale'])
     p.add_argument('--limit', type=int, default=20)
     p.add_argument('--offset', type=int, default=0)
+    p.add_argument('--topic', action='append', default=None, dest='topics',
+                   help='optional knowledge topic slug (repeatable) to narrow results')
     p.add_argument('--json', action='store_true', dest='json')
     p.set_defaults(func=cmd_list)
 
@@ -349,6 +363,37 @@ def main(argv=None):
     dsp.add_argument('--rationale', required=True)
     dsp.add_argument('--reason', default=None)
     dsp.set_defaults(func=cmd_decision_supersede)
+
+    p = sub.add_parser('topic', help='governed knowledge topics (global catalog)', parents=[common])
+    tsub = p.add_subparsers(dest='subcommand', required=True)
+    tc = tsub.add_parser('create', parents=[common])
+    tc.add_argument('topic_id', help='slug path e.g. trading/strategies')
+    tc.add_argument('--name', default=None)
+    tc.add_argument('--description', default=None)
+    tc.add_argument('--json', action='store_true', dest='json')
+    tc.set_defaults(func=cmd_topic_create)
+    tl = tsub.add_parser('list', parents=[common])
+    tl.add_argument('--parent-id', default=None, dest='parent_id')
+    tl.add_argument('--json', action='store_true', dest='json')
+    tl.set_defaults(func=cmd_topic_list)
+    ts = tsub.add_parser('show', parents=[common])
+    ts.add_argument('topic_id')
+    ts.add_argument('--json', action='store_true', dest='json')
+    ts.set_defaults(func=cmd_topic_show)
+    tu = tsub.add_parser('update', parents=[common])
+    tu.add_argument('topic_id')
+    tu.add_argument('--name', default=None)
+    tu.add_argument('--description', default=None)
+    tu.add_argument('--parent-id', default=None, dest='parent_id')
+    tu.add_argument('--freshness-aging-days', type=int, default=None, dest='freshness_aging_days')
+    tu.add_argument('--freshness-stale-days', type=int, default=None, dest='freshness_stale_days')
+    tu.add_argument('--json', action='store_true', dest='json')
+    tu.set_defaults(func=cmd_topic_update)
+    td = tsub.add_parser('delete', parents=[common])
+    td.add_argument('topic_id')
+    td.add_argument('--cascade', action='store_true', default=False)
+    td.add_argument('--json', action='store_true', dest='json')
+    td.set_defaults(func=cmd_topic_delete)
 
     p = sub.add_parser('tripwire', help='tripwire registry: trap recurring failure loops', parents=[common])
     twsub = p.add_subparsers(dest='subcommand', required=True)

@@ -204,15 +204,47 @@ def store_triples(conn, memory_id: str, version_id: str, triples: list | None) -
     return inserted
 
 
+def store_topics(conn, memory_id: str, version_id: str | None, topics: list | None,
+                 replace: bool = False) -> int:
+    """Attach optional knowledge topics to a memory (many-to-many).
+
+    Returns count attached. Topics are global slugs; ancestors are auto-created.
+    Passing None/[] leaves the memory without topics (optional by design).
+    With replace=True, the previous topic set is removed first so deleting a
+    topic from a vault frontmatter actually unlinks it.
+    """
+    if not topics or not store._table_exists(conn, 'memory_topic'):
+        if replace and store._table_exists(conn, 'memory_topic'):
+            conn.execute("DELETE FROM memory_topic WHERE memory_id = ?", (memory_id,))
+        return 0
+    from .topic import ensure_topic_chain
+    if replace:
+        conn.execute("DELETE FROM memory_topic WHERE memory_id = ?", (memory_id,))
+    attached = 0
+    for topic in topics:
+        slug = ensure_topic_chain(conn, topic)
+        if not slug:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_topic (memory_id, topic_id) VALUES (?, ?)",
+            (memory_id, slug),
+        )
+        attached += 1
+    return attached
+
+
 def create_memory(conn, project_id, agent_id, content, scope='private',
                   memory_type='fact', lifecycle='candidate', idempotency_key=None,
                   reason=None, scope_detail=None, source_file=None,
                   source_commit=None, source_hash=None, when_to_use=None,
                   auto_source_file: bool = True, triples: list | None = None,
+                  topics: list | None = None,
                   _manage_transaction=True):
     """Create a memory + first immutable version. Tombstone guard applies.
 
     Returns (memory_id, version_id) or existing ids if idempotency_key replays.
+    topics is optional; when given, attaches the memory to global knowledge
+    topics (ancestors auto-created).
     """
     if not isinstance(memory_type, str) or not memory_type.strip():
         raise MemCoreError('memory_type must be a non-empty string')
@@ -263,6 +295,8 @@ def create_memory(conn, project_id, agent_id, content, scope='private',
         )
         if triples:
             store_triples(conn, mem_id, ver_id, triples)
+        if topics:
+            store_topics(conn, mem_id, ver_id, topics)
         _audit(conn, 'create', agent_id, mem_id, project_id,
                {'memory_id': mem_id, 'version_id': ver_id,
                 'scope': scope, 'content': content,
@@ -353,7 +387,7 @@ def _close_and_insert_version(conn, memory_id, agent_id, new_content, reason,
 def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=None,
               source_file=None, source_commit=None, source_hash=None,
               when_to_use=None, auto_source_file: bool = True,
-              triples: list | None = None):
+              triples: list | None = None, topics: list | None = None):
     """Correct a memory in place while preserving immutable version history.
 
     The old claim receives a scope-appropriate refusal fingerprint, its
@@ -403,6 +437,10 @@ def supersede(conn, memory_id, agent_id, new_content, reason=None, write_key=Non
             source_hash, source_commit, source_file, when_to_use=effective_when)
         if triples:
             store_triples(conn, memory_id, new_ver, triples)
+        if topics is not None:
+            # Explicit topic list replaces the previous set; None leaves it alone.
+            conn.execute("DELETE FROM memory_topic WHERE memory_id = ?", (memory_id,))
+            store_topics(conn, memory_id, new_ver, topics)
 
         tombstone_created = False
         if old_fp != new_fp and not _tombstone_active(
@@ -813,6 +851,9 @@ def _scan_freshness_decay(conn, now, aging_days, stale_days):
 
     Evaluates the exact same conditions — including the last_recalled
     reinforcement window — so the two callers can never drift apart.
+    Topic-scoped policies (knowledge_topic.freshness_aging_days /
+    freshness_stale_days) override the global thresholds for memories
+    attached to that topic.
     """
     cols = {r[1] for r in conn.execute('PRAGMA table_info(memory)')}
     reinforced = (
@@ -820,11 +861,22 @@ def _scan_freshness_decay(conn, now, aging_days, stale_days):
         "datetime(?, '-' || ? || ' days')) "
         if 'last_recalled' in cols else ''
     )
+    # Memories attached to a topic with a freshness override are excluded from
+    # the global scan so topic policies can both shorten AND lengthen windows.
+    override_excl = ""
+    if store._table_exists(conn, 'knowledge_topic') and store._table_exists(conn, 'memory_topic'):
+        override_excl = (
+            "AND NOT EXISTS (SELECT 1 FROM memory_topic mt "
+            "JOIN knowledge_topic kt ON kt.id = mt.topic_id "
+            "WHERE mt.memory_id = memory.id AND "
+            "(kt.freshness_aging_days IS NOT NULL OR kt.freshness_stale_days IS NOT NULL)) "
+        )
     params_aging = (now, aging_days) + (
         (now, REINFORCEMENT_WINDOW_DAYS) if 'last_recalled' in cols else ())
     aged = [r[0] for r in conn.execute(
         "SELECT id FROM memory WHERE freshness='current' "
         "AND datetime(updated_at) < datetime(?, '-' || ? || ' days') "
+        + override_excl
         + reinforced,
         params_aging,
     ).fetchall()]
@@ -833,9 +885,43 @@ def _scan_freshness_decay(conn, now, aging_days, stale_days):
     staled = [r[0] for r in conn.execute(
         "SELECT id FROM memory WHERE freshness='aging' "
         "AND datetime(updated_at) < datetime(?, '-' || ? || ' days') "
+        + override_excl
         + reinforced,
         params_stale,
     ).fetchall()]
+
+    # Topic-specific freshness policies: each memory's narrowest topic may
+    # shorten (or lengthen) its aging/stale windows. Run a per-topic scan and
+    # union the matches so no memory decays twice or is missed.
+    if store._table_exists(conn, 'knowledge_topic') and store._table_exists(conn, 'memory_topic'):
+        topic_rows = conn.execute(
+            'SELECT id, freshness_aging_days, freshness_stale_days '
+            'FROM knowledge_topic WHERE freshness_aging_days IS NOT NULL '
+            'OR freshness_stale_days IS NOT NULL'
+        ).fetchall()
+        for topic_id, t_aging, t_stale in topic_rows:
+            extra = (now, REINFORCEMENT_WINDOW_DAYS) if 'last_recalled' in cols else ()
+            if t_aging is not None:
+                aged += [r[0] for r in conn.execute(
+                    "SELECT m.id FROM memory m "
+                    "JOIN memory_topic mt ON mt.memory_id = m.id "
+                    "WHERE mt.topic_id = ? AND m.freshness='current' "
+                    "AND datetime(m.updated_at) < datetime(?, '-' || ? || ' days') "
+                    + reinforced,
+                    (topic_id, now, t_aging) + extra,
+                ).fetchall()]
+            if t_stale is not None:
+                staled += [r[0] for r in conn.execute(
+                    "SELECT m.id FROM memory m "
+                    "JOIN memory_topic mt ON mt.memory_id = m.id "
+                    "WHERE mt.topic_id = ? AND m.freshness='aging' "
+                    "AND datetime(m.updated_at) < datetime(?, '-' || ? || ' days') "
+                    + reinforced,
+                    (topic_id, now, t_stale) + extra,
+                ).fetchall()]
+
+    aged = list(dict.fromkeys(aged))
+    staled = list(dict.fromkeys(staled))
     return aged, staled
 
 

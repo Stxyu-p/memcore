@@ -82,8 +82,9 @@ class MemCore:
         lifecycle: str = "accepted",
         when_to_use: str | None = None,
         auto_source_file: bool = True,
+        topics: list[str] | None = None,
     ) -> str:
-        """Store a governed memory, optionally tied to a source file's SHA-256 and situational trigger."""
+        """Store a governed memory, optionally tied to a source file's SHA-256, situational trigger, and knowledge topics."""
         self._check_open()
         scrubbed_content = core.scrub_secrets(content)
         fp = core.fingerprint(scrubbed_content)
@@ -101,6 +102,7 @@ class MemCore:
             when_to_use=when_to_use,
             auto_source_file=auto_source_file,
             idempotency_key=f"remember:{self.project}:{self.agent}:{fp}",
+            topics=topics,
         )
         core.maybe_auto_corrob(self.conn, self.project, fp, self.agent)
         self.conn.commit()
@@ -116,6 +118,7 @@ class MemCore:
         as_of: str | None = None,
         changed_since: str | None = None,
         max_tokens: int | None = None,
+        topics: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Lexical search with governance checks and temporal/strict modes."""
         self._check_open()
@@ -128,6 +131,7 @@ class MemCore:
             mode=mode,
             as_of=as_of,
             changed_since=changed_since,
+            topics=topics,
         )
         p_chars = min(max(int(preview_chars or 180), 40), 500)
         # Batch-load version metadata (summary/when_to_use, source_file, source_hash)
@@ -230,6 +234,7 @@ class MemCore:
         source_hash: str | None = None,
         when_to_use: str | None = None,
         auto_source_file: bool = True,
+        topics: list[str] | None = None,
     ) -> str:
         """Update a memory with bitemporal history and optional source provenance."""
         self._check_open()
@@ -244,7 +249,47 @@ class MemCore:
             source_hash=source_hash,
             when_to_use=when_to_use,
             auto_source_file=auto_source_file,
+            topics=topics,
         )
+        self.conn.commit()
+        return res
+
+    def topic_create(
+        self,
+        topic_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a knowledge topic (ancestors auto-created)."""
+        self._check_open()
+        res = core.create_topic(
+            self.conn, topic_id, name=name, description=description
+        )
+        self.conn.commit()
+        return res
+
+    def topic_list(self, *, parent_id: str | None = None) -> list[dict[str, Any]]:
+        """List the global knowledge topic catalog."""
+        self._check_open()
+        return core.list_topics(self.conn, parent_id=parent_id)
+
+    def topic_get(self, topic_id: str) -> dict[str, Any] | None:
+        """Fetch one topic by slug."""
+        self._check_open()
+        return core.get_topic(self.conn, topic_id)
+
+    def topic_update(self, topic_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Update topic metadata (name/description/parent/freshness)."""
+        self._check_open()
+        res = core.update_topic(self.conn, topic_id, **kwargs)
+        self.conn.commit()
+        return res
+
+    def topic_delete(self, topic_id: str, *, cascade: bool = False) -> dict[str, int]:
+        """Delete a topic (refuses when populated unless cascade)."""
+        self._check_open()
+        res = core.delete_topic(self.conn, topic_id, cascade=cascade)
         self.conn.commit()
         return res
 

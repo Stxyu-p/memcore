@@ -15,6 +15,7 @@ from . import recall as _recall
 from . import doctor as _doctor
 from . import imports as _imports
 from . import decision as _decision
+from . import topic as _topic
 
 
 class _CoreFacade(types.ModuleType):
@@ -34,7 +35,7 @@ class _CoreFacade(types.ModuleType):
 _mod = _CoreFacade(__name__, __doc__)
 
 # Populate facade with all attributes from submodules
-for _m in (_write, _recall, _doctor, _imports, _decision):
+for _m in (_write, _recall, _doctor, _imports, _decision, _topic):
     for _k, _v in _m.__dict__.items():
         if not _k.startswith('__'):
             super(_CoreFacade, _mod).__setattr__(_k, _v)

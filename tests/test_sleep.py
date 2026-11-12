@@ -62,5 +62,45 @@ class TestSleepMetabolism(unittest.TestCase):
         self.assertIn("ThinkPad L570", report_txt)
 
 
+    def test_consolidate_does_not_merge_across_topics(self):
+        # Two memories with identical "ThinkPad L570:" prefix but DIFFERENT topics
+        # must NOT consolidate into one master record.
+        from memcore.write import create_memory
+        m1, _ = create_memory(
+            self.conn, self.pid, self.aid,
+            "ThinkPad L570: i5-7200U processor and 8GB RAM.",
+            scope="project", memory_type="fact", lifecycle="accepted",
+            topics=["hardware/laptop"],
+        )
+        m2, _ = create_memory(
+            self.conn, self.pid, self.aid,
+            "ThinkPad L570: SanDisk 128GB SATA SSD.",
+            scope="project", memory_type="fact", lifecycle="accepted",
+            topics=["notes/gear"],
+        )
+        stats = consolidate_memories(self.conn, agent_id=self.aid, project_id=self.pid)
+        # Both memories live in different partitions -> no cluster of size >=2.
+        self.assertEqual(stats["clusters_consolidated"], 0)
+        self.assertEqual(stats["memories_superseded"], 0)
+
+    def test_consolidate_merges_within_same_topic(self):
+        from memcore.write import create_memory
+        m1, _ = create_memory(
+            self.conn, self.pid, self.aid,
+            "ThinkPad L570: i5-7200U processor and 8GB RAM.",
+            scope="project", memory_type="fact", lifecycle="accepted",
+            topics=["hardware"],
+        )
+        m2, _ = create_memory(
+            self.conn, self.pid, self.aid,
+            "ThinkPad L570: SanDisk 128GB SATA SSD.",
+            scope="project", memory_type="fact", lifecycle="accepted",
+            topics=["hardware"],
+        )
+        stats = consolidate_memories(self.conn, agent_id=self.aid, project_id=self.pid)
+        self.assertEqual(stats["clusters_consolidated"], 1)
+        self.assertEqual(stats["memories_superseded"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

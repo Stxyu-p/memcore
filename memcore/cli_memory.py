@@ -38,6 +38,7 @@ def cmd_remember(args):
             source_commit=args.source_commit,
             source_hash=args.source_hash,
             when_to_use=getattr(args, 'when_to_use', None),
+            topics=getattr(args, 'topics', None),
         )
         print(f'remembered: {mem_id} (version {ver_id})')
     except core.MemCoreError as e:
@@ -64,6 +65,7 @@ def cmd_search(args):
                 mode=getattr(args, 'mode', 'standard'),
                 as_of=getattr(args, 'as_of', None),
                 changed_since=getattr(args, 'changed_since', None),
+                topics=getattr(args, 'topics', None),
             )
         except core.MemCoreError as e:
             sys.exit(f'error: {e}')
@@ -92,6 +94,7 @@ def cmd_list(args):
             scope=args.scope, lifecycle=args.lifecycle, memory_type=args.type,
             verification=args.verification, freshness=args.freshness,
             limit=args.limit, offset=args.offset,
+            topics=getattr(args, 'topics', None),
         )
     finally:
         conn.close()

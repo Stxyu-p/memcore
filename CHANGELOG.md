@@ -6,6 +6,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Knowledge Topics (global catalog + per-memory membership)**
+  - `knowledge_topic` (slug path PK, parent_id tree, optional freshness policy)
+    and `memory_topic` (many-to-many) via migration `0023_knowledge_topics`.
+  - `create_memory`/`supersede` accept optional `topics=[...]`; ancestors are
+    auto-created and invalid slugs are rejected. Topics remain optional — a
+    memory without topics works exactly as before.
+  - Topic-aware read: `search`/`recall`/`list_memories` accept `topics=[...]`
+    and `get_memory_detail` returns attached topics. Project/scope isolation
+    is preserved through the memory join.
+  - Sleep consolidation now partitions by `(topic_id, scope, memory_type)`
+    before Jaccard clustering, so cross-domain memories never merge.
+  - New MCP tools `topic_create`, `topic_list`, `topic_show`, `topic_update`,
+    `topic_delete`; `memory_remember`/`memory_search`/`memory_list` accept
+    `topics`.
+  - New CLI: `memcore topic create|list|show|update|delete` and `--topic`
+    flags on `remember`/`search`/`list`.
+  - Vault export/import round-trips topics via wiki frontmatter `topics:`.
+  - Topic-specific freshness policy: `freshness_aging_days` /
+    `freshness_stale_days` on a topic override global decay for its memories.
+  - Python SDK: `client.topic_create/list/get/update/delete` and `topics`
+    kwargs on `remember`/`search`/`supersede`.
+
 ## [2.11.0] - 2026-11-09
 
 ### Added

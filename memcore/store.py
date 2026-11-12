@@ -35,6 +35,7 @@ from .schema_defs import _SCOPE_DETAIL
 from .schema_defs import _SEMANTIC_ANALYSIS
 from .schema_defs import _UNICODE_FINGERPRINT_REPAIR
 from .schema_defs import _TRIPWIRE_REGISTRY
+from .schema_defs import _KNOWLEDGE_TOPICS
 
 from .store_backup import (
     verify_backups,
@@ -202,6 +203,7 @@ CREATE INDEX IF NOT EXISTS idx_tombstone_fingerprint ON tombstone(claim_fingerpr
     ('0020_binary_vector', _BINARY_VECTOR_COLUMN),
     ('0021_decision_layer', _DECISION_LAYER),
     ('0022_drop_embedding', _DROP_EMBEDDING),
+    ('0023_knowledge_topics', _KNOWLEDGE_TOPICS),
 ]
 
 

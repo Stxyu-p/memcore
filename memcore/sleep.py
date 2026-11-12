@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any
 
 from memcore import write as _write
+from memcore import store
 
 
 def _tokenize(text: str) -> set[str]:
@@ -78,7 +79,30 @@ def consolidate_memories(
         ORDER BY m.created_at ASC
     """
     rows = conn.execute(sql, (project_id,)).fetchall()
-    clusters = cluster_memories(rows)
+
+    # Partition rows by (topic set, scope, type) so consolidation never merges
+    # across knowledge domains or visibility classes. Memories with no topic
+    # go into their own partition (frozenset() key). Using the full topic set
+    # (not a single representative) keeps memories that share ANY topic in the
+    # same partition so they can still consolidate.
+    topic_of = {}
+    if store._table_exists(conn, 'memory_topic'):
+        for (mem_id, topic_id) in conn.execute(
+            'SELECT memory_id, topic_id FROM memory_topic'
+        ).fetchall():
+            topic_of.setdefault(mem_id, set()).add(topic_id)
+
+    partitions: dict[tuple, list] = {}
+    for r in rows:
+        mid = r[0]
+        tset = topic_of.get(mid)
+        key_topic = frozenset(tset) if tset else frozenset()
+        key = (key_topic, r[2], r[3])
+        partitions.setdefault(key, []).append(r)
+
+    clusters: list[list] = []
+    for key in sorted(partitions, key=lambda k: (sorted(k[0]), k[1], k[2])):
+        clusters.extend(cluster_memories(partitions[key]))
 
     for cluster in clusters:
         if len(cluster) < 2:

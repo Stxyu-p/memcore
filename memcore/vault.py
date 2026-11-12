@@ -6,6 +6,7 @@ import re
 import sqlite3
 from typing import Any
 
+from . import store
 
 def _slugify(text: str) -> str:
     cleaned = re.sub(r"[^\w\s-]", "", str(text or "")).strip().lower()
@@ -116,6 +117,15 @@ def export_vault(
             meta["source_file"] = r[7]
         if r[8]:
             meta["source_commit"] = r[8]
+        # Optional knowledge topics on the memory (global slugs).
+        if store._table_exists(conn, 'memory_topic'):
+            t_rows = conn.execute(
+                'SELECT kt.id FROM memory_topic mt '
+                'JOIN knowledge_topic kt ON kt.id = mt.topic_id '
+                'WHERE mt.memory_id = ? ORDER BY kt.id', (r[0],)
+            ).fetchall()
+            if t_rows:
+                meta["topics"] = ",".join(row[0] for row in t_rows)
         first_line = r[6].strip().split("\n")[0]
         slug = _slugify(first_line)
         f_name = f"{slug}.md" if slug != "item" else f"{r[0]}.md"
@@ -280,6 +290,10 @@ def import_vault(
             body = body.strip()
             if not body:
                 continue
+            parsed_topics = None
+            raw_topics = meta.get("topics")
+            if raw_topics:
+                parsed_topics = [t.strip() for t in str(raw_topics).split(",") if t.strip()]
             mem_id = meta.get("id")
             if mem_id:
                 row = conn.execute(
@@ -289,20 +303,23 @@ def import_vault(
                 if row is not None:
                     curr_content, curr_life = row[0].strip(), row[1]
                     if curr_content != body:
-                        _write.supersede(conn, mem_id, agent_id, body, reason="Markdown vault sync")
+                        _write.supersede(conn, mem_id, agent_id, body, reason="Markdown vault sync", topics=parsed_topics)
                         desired_life = meta.get("lifecycle", curr_life)
                         if desired_life == "accepted":
                             conn.execute("UPDATE memory SET lifecycle='accepted' WHERE id=?", (mem_id,))
                             conn.commit()
                         stats["memories_superseded"] += 1
                     else:
+                        if parsed_topics is not None:
+                            _write.store_topics(conn, mem_id, None, parsed_topics, replace=True)
                         stats["unchanged"] += 1
                 else:
                     _write.create_memory(
                         conn, project_id, agent_id, body,
                         scope=meta.get("scope", "project"),
                         memory_type=meta.get("type", "fact"),
-                        lifecycle=meta.get("lifecycle", "accepted")
+                        lifecycle=meta.get("lifecycle", "accepted"),
+                        topics=parsed_topics,
                     )
                     stats["memories_created"] += 1
             else:
@@ -310,7 +327,8 @@ def import_vault(
                     conn, project_id, agent_id, body,
                     scope=meta.get("scope", "project"),
                     memory_type=meta.get("type", "fact"),
-                    lifecycle=meta.get("lifecycle", "accepted")
+                    lifecycle=meta.get("lifecycle", "accepted"),
+                    topics=parsed_topics,
                 )
                 stats["memories_created"] += 1
 

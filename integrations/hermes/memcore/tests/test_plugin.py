@@ -1011,5 +1011,20 @@ class TestToolHostilePayloads(ToolTestBase):
                 self.assertIn('error', out)
 
 
+class TestCtxConfig(unittest.TestCase):
+    """An explicit ctx config wins even when empty — no bleed from the live profile."""
+
+    def test_empty_or_invalid_ctx_config_does_not_fall_back_to_live(self):
+        with mock.patch.object(plugin, '_load_live_config',
+                               side_effect=AssertionError('live config must not be loaded')):
+            self.assertEqual(plugin._ctx_cfg({'config': {}}), {})
+            self.assertEqual(plugin._ctx_cfg({'config': None}), {})
+            self.assertEqual(plugin._ctx_cfg(mock.Mock(config={})), {})
+
+    def test_nonempty_config_is_returned_as_is(self):
+        cfg = make_config()
+        self.assertIs(plugin._ctx_cfg({'config': cfg}), cfg)
+
+
 if __name__ == '__main__':
     unittest.main()

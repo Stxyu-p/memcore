@@ -387,9 +387,11 @@ class MemCoreMemoryProvider(MemoryProvider):
         # Tri-Hub Synergy: Attach trimtok cumulative compression telemetry
         try:
             import os, pathlib, sys
-            tt_dir = pathlib.Path(os.environ.get('LOCALAPPDATA', '')) / 'hermes/plugins/trimtok'
-            if tt_dir.is_dir() and str(tt_dir) not in sys.path:
-                sys.path.insert(0, str(tt_dir))
+            local_app_data = os.environ.get('LOCALAPPDATA')
+            if local_app_data:
+                tt_dir = pathlib.Path(local_app_data) / 'hermes/plugins/trimtok'
+                if tt_dir.is_dir() and str(tt_dir) not in sys.path:
+                    sys.path.insert(0, str(tt_dir))
             from trimtok.__init__ import _usage_summary
             data['trimtok'] = _usage_summary().splitlines()[0]
         except Exception:

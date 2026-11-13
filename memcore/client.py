@@ -254,6 +254,13 @@ class MemCore:
         self.conn.commit()
         return res
 
+    def suggest_topics(self, content: str, *, limit: int = 3) -> list[dict[str, Any]]:
+        """Rank existing topics that already cover `content` (read-only, no telemetry)."""
+        self._check_open()
+        return core.suggest_topics(
+            self.conn, self.project, self.agent, content, limit=limit
+        )
+
     def topic_create(
         self,
         topic_id: str,

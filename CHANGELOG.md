@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Topic suggestions on remember (`memcore/topic_suggest.py`).** Storing a
+  memory without topics now ranks the existing topics by lexical coverage —
+  the share of the new content's salient tokens already present in that
+  topic's own memories — and reports them instead of leaving the memory
+  unclassified. `memory_remember` accepts `topic_mode`: `suggest` (default,
+  returns `suggested_topics`), `auto` (attaches the best match), or `off`.
+  The CLI prints a one-line hint. Read-only and telemetry-silent: the probe
+  queries the FTS index directly, so it never enters recall telemetry.
+  A genuinely new subject is left unnamed — the engine does not invent slugs.
+
 ## [2.12.0] - 2026-11-12
 
 ### Added

@@ -120,6 +120,15 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": "Optional knowledge topic slugs (e.g. ['trading/strategies']); ancestors auto-created",
                 },
+                "topic_mode": {
+                    "type": "string",
+                    "enum": ["off", "suggest", "auto"],
+                    "description": (
+                        "What to do when no topics are given: 'suggest' (default) ranks existing "
+                        "topics by lexical coverage and returns them in suggested_topics; 'auto' "
+                        "attaches the best match; 'off' skips the check. Never invents a new slug."
+                    ),
+                },
             },
             "required": ["content"],
             "additionalProperties": False,
@@ -612,7 +621,15 @@ def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
             topics = [str(t).strip() for t in topics if str(t).strip()]
         else:
             raise ValueError("topics must be a list or comma-separated string")
+    topic_mode = str(args.get("topic_mode") or "suggest").strip().lower()
+    if topic_mode not in ("off", "suggest", "auto"):
+        raise ValueError("topic_mode must be off, suggest or auto")
     with _client(args) as mc:
+        suggested: list[dict[str, Any]] = []
+        if not topics and topic_mode != "off":
+            suggested = mc.suggest_topics(content)
+            if topic_mode == "auto" and suggested:
+                topics = [suggested[0]["topic_id"]]
         try:
             mid = mc.remember(
                 content.strip(),
@@ -656,6 +673,11 @@ def _tool_remember(args: dict[str, Any]) -> dict[str, Any]:
             "memory_type": mtype,
             "receipt": f"🧠 [MemCore: remembered {mtype} #{mid}]",
         }
+        if topic_mode == "auto":
+            if topics:
+                out["auto_topics"] = topics
+        elif suggested:
+            out["suggested_topics"] = suggested
         if row and row[0]:
             out["source_file"] = row[0]
         if row and row[1]:

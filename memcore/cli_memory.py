@@ -41,6 +41,12 @@ def cmd_remember(args):
             topics=getattr(args, 'topics', None),
         )
         print(f'remembered: {mem_id} (version {ver_id})')
+        if not getattr(args, 'topics', None):
+            hints = core.suggest_topics(conn, project_id, agent_id, args.content)
+            if hints:
+                top = hints[0]
+                print(f"topic suggestion: {top['topic_id']} "
+                      f"({top['coverage']:.0%} token overlap) — pass --topic to attach")
     except core.MemCoreError as e:
         sys.exit(f'error: {e}')
     finally:

@@ -133,3 +133,22 @@ Key design:
 3. **Auto-ancestor pitfall:** `_ensure_topic_chain('a/b/c')` ต้องไม่สร้างซ้ำ และ cycle guard กัน `parent=ตัวเอง`
 4. **Sleep regression:** partition ใหม่ต้องไม่ทำให้ cluster เดิมหาย/แตก (เทียบก่อน-หลัง)
 5. **Vault round-trip:** topic กลับครบทั้ง export→import และ rebuild
+
+## 8. Task 10 — Topic suggestion (implemented 2026-11-12)
+
+Decisions confirmed with พี่โชค:
+
+1. **Trigger:** `remember` ที่ไม่มี topic เท่านั้น (ไม่แตะ search/sleep)
+2. **Source:** topic ที่มีอยู่แล้วถ้าใกล้เคียงพอ; เรื่องใหม่ไม่เดา slug เอง — ปล่อยให้ caller ตั้งชื่อ
+3. **Surface:** ค่าเริ่มต้นคือแจ้ง (`suggested_topics` ใน MCP response, hint บรรทัดเดียวใน CLI) และมี `topic_mode="auto"` ให้แนบให้เอง
+
+Scoring = **lexical coverage**: สัดส่วน salient token ของ content ใหม่ที่ปรากฏในความจำของ topic นั้น
+(`min_coverage=0.3`, `sample=20`, คืนสูงสุด 3) — วัดได้ อธิบายได้ ไม่ต้องมี embedding
+
+Implementation notes:
+- ยิง FTS5 ตรง (`memory_version_fts` → `memory_version` → `memory` → `memory_topic`) ด้วย pattern เดียวกับ `_run_fts_lane`
+  **ไม่เรียก `recall.search()`** เพราะจะเขียน recall telemetry ทำให้ hit-rate จริงเพี้ยน
+- project/scope isolation มาจาก memory join + `_recall_tombstone_guard` เหมือน lane อื่น
+- `auto` คำนวณ suggestion **ก่อน** create แล้วส่งเข้า `topics=` (attach ใน transaction เดียว)
+- Tests: `harness/test_topic_suggest.py` (13 เคส: ranking, threshold, project/private isolation, no telemetry, MCP 3 modes, CLI smoke)
+

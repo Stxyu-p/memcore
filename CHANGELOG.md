@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-11-12
+
 ### Added
 - **Topic suggestions on remember (`memcore/topic_suggest.py`).** Storing a
   memory without topics now ranks the existing topics by lexical coverage —

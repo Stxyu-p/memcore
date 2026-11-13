@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Vault export is atomic and no longer deletes before it writes.** Wiki,
+  profile, decisions and tombstones are written through
+  `write_support.atomic_write_text` (temp file + `os.replace`), so a crash or
+  full disk can no longer leave a half-written Markdown file. The stale-file
+  cleanup that removes a superseded memory's old filename now runs *after* the
+  writes, closing the window where a failure deleted the previous file first.
+  Existing files are indexed in one pass and rewritten only when their
+  rendered content actually changed: a repeat export writes 2 files instead of
+  58 and drops from ~157 ms to ~21 ms.
+- **Hermes plugin mirrors the vault at most once per 30 s**
+  (`_VAULT_EXPORT_MIN_INTERVAL`) instead of a full export on every memory
+  write, where the export was 99% of the write path's cost (243 ms of a
+  243 ms `remember`). SQLite stays authoritative; an unmirrored write is
+  picked up by the next export, sleep consolidation, or `memcore vault export`.
+- **Recall no longer pays a round-trip per hit.** `record_recall` bumps all
+  recalled rows in one statement per 500 ids (1.19 ms → 0.38 ms for 10 rows),
+  and source-file staleness checks reuse a `(path, mtime_ns, size)` digest
+  cache instead of re-hashing unchanged files (1.17 ms → 0.49 ms warm, cold
+  spike 39 ms → 3.9 ms).
+
 ## [2.13.0] - 2026-11-12
 
 ### Added

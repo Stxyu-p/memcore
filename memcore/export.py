@@ -24,6 +24,7 @@ import os
 import pathlib
 
 from . import core
+from .write_support import atomic_write_text as _atomic_write_text
 
 
 class ExportTargetError(core.MemCoreError, ValueError):
@@ -153,25 +154,6 @@ def rank_for_export(conn, project_id, agent_id, limit, include_private=False):
 def _label(row):
     return '[%s | %s | %s | %s]' % (
         row[1], row[2], row[3], row[4])
-
-
-def _atomic_write_text(path: pathlib.Path, text: str) -> None:
-    """H8: write via a temp file in the same directory, then os.replace().
-
-    A crash, a killed process, or a full disk mid-write must never leave the
-    destination half-written; the previous file stays intact until the atomic
-    rename. The temp file is removed on any failure.
-    """
-    tmp = path.with_name(f'{path.name}.tmp.{os.getpid()}')
-    try:
-        tmp.write_text(text, encoding='utf-8')
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def render(rows, title, project, generated_at=None, generator=True,

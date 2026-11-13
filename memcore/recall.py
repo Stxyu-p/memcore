@@ -232,11 +232,15 @@ def record_recall(conn, memory_ids) -> int:
             return 0
         now = _eval_now_iso()
         touched = 0
-        for mem_id in ids:
+        # One statement per 500 ids: SQLite caps host parameters (999 on older
+        # builds), and a per-id loop cost a round-trip per hit on the read path.
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ','.join('?' for _ in chunk)
             cur = conn.execute(
                 'UPDATE memory SET recall_count = recall_count + 1, '
-                'last_recalled = ? WHERE id = ?',
-                (now, mem_id),
+                f'last_recalled = ? WHERE id IN ({marks})',
+                (now, *chunk),
             )
             touched += cur.rowcount
         conn.commit()
@@ -330,18 +334,40 @@ def _merge_exact_fallback(base_rows, exact_rows, limit, user_query,
 
 
 
+#: (path, mtime_ns, size) -> sha256. Recall re-checks source files on every
+#: query; hashing an unchanged file is pure waste.
+_SOURCE_DIGEST_CACHE: dict[tuple[str, int, int], str] = {}
+_SOURCE_DIGEST_CACHE_MAX = 512
+
+
+def _cached_file_digest(p) -> str:
+    """sha256 of a file, re-read only when mtime or size changed.
+
+    shortcut: same-size rewrite inside one mtime tick is not detected, upgrade
+    to a content-keyed cache if a filesystem with coarse mtime shows up.
+    """
+    import hashlib
+    st = p.stat()
+    key = (str(p), st.st_mtime_ns, st.st_size)
+    digest = _SOURCE_DIGEST_CACHE.get(key)
+    if digest is None:
+        digest = hashlib.sha256(p.read_bytes()).hexdigest()
+        if len(_SOURCE_DIGEST_CACHE) >= _SOURCE_DIGEST_CACHE_MAX:
+            _SOURCE_DIGEST_CACHE.clear()
+        _SOURCE_DIGEST_CACHE[key] = digest
+    return digest
+
+
 def _is_single_source_stale(source_file: str | None, source_hash: str | None) -> bool:
     """Read-only SHA-256 check for a single source file (never mutates DB)."""
     if not source_file or not source_hash:
         return False
-    import hashlib
     import pathlib
     try:
         p = pathlib.Path(source_file)
         if not p.is_absolute() or not p.is_file():
             return False
-        digest = hashlib.sha256(p.read_bytes()).hexdigest()
-        return digest.lower() != str(source_hash).lower()
+        return _cached_file_digest(p).lower() != str(source_hash).lower()
     except Exception:
         return False
 

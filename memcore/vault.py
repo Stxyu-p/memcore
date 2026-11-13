@@ -8,6 +8,7 @@ import sqlite3
 from typing import Any
 
 from . import store
+from .write_support import atomic_write_text
 
 def _slugify(text: str) -> str:
     cleaned = re.sub(r"[^\w\s-]", "", str(text or "")).strip().lower()
@@ -90,7 +91,7 @@ def export_vault(
                 meta["source_commit"] = r[8]
             prof_blocks.append(_render_frontmatter(meta, r[6]))
             stats["profile_memories"] += 1
-        (v_path / "profile.md").write_text("\n".join(prof_blocks), encoding="utf-8")
+        atomic_write_text(v_path / "profile.md", "\n".join(prof_blocks))
         stats["files_written"] += 1
 
     # 2. Wiki (Facts, Notes)
@@ -110,23 +111,27 @@ def export_vault(
 
     wiki_rows = conn.execute(wiki_sql, w_params).fetchall()
 
-    # Drop stale wiki files for memories we are about to rewrite: a supersede
-    # changes the content, hence the slug-based filename, and the old file would
-    # otherwise survive as a contradictory duplicate for the same memory id.
     exported_ids = {r[0] for r in wiki_rows}
-    if exported_ids:
-        for stale_file in wiki_path.glob("*.md"):
-            try:
-                entries = _parse_multi_frontmatter(stale_file.read_text(encoding="utf-8"))
-            except Exception:
+    # One pass over the wiki directory: existing files are parsed once and
+    # indexed both ways, so a rewrite reuses its own filename, an unchanged
+    # file is never rewritten, and a failure mid-export cannot delete first.
+    ids_by_path: dict[pathlib.Path, set[str]] = {}
+    existing_text: dict[pathlib.Path, str] = {}
+    current_path: dict[str, pathlib.Path] = {}
+    for existing in sorted(wiki_path.glob("*.md")):
+        try:
+            text = existing.read_text(encoding="utf-8")
+            entries = _parse_multi_frontmatter(text)
+        except Exception:
+            continue
+        existing_text[existing] = text
+        for meta, _body in entries:
+            mid = meta.get("id")
+            if not mid:
                 continue
-            for meta, _body in entries:
-                if meta.get("id") in exported_ids:
-                    try:
-                        stale_file.unlink()
-                    except OSError:
-                        pass
-                    break
+            ids_by_path.setdefault(existing, set()).add(mid)
+            current_path.setdefault(mid, existing)
+    written_files: set[pathlib.Path] = set()
 
     for r in wiki_rows:
         meta = {
@@ -160,14 +165,26 @@ def export_vault(
         first_line = r[6].strip().split("\n")[0]
         slug = _slugify(first_line)
         f_name = f"{slug}.md" if slug != "item" else f"{r[0]}.md"
-        out_file = wiki_path / f_name
-        # Handle filename collisions
-        if out_file.exists():
-            f_name = f"{slug}-{r[0][:8]}.md"
-            out_file = wiki_path / f_name
-        out_file.write_text(_render_frontmatter(meta, r[6]), encoding="utf-8")
+        desired = wiki_path / f_name
+        owners = ids_by_path.get(desired, set())
+        if desired in written_files or (owners and owners != {r[0]}):
+            # another memory holds this filename; keep ours distinguishable
+            desired = wiki_path / f"{slug}-{r[0][:8]}.md"
+        text = _render_frontmatter(meta, r[6])
+        if existing_text.get(desired) != text:
+            atomic_write_text(desired, text)
+            stats["files_written"] += 1
+        written_files.add(desired)
         stats["wiki_memories"] += 1
-        stats["files_written"] += 1
+
+    # Drop the previous file of any memory whose slug changed (a supersede
+    # renames it). Runs after the writes, so a failure leaves the old file.
+    for mid, old_path in current_path.items():
+        if mid in exported_ids and old_path not in written_files:
+            try:
+                old_path.unlink()
+            except OSError:
+                pass
 
     # 3. Decisions
     dec_sql = """
@@ -202,7 +219,7 @@ def export_vault(
         d_slug = _slugify(d[3])
         d_date = meta["date"] or "undated"
         dec_file = decisions_path / f"{d_date}-{d_slug}.md"
-        dec_file.write_text(_render_frontmatter(meta, body), encoding="utf-8")
+        atomic_write_text(dec_file, _render_frontmatter(meta, body))
         stats["decisions"] += 1
         stats["files_written"] += 1
 
@@ -215,7 +232,7 @@ def export_vault(
             # Full fingerprint: a truncated one cannot block the claim it names.
             tomb_lines.append(f"- **#{t[0]}** [`{t[2]}`] {t[3]} *(fp: {t[1]})*")
         tomb_lines.append("")
-        (v_path / "tombstones.md").write_text("\n".join(tomb_lines), encoding="utf-8")
+        atomic_write_text(v_path / "tombstones.md", "\n".join(tomb_lines))
         stats["tombstones"] = len(tomb_rows)
         stats["files_written"] += 1
 

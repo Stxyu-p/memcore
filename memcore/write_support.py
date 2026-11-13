@@ -397,3 +397,23 @@ def _coerce_now(now) -> str:
     if text:
         return text
     return _eval_now_iso()
+
+
+def atomic_write_text(path, text: str) -> None:
+    """Write via a temp file in the same directory, then os.replace().
+
+    A crash, a killed process, or a full disk mid-write must never leave the
+    destination half-written; the previous file stays intact until the atomic
+    rename. The temp file is removed on any failure.
+    """
+    path = pathlib.Path(path)
+    tmp = path.with_name(f'{path.name}.tmp.{os.getpid()}')
+    try:
+        tmp.write_text(text, encoding='utf-8')
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise

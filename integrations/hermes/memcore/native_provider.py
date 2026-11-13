@@ -38,6 +38,9 @@ except ImportError:  # direct module load in regression tests
 logger = logging.getLogger(__name__)
 
 
+_VAULT_EXPORT_MIN_INTERVAL = 30.0
+
+
 class MemCoreMemoryProvider(MemoryProvider):
     def __init__(self, plugin_llm=None):
         self._config = {}
@@ -444,8 +447,23 @@ class MemCoreMemoryProvider(MemoryProvider):
         try:
             vault_dir = pathlib.Path(self._store_path).parent / 'vault'
             if vault_dir.is_dir():
-                from memcore.vault import export_vault
-                export_vault(conn, str(vault_dir))
+                marker = vault_dir / '.last_export'
+                now = time.time()
+                last_export = 0.0
+                try:
+                    last_export = float(marker.read_text(encoding='utf-8').strip())
+                except Exception:
+                    pass
+                # A full vault export costs ~150ms+ and grows with the vault;
+                # writes usually arrive in bursts, so mirror at most every
+                # _VAULT_EXPORT_MIN_INTERVAL seconds. The vault stays a mirror:
+                # an unmirrored write is still authoritative in SQLite and is
+                # picked up by the next export, sleep consolidation, or
+                # `memcore vault export`.
+                if now - last_export >= _VAULT_EXPORT_MIN_INTERVAL:
+                    from memcore.vault import export_vault
+                    export_vault(conn, str(vault_dir))
+                    marker.write_text(str(now), encoding='utf-8')
         except Exception:
             pass
 

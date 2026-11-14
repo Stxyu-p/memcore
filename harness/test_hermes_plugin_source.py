@@ -28,13 +28,12 @@ class HermesPluginSourceTests(unittest.TestCase):
         self.assertFalse((PLUGIN_ROOT / 'dashboard').exists())
         self.assertFalse((PLUGIN_ROOT / 'desktop').exists())
 
-    def test_plugin_version_is_0_8_8(self):
+    def test_plugin_has_no_stale_hardcoded_version(self):
         plugin_yaml = (PLUGIN_ROOT / 'plugin.yaml').read_text(encoding='utf-8')
-        version_line = next(
+        version_lines = [
             line for line in plugin_yaml.splitlines() if line.startswith('version:')
-        )
-        version = version_line.split(':', 1)[1].strip()
-        self.assertEqual(version, '0.8.8')
+        ]
+        self.assertEqual(version_lines, [])
 
     def test_source_has_no_machine_specific_absolute_checkout(self):
         for relative in ('plugin.py', 'native_provider.py'):

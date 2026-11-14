@@ -318,8 +318,6 @@ class MemCoreMemoryProvider(MemoryProvider):
     @classmethod
     def _condense_prefetch_query(cls, query: str, max_chars: int = 800) -> str:
         text = str(query or '').strip()
-        if len(text) <= max_chars:
-            return text
         idx = text.find(cls._ATTACHED_CTX_MARKER)
         if idx > 0:
             text = text[:idx].strip()

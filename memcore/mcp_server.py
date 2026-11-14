@@ -14,7 +14,7 @@ Speaks newline-delimited JSON-RPC 2.0 on stdin/stdout. Tools:
   memory_status         — inspect MemCore database health, WAL mode, and memory counts
 
 Register in Antigravity, Claude Code, Codex, Cursor, or any MCP client:
-  python C:/Users/BlankScreen/Workspace/memcore/mcp_server.py
+  python /path/to/memcore/mcp_server.py
 """
 
 from __future__ import annotations
@@ -32,13 +32,13 @@ if _ROOT not in sys.path:
 try:
     from . import core, gotchas, ingest, progressive, store, tripwire
     from .client import DEFAULT_DB, MemCore
-    from .write_support import ContradictionHold
+    from .write_support import ContradictionHold, __version__ as _PKG_VERSION
 except ImportError:
     from memcore import core, gotchas, ingest, progressive, store, tripwire  # type: ignore
     from memcore.client import DEFAULT_DB, MemCore  # type: ignore
-    from memcore.write_support import ContradictionHold  # type: ignore
+    from memcore.write_support import ContradictionHold, __version__ as _PKG_VERSION  # type: ignore
 
-SERVER_INFO = {"name": "memcore", "version": "2.13.1"}
+SERVER_INFO = {"name": "memcore", "version": _PKG_VERSION}
 FALLBACK_PROTOCOL = "2024-11-05"
 SERVER_INSTRUCTIONS = (
     "MemCore — Governed Bitemporal Memory Engine (SQLite WAL + FTS5 BM25).\n\n"

@@ -805,3 +805,12 @@ class NativeProviderTest(unittest.TestCase):
         meta_call = p._event_metadata(call_msgs)
         self.assertTrue(meta_call.get('tainted'))
 
+    def test_condense_strips_short_attachment_noise_and_version_matches_pyproject(self):
+        from memcore import mcp_server, write_support
+        short = '@file:C:/tmp/log.txt\nfix memcore recall\n--- Attached Context ---\nnoise words'
+        self.assertEqual(
+            MemCoreMemoryProvider._condense_prefetch_query(short),
+            'fix memcore recall',
+        )
+        self.assertEqual(mcp_server.SERVER_INFO['version'], write_support.__version__)
+

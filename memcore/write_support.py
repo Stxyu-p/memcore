@@ -14,7 +14,24 @@ from datetime import timezone
 
 
 
-__version__ = "2.13.1"  # keep in step with pyproject; read via importlib.metadata
+def _resolve_version() -> str:
+    pyproject = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if pyproject.is_file():
+        m = re.search(
+            r'^version\s*=\s*["\']([^"\']+)["\']',
+            pyproject.read_text(encoding="utf-8", errors="ignore"),
+            re.M,
+        )
+        if m:
+            return m.group(1).strip()
+    try:
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("memcore")
+    except Exception:
+        return "0.0.0"
+
+
+__version__ = _resolve_version()
 
 
 

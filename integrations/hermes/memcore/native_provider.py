@@ -312,14 +312,34 @@ class MemCoreMemoryProvider(MemoryProvider):
         hits = finalized[pinned_count:]
         return pinned, hits
 
+    _ATTACHED_CTX_MARKER = '\n--- Attached Context ---'
+    _AT_FILE_LINE_RE = re.compile(r'^\s*@file:\S+\s*$', re.MULTILINE)
+
+    @classmethod
+    def _condense_prefetch_query(cls, query: str, max_chars: int = 800) -> str:
+        text = str(query or '').strip()
+        if len(text) <= max_chars:
+            return text
+        idx = text.find(cls._ATTACHED_CTX_MARKER)
+        if idx > 0:
+            text = text[:idx].strip()
+        text = cls._AT_FILE_LINE_RE.sub('', text).strip()
+        if not text:
+            text = str(query or '').strip()
+        if len(text) <= max_chars:
+            return text
+        half = max_chars // 2
+        return (text[:half].rstrip() + ' ' + text[-(max_chars - half - 1):].lstrip()).strip()
+
     def prefetch(self, query: str, *, session_id: str = '') -> str:
         self._last_recall_count = 0
         if not query or self._budget <= 0 or self._max_items <= 0:
             return ''
+        condensed_query = self._condense_prefetch_query(query)
         _trivial = getattr(agent_plugin, '_is_trivial_query', None)
         if callable(_trivial):
             try:
-                if _trivial(query):
+                if _trivial(condensed_query):
                     # Same trivial definition the ingest journal uses:
                     # greeting/ack turns inject nothing, not even pinned.
                     return ''
@@ -329,7 +349,7 @@ class MemCoreMemoryProvider(MemoryProvider):
         # Opening a WAL store costs ~4.6ms, dominated by PRAGMA synchronous,
         # so a fresh handle per turn dominated the recall path.
         conn = agent_plugin._get_conn(self._store_path)
-        pinned, hits = self._recall_rows(conn, query)
+        pinned, hits = self._recall_rows(conn, condensed_query)
         if getattr(self, '_compact_index', False):
             builder = getattr(agent_plugin, 'build_compact_index_block', agent_plugin.build_recall_block)
             block = builder(pinned, hits, self._budget, self._max_items)

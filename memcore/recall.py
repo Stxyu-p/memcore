@@ -590,6 +590,8 @@ def search(conn, project_id, agent_id, query, limit=20,
         raise MemCoreError(f'invalid search mode: {mode}; must be standard|strict|historical')
 
     user_query = str(query or '').strip()
+    if len(user_query) > 2000:
+        user_query = user_query[:1000].rstrip() + ' ' + user_query[-999:].lstrip()
     has_query = bool(user_query and any(c.isalnum() for c in user_query))
 
     def _finish(rows):

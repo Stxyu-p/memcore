@@ -4,6 +4,7 @@ import os
 import pathlib
 import tempfile
 import unittest
+import unittest.mock
 import sys
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -341,6 +342,29 @@ class NativeProviderTest(unittest.TestCase):
         self.assertIsNone(p.recall_status())
         self.assertIn('nebula trivial skip marker',
                       p.prefetch('nebula trivial skip marker'))
+
+    def test_prefetch_condenses_attached_context_and_oversized_prompt(self):
+        conn = store.open_store(self.db)
+        core.create_memory(conn, 'proj-demo', 'agent-alice',
+                           'skillproof execution invariant check', scope='project')
+        conn.close()
+        p = self.provider()
+        huge_prompt = (
+            "@file:C:\\temp\\pasted.txt\n\n"
+            "Analyze skillproof execution invariant\n\n"
+            "--- Attached Context ---\n"
+            + ("filler attachment prose token " * 1000)
+        )
+        seen_queries = []
+        orig_search = core.search
+        def spy_search(*args, **kwargs):
+            seen_queries.append(args[3] if len(args) > 3 else kwargs.get('query', ''))
+            return orig_search(*args, **kwargs)
+        with unittest.mock.patch.object(core, 'search', side_effect=spy_search):
+            out = p.prefetch(huge_prompt)
+        self.assertTrue(seen_queries)
+        self.assertLessEqual(len(seen_queries[0]), 1000)
+        self.assertIn('skillproof execution invariant check', out)
 
     def test_sync_turn_journals_before_admission(self):
         p = self.provider()

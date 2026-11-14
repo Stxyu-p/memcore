@@ -14,7 +14,7 @@ from datetime import timezone
 
 
 
-__version__ = "2.13.0"  # keep in step with pyproject; read via importlib.metadata
+__version__ = "2.13.1"  # keep in step with pyproject; read via importlib.metadata
 
 
 

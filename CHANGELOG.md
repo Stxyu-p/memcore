@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.1] - 2026-11-14
+
 ### Fixed
 - **Vault export is atomic and no longer deletes before it writes.** Wiki,
   profile, decisions and tombstones are written through
